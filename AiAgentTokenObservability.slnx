@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AiAgentTokenObservability.AppHost/AiAgentTokenObservability.AppHost.csproj" />
+    <Project Path="src/AiAgentTokenObservability.Contracts/AiAgentTokenObservability.Contracts.csproj" />
+    <Project Path="src/AiAgentTokenObservability.Dashboard.Api/AiAgentTokenObservability.Dashboard.Api.csproj" />
+    <Project Path="src/AiAgentTokenObservability.Dashboard.Web/AiAgentTokenObservability.Dashboard.Web.csproj" />
+    <Project Path="src/AiAgentTokenObservability.Ingestion.Worker/AiAgentTokenObservability.Ingestion.Worker.csproj" />
+    <Project Path="src/AiAgentTokenObservability.ServiceDefaults/AiAgentTokenObservability.ServiceDefaults.csproj" />
+    <Project Path="src/AiAgentTokenObservability.Storage/AiAgentTokenObservability.Storage.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AiAgentTokenObservability.Tests/AiAgentTokenObservability.Tests.csproj" />
+  </Folder>
+</Solution>
