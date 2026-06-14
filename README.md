@@ -1,77 +1,85 @@
 # ai-agent-token-observability
-A production-style observability platform that ingests telemetry from AI coding agents such as VS Code Copilot, Claude Code, and Codex, normalises token usage across harnesses, and identifies the files, tools, prompts, specs, MCP calls, and agent behaviours causing token burn.
 
-## Local App Platform startup
+AI Agent Token Observability is being reworked into an Azure Production MVP for AI coding-agent token burn, cost visibility, hotspot evidence, and non-punitive workflow optimization.
 
-Prerequisites:
+The current production direction supersedes the previous local-first MVP.
 
-* .NET SDK 10.0.300 or newer in the .NET 10 SDK line.
-* A running Docker-compatible container runtime for the local PostgreSQL resource.
+## Production Direction
 
-Restore and run the Aspire AppHost:
+First release:
+
+- Tenant-aware Single-Enterprise Release.
+- Codex CLI as the first production harness.
+- Manual harness telemetry setup.
+- Authenticated OTLP/HTTP ingestion through the Product Ingestion Endpoint.
+- Product services hosted on Azure Container Apps.
+- Public ingress through Azure Front Door Premium WAF.
+- Azure Front Door managed certificates for explicit product hostnames.
+- Azure Front Door Private Link to Azure Container Apps origins.
+- Azure Managed Grafana for aggregate dashboards.
+- Product Dashboard for session investigation, recommendations, content review, and governance.
+- Terraform with Azure Blob Storage remote state.
+
+Target state:
+
+- Vendor-operated multi-tenant SaaS.
+- Additional harnesses such as VS Code Copilot and Claude Code after Codex production ingestion is proven.
+- Optional future BYOC wildcard certificate workflow only if the managed-certificate decision is reopened.
+
+## Documentation Entry Points
+
+Read these before creating implementation issues or changing behavior:
+
+- [CONTEXT.md](./CONTEXT.md)
+- [Azure Production MVP PRD](./docs/prd/azure-production-mvp.md)
+- [Production Target State Spec](./docs/specs/production-target-state.md)
+- [Azure Production Architecture](./docs/architecture/azure-production-architecture.md)
+- [Codex Production Ingestion Contract](./docs/architecture/codex-production-ingestion-contract.md)
+- [Production Codebase Transition](./docs/architecture/production-codebase-transition.md)
+- [Implementation Readiness Review](./docs/architecture/implementation-readiness-review.md)
+- [Production Implementation Roadmap](./docs/planning/production-implementation-roadmap.md)
+
+Superseded references:
+
+- [Local-First MVP PRD](./docs/prd/local-first-mvp.md)
+- [ADR 0001](./docs/adr/0001-use-dotnet-aspire-and-blazor-for-local-first-mvp.md)
+- [Copilot OTel Field Mapping](./docs/architecture/copilot-otel-field-mapping.md)
+
+The superseded docs are historical or future-adapter reference material. They must not drive production MVP implementation issues.
+
+## Current Codebase State
+
+The current source tree still contains local-first scaffolding:
+
+- Aspire AppHost.
+- Blazor Local Dashboard.
+- Dashboard API.
+- Direct file import worker.
+- Local storage/import services.
+- Copilot JSONL tests.
+
+That code is planned to be deleted, replaced, retained, or quarantined according to [Production Codebase Transition](./docs/architecture/production-codebase-transition.md). Do not evolve local-only mode as a product feature.
+
+## Current Validation Commands
+
+Until the production solution skeleton replaces the local-first scaffolding, use the current .NET commands only to keep the existing tree buildable during transition:
 
 ```bash
 dotnet restore AiAgentTokenObservability.slnx
-dotnet run --project src/AiAgentTokenObservability.AppHost/AiAgentTokenObservability.AppHost.csproj
+dotnet build AiAgentTokenObservability.slnx
+dotnet test AiAgentTokenObservability.slnx --no-restore
 ```
 
-The AppHost starts the Local Store and Local Pipeline Projects together:
+These commands validate the current repository state. They are not production deployment commands.
 
-* `postgres` with database `tokenobservability`
-* `ingestion-worker`
-* `dashboard-api`
-* `dashboard-web`
+## Infrastructure Direction
 
-Use the Aspire dashboard resource links to open `dashboard-web`. The Local Dashboard calls the Dashboard API and renders the current Local App Platform status.
+Terraform is the production infrastructure path.
 
-To check the API directly, open the `dashboard-api` endpoint from the Aspire dashboard and request:
+- Remote state is Azure Blob Storage and is created manually before Terraform stages run.
+- Workspaces use `{environment}_{azureRegion}_{customerOrganizationSlug}`.
+- Azure Verified Modules are preferred where suitable.
+- Deployment-capable GitHub workflows are manual-only and guarded for a public repository.
+- Infrastructure deletion uses guarded Terraform destroy plans and retains shared resources.
 
-```text
-/status
-```
-
-## Direct File Import
-
-Run the local platform and trigger the ingestion worker with an explicit Copilot JSONL path:
-
-```bash
-DirectFileImport__SourceFilePath=.local/copilot-otel.jsonl \
-  dotnet run --project src/AiAgentTokenObservability.AppHost/AiAgentTokenObservability.AppHost.csproj
-```
-
-The import replaces any previous import with the same source file content hash. Workspace repo attribution is created when a repo path is explicitly supplied:
-
-```bash
-DirectFileImport__SourceFilePath=.local/copilot-otel.jsonl \
-DirectFileImport__RepoPath=/path/to/repo \
-DirectFileImport__RepoFriendlyName=repo \
-  dotnet run --project src/AiAgentTokenObservability.AppHost/AiAgentTokenObservability.AppHost.csproj
-```
-
-The worker also supports a standalone `--import` command, but it requires `ConnectionStrings__tokenobservability` to point at an existing PostgreSQL database because the AppHost is what normally supplies the local connection string.
-
-Imported sessions are available from the Dashboard API:
-
-```text
-/sessions
-```
-
-## Repo Context Enrichment
-
-After importing a session with `DirectFileImport__RepoPath`, run Repo Context Enrichment against the same repo path:
-
-```bash
-ConnectionStrings__tokenobservability="<postgres connection string>" \
-  dotnet run --project src/AiAgentTokenObservability.Ingestion.Worker/AiAgentTokenObservability.Ingestion.Worker.csproj -- \
-  --enrich-repo /path/to/repo
-```
-
-Repo Context Enrichment is separate from Direct File Import. It scans the explicitly supplied repo path, persists metadata-only context sources, classifies file categories and spec artifact status, and creates the Rule 2 superseded spec-bloat Token Hotspot plus Deterministic Recommendation when stale spec artifacts are present.
-
-Context sources, Token Hotspots, and recommendations are available from the Dashboard API:
-
-```text
-/insights
-```
-
-Collector ingestion, Azure deployment, and the Manual Spec Kit demo runbook verification are not implemented in this slice.
+See [Terraform Production Infrastructure](./docs/architecture/terraform-production-infrastructure.md) and [Infrastructure Deletion Workflow](./docs/operations/infrastructure-deletion.md).

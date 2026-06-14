@@ -1,381 +1,683 @@
-# Local-First MVP Data Model
+# Production Data Model
 
 ## Purpose
 
-Define the initial normalized PostgreSQL model for the Local-First MVP. This is a logical model for issue #1, not a migration file. Implementation may refine column names, but it must preserve the behavioral contracts here.
+This document defines the logical production data model for the Azure Production MVP and the Multi-Tenant SaaS Target State.
 
-## Tables
+It supersedes the previous local-first direct-file-import data model. It is not a database migration file. Implementation may refine table and column names, but the entity boundaries, tenant scoping, evidence states, content separation, and audit requirements must be preserved.
 
-### `telemetry_import`
+## Source Documents
 
-Tracks each Direct File Import run.
+- [Production Target State Spec](../specs/production-target-state.md)
+- [Azure Production MVP PRD](../prd/azure-production-mvp.md)
+- [Azure Production Architecture](./azure-production-architecture.md)
+- [Codex Production Ingestion Contract](./codex-production-ingestion-contract.md)
+- [Identity And Authorization Architecture](./identity-and-authorization.md)
+- [Content Capture And Redaction Architecture](./content-capture-and-redaction.md)
+- [Recommendation Engine Architecture](./recommendation-engine.md)
 
-| Column | Type | Nullability | Purpose | MVP |
-| --- | --- | --- | --- | --- |
-| `telemetry_import_id` | UUID | Not null, primary key | Import run id | Yes |
-| `harness` | text | Not null | Primary Harness value, initially `copilot` | Yes |
-| `source_kind` | text | Not null | `direct_file` for MVP | Yes |
-| `source_file_hash` | text | Nullable | Hash of imported file contents, not the source path | Yes |
-| `environment_name` | text | Nullable | Resource deployment environment, such as `local` | Yes |
-| `started_at_utc` | timestamptz | Not null | Import start | Yes |
-| `completed_at_utc` | timestamptz | Nullable | Import completion | Yes |
-| `import_status` | text | Not null | `succeeded`, `failed`, or `partial` | Yes |
-| `record_count` | integer | Not null | Parsed JSON object count | Yes |
-| `skipped_record_count` | integer | Not null | Empty or ignored record count | Yes |
-| `warning_count` | integer | Not null | Non-fatal import warnings | Yes |
-| `error_count` | integer | Not null | Fatal or skipped error count | Yes |
+## Core Model Rules
+
+- PostgreSQL is the Product Metadata Store.
+- Blob Storage stores only policy-approved redacted captured content.
+- Raw OTLP payloads are not the product system of record.
+- Raw content must not be stored in PostgreSQL.
+- Every tenant-owned record must include `customer_organization_id`.
+- The Azure Production MVP may have one Customer Organization, but tables must remain tenant-aware.
+- Authorization decisions use Product Role Mapping, not raw Entra group names.
+- Scoped Ingestion Credential identity is authoritative for telemetry upload and session ownership.
+- Harness-emitted identity is evidence, not access-control authority.
+- Token metrics distinguish observed, derived, estimated, unavailable, not applicable, and mixed.
+- Unavailable token counts are null, not zero.
+- LLM-inferred candidate findings are clearly labelled and cannot become confirmed findings without product validation.
+- Governance Audit Events are first-class records, not optional logs.
+
+## Data Classes
+
+| Data class | Primary store | Notes |
+| --- | --- | --- |
+| Tenant and identity metadata | PostgreSQL | Customer Organization, identity tenants, users, role mappings |
+| Harness configuration | PostgreSQL | Setup profiles, credential metadata, policy versions |
+| Normalized telemetry metadata | PostgreSQL | Envelopes, sessions, turns, invocations, tool activity |
+| Aggregate metrics | Azure Monitor workspace or managed Prometheus | Primary data source for Managed Grafana aggregate dashboards; metric contract is defined in [aggregate-metrics-contract.md](./aggregate-metrics-contract.md) |
+| Traces, logs, and events | Application Insights or Log Analytics | Redacted or metadata-only diagnostic records |
+| Captured content | Blob Storage | Redacted Captured Content Blob only |
+| Content references | PostgreSQL | Blob pointer, hash, redaction state, policy, retention, audit |
+| Recommendations and hotspots | PostgreSQL | Evidence-backed records and LLM-inferred candidates |
+| Pricing and budgets | PostgreSQL | Versioned pricing basis and non-punitive alert policy |
+| Audit | PostgreSQL, optionally exported to Log Analytics | Governance Audit Events |
+
+## Tenancy Model
+
+### `customer_organization`
+
+Represents a product tenant.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `customer_organization_id` | Yes | Product tenant identifier |
+| `slug` | Yes | Stable product slug, such as `internal` for MVP |
+| `display_name` | Yes | Customer-facing name |
+| `data_residency_region` | Yes | Primary region for customer data |
+| `isolation_tier` | Yes | `shared`, `dedicated_data`, or `dedicated_cell` |
+| `status` | Yes | `active`, `suspended`, `offboarding`, `deleted` |
+| `created_at_utc` | Yes | Creation timestamp |
+| `updated_at_utc` | Yes | Last update timestamp |
+
+MVP: one row is sufficient, but application code must still resolve tenant scope from credential, auth, or setup profile.
+
+### `customer_policy_version`
+
+Stores versioned product policies that affect ingestion, content, recommendations, retention, pricing, and dashboard visibility.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `policy_version_id` | Yes | Policy version identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `policy_kind` | Yes | `content_capture`, `retention`, `recommendation_model`, `pricing`, `visibility`, `budget` |
+| `version_label` | Yes | Human or date-based version |
+| `policy_json` | Yes | Structured policy body |
+| `status` | Yes | `draft`, `active`, `superseded`, `disabled` |
+| `effective_from_utc` | Yes | Start time |
+| `effective_to_utc` | No | End time |
+| `created_by_product_user_id` | Yes | Actor |
+| `audit_event_id` | Yes | Governance audit reference |
+
+Policy versions are referenced by ingestion envelopes, content references, recommendations, and audit records so later investigations can explain which policy was active.
+
+## Identity And Authorization
+
+### `identity_tenant`
+
+Represents an external identity authority connected to a Customer Organization.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `identity_tenant_id` | Yes | Internal identity tenant identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `provider` | Yes | `microsoft_entra` for MVP |
+| `issuer` | Yes | Token issuer |
+| `external_tenant_id` | Yes | Entra tenant ID or provider tenant ID |
+| `allowed_audiences_json` | Yes | Accepted app audiences |
+| `jwks_uri` | No | Token signing key metadata source |
+| `display_name` | Yes | Admin display label |
+| `status` | Yes | `active`, `disabled`, `pending_validation` |
+| `last_validated_at_utc` | No | Last successful validation |
+
+### `product_user`
+
+Represents a person known to the product.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `product_user_id` | Yes | Product user identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `identity_tenant_id` | Yes | Source identity tenant |
+| `external_subject_id` | Yes | Stable subject claim or provider user ID |
+| `display_label` | Yes | User-visible label |
+| `email` | No | Email or UPN when available |
+| `status` | Yes | `active`, `disabled`, `deleted` |
+| `first_seen_at_utc` | Yes | First authentication or ingestion association |
+| `last_seen_at_utc` | No | Last authentication or ingestion association |
+
+### `product_role_mapping`
+
+Maps external identity evidence to product roles and scopes.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `product_role_mapping_id` | Yes | Mapping identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `identity_tenant_id` | Yes | Source identity tenant |
+| `external_principal_type` | Yes | `app_role`, `group_object_id`, `user_subject`, `service_principal` |
+| `external_principal_id` | Yes | Provider identifier, never raw group display name |
+| `product_role` | Yes | `PlatformAdmin`, `SecurityReviewer`, `EngineeringLead`, `Developer`, `ReadOnlyViewer` |
+| `scope_kind` | Yes | `organization`, `team`, `repository`, `harness_profile`, `self`, `content_review_queue`, `pricing`, `tenant_admin` |
+| `scope_id` | No | Scoped resource ID |
+| `status` | Yes | `active`, `disabled`, `expired` |
+| `effective_from_utc` | Yes | Start time |
+| `effective_to_utc` | No | End time |
+| `audit_event_id` | Yes | Governance audit reference |
+
+## Organization Structure
+
+### `team`
+
+Represents a customer-defined team or group used for scoping dashboards and alerts.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `team_id` | Yes | Team identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `display_name` | Yes | Team name |
+| `source_kind` | Yes | `manual`, `identity_group`, `source_provider`, `imported` |
+| `external_source_id` | No | External reference |
+| `status` | Yes | `active`, `archived` |
+
+### `team_membership`
+
+Maps product users to teams.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `team_membership_id` | Yes | Membership identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `team_id` | Yes | Team |
+| `product_user_id` | Yes | Product user |
+| `source_kind` | Yes | `manual`, `role_mapping`, `identity_group`, `source_provider` |
+| `status` | Yes | `active`, `removed` |
+
+## Repository Model
+
+### `source_provider_connection`
+
+Represents a connected source control provider.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `source_provider_connection_id` | Yes | Connection identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `provider` | Yes | `github`, `azure_devops`, `gitlab`, or future provider |
+| `display_name` | Yes | Admin label |
+| `connection_status` | Yes | `active`, `needs_attention`, `disabled` |
+| `metadata_json` | No | Non-secret provider metadata |
+| `created_by_product_user_id` | Yes | Actor |
+| `audit_event_id` | Yes | Governance audit reference |
+
+### `repository`
+
+Represents an enrolled or candidate repository.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `repository_id` | Yes | Repository identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `source_provider_connection_id` | No | Provider connection |
+| `external_repository_id` | No | Provider repository ID |
+| `full_name` | No | Provider full name when known |
+| `display_name` | Yes | Dashboard display name |
+| `default_branch` | No | Default branch when known |
+| `enrollment_status` | Yes | `candidate`, `enrolled`, `excluded`, `archived` |
+| `content_scanning_status` | Yes | `disabled`, `enabled`, `suspended` |
+| `created_at_utc` | Yes | Creation timestamp |
+
+Repository records can be created from provider discovery, self-service enrollment, or unmatched telemetry candidates.
+
+### `repository_evidence`
+
+Stores repository evidence attached to telemetry or scanner findings.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `repository_evidence_id` | Yes | Evidence identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `repository_id` | No | Matched repository |
+| `source_kind` | Yes | `harness_emitted`, `setup_profile_scope`, `provider_metadata`, `scanner`, `manual_review` |
+| `evidence_value_hash` | No | Hash of sensitive local path or opaque identifier |
+| `display_value` | No | Policy-approved display value |
+| `evidence_state` | Yes | `observed`, `correlated`, `inferred`, `unavailable` |
+| `telemetry_envelope_id` | No | Source telemetry reference |
+| `created_at_utc` | Yes | Creation timestamp |
+
+Scanner findings are Correlatable Repository Evidence. They are not harness-emitted session facts.
+
+## Harness Configuration
+
+### `harness_setup_profile`
+
+Represents a manually configured harness telemetry profile.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `harness_setup_profile_id` | Yes | Setup profile identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `harness` | Yes | `codex_cli` for MVP |
+| `display_name` | Yes | Admin label |
+| `environment` | Yes | `dv`, `qa`, `pp`, `pd`, or product environment label |
+| `region` | Yes | Product data residency region |
+| `schema_version` | Yes | Production Ingestion Contract version |
+| `content_capture_policy_version_id` | Yes | Active policy reference |
+| `status` | Yes | `active`, `disabled`, `retired` |
+| `created_by_product_user_id` | Yes | Actor |
+| `audit_event_id` | Yes | Governance audit reference |
+
+### `scoped_ingestion_credential`
+
+Stores credential metadata. Secret material is not stored in plaintext.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `scoped_ingestion_credential_id` | Yes | Credential identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `harness_setup_profile_id` | Yes | Setup profile |
+| `product_user_id` | Yes | Developer identity |
+| `credential_hash` | Yes | Hash or verifier for presented credential |
+| `credential_prefix` | No | Non-secret lookup prefix |
+| `allowed_harness` | Yes | `codex_cli` for MVP |
+| `allowed_repository_id` | No | Optional repository scope |
+| `allowed_team_id` | No | Optional team scope |
+| `status` | Yes | `active`, `expired`, `revoked`, `rotated` |
+| `expires_at_utc` | Yes | Expiry |
+| `last_used_at_utc` | No | Last accepted request |
+| `audit_event_id` | Yes | Creation or latest lifecycle audit |
+
+## Ingestion And Telemetry
+
+### `telemetry_envelope`
+
+Product-normalized wrapper around accepted harness telemetry.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `telemetry_envelope_id` | Yes | Envelope identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `harness_setup_profile_id` | Yes | Setup profile |
+| `scoped_ingestion_credential_id` | Yes | Upload credential |
+| `product_user_id` | Yes | Credential-derived developer identity |
+| `harness` | Yes | `codex_cli` for MVP |
+| `schema_version` | Yes | Product ingestion schema |
+| `signal_type` | Yes | `log`, `trace`, `metric` |
+| `source_event_name` | No | Harness event name |
+| `source_event_timestamp_utc` | No | Event timestamp |
+| `received_at_utc` | Yes | Product receive timestamp |
+| `conversation_id_hash` | No | Opaque session correlation |
+| `turn_id_hash` | No | Opaque turn correlation |
+| `trace_id_hash` | No | Trace correlation |
+| `span_id_hash` | No | Span correlation |
+| `model_name` | No | Model when emitted |
+| `harness_version` | No | Codex CLI version when emitted |
+| `content_policy_decision` | Yes | `metadata_only`, `capture_candidate`, `blocked`, `redaction_required` |
+| `routing_decision_json` | Yes | Signal Routing Policy result |
+| `evidence_state` | Yes | `observed`, `derived`, `estimated`, `unavailable`, `not_applicable`, `mixed` |
+| `dedupe_key_hash` | Yes | Idempotency key |
+
+This table stores metadata only. It must not store raw prompts, raw tool outputs, raw command output, or raw file content.
+
+### `ingestion_rejection`
+
+Records rejected requests without storing content-bearing payloads.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `ingestion_rejection_id` | Yes | Rejection identifier |
+| `customer_organization_id` | No | Tenant when derivable |
+| `harness_setup_profile_id` | No | Setup profile when derivable |
+| `scoped_ingestion_credential_id` | No | Credential when derivable |
+| `reason_code` | Yes | `invalid_credential`, `out_of_scope`, `unsupported_schema`, `payload_too_large`, `rate_limited`, `malformed_otlp`, `region_mismatch` |
+| `http_status` | Yes | Returned status |
+| `received_at_utc` | Yes | Rejection timestamp |
+| `diagnostic_hash` | No | Hash of safe diagnostic metadata |
+| `audit_event_id` | No | Audit event when security-relevant |
+
+## Session Model
 
 ### `agent_session`
 
-Represents one Coding-Agent Harness session.
+Represents one harness session.
 
-| Column | Type | Nullability | Purpose | MVP |
-| --- | --- | --- | --- | --- |
-| `agent_session_id` | UUID | Not null, primary key | Internal session id | Yes |
-| `telemetry_import_id` | UUID | Not null, foreign key | Source import | Yes |
-| `harness` | text | Not null | `copilot` for MVP | Yes |
-| `harness_source` | text | Nullable | Raw OTel service identity, such as `github-copilot-vscode` | Yes |
-| `harness_version` | text | Nullable | Observed service or instrumentation version | Yes |
-| `agent_name` | text | Nullable | Observed agent name, such as GitHub Copilot Chat | Yes |
-| `provider_session_id_hash` | text | Nullable | Hashed opaque fixture session id from resource attributes or log attributes | Yes |
-| `team_hash` | text | Nullable | Hashed team/resource label | Yes |
-| `user_hash` | text | Nullable | Salted hash for Developer Identity when available | Yes |
-| `developer_display_label` | text | Nullable | Dashboard display label such as email, full name, service account, or explicit alias when supplied or clearly emitted by telemetry | Yes |
-| `display_identity_source` | text | Nullable | Source of developer display identity, such as `explicit_import`, `repo_enrichment`, or `harness_telemetry` | Yes |
-| `started_at_utc` | timestamptz | Nullable | Session start if observed | Yes |
-| `ended_at_utc` | timestamptz | Nullable | Session end if inferred or observed | P2 |
-| `token_total_type` | text | Not null | `observed`, `estimated`, `mixed`, or `unavailable` | Yes |
-| `input_tokens` | bigint | Nullable | Session input tokens when provable | Yes |
-| `output_tokens` | bigint | Nullable | Session output tokens when provable | Yes |
-| `estimated_cost_usd` | numeric | Nullable | Estimated Token Cost when matched to a Harness Pricing Basis | Yes |
-| `estimated_cost_status` | text | Not null | `estimated`, `unavailable`, or `not_applicable` | Yes |
-| `pricing_basis_id` | UUID | Nullable, foreign key | Pricing rule used for Estimated Token Cost when matched | Yes |
-| `content_captured` | boolean | Not null | False for MVP default imports | Yes |
-
-### `workspace_repo`
-
-Associates sessions with repository roots and dashboard-safe repository display identity.
-
-| Column | Type | Nullability | Purpose | MVP |
-| --- | --- | --- | --- | --- |
-| `workspace_repo_id` | UUID | Not null, primary key | Internal repo id | Yes |
-| `agent_session_id` | UUID | Nullable, foreign key | Session association when known | Yes |
-| `repo_friendly_name` | text | Nullable | User-provided display label | Yes |
-| `repo_full_name` | text | Nullable | Full repository name when supplied explicitly or clearly emitted by telemetry | Yes |
-| `repo_path_hash` | text | Nullable | Salted hash of local repo path when a path is available | Yes |
-| `repo_display_path` | text | Nullable | Dashboard display path, including absolute local path when supplied explicitly or by Repo Context Enrichment | Yes |
-| `display_identity_source` | text | Nullable | Source of repo display identity, such as `explicit_import`, `repo_enrichment`, or `harness_telemetry` | Yes |
-| `branch_name_hash` | text | Nullable | Optional branch hash | P2 |
-
-### `telemetry_record`
-
-Stores normalized metadata for each non-empty fixture record.
-
-| Column | Type | Nullability | Purpose | MVP |
-| --- | --- | --- | --- | --- |
-| `telemetry_record_id` | UUID | Not null, primary key | Internal record id | Yes |
-| `telemetry_import_id` | UUID | Not null, foreign key | Source import | Yes |
-| `agent_session_id` | UUID | Nullable, foreign key | Session association | Yes |
-| `record_index` | integer | Not null | Order in parsed stream | Yes |
-| `record_kind` | text | Not null | `log`, `metric`, or `resource` | Yes |
-| `body_redacted_summary` | text | Nullable | Event-like redacted summary derived from log body | Yes |
-| `event_name` | text | Nullable | Event name attribute | Yes |
-| `trace_id_hash` | text | Nullable | Hashed opaque trace id | Yes |
-| `span_id_hash` | text | Nullable | Hashed opaque span id | Yes |
-| `trace_flags` | integer | Nullable | OTel trace flags | Yes |
-| `observed_at_utc` | timestamptz | Nullable | Event time | Yes |
-| `received_at_utc` | timestamptz | Nullable | Observed receive/export time | Yes |
-| `instrumentation_scope_name` | text | Nullable | Scope name | Yes |
-| `instrumentation_scope_version` | text | Nullable | Scope version | Yes |
-| `attribute_count` | integer | Nullable | Observed attribute count | Yes |
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `agent_session_id` | Yes | Session identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `product_user_id` | Yes | Credential-derived developer identity |
+| `harness_setup_profile_id` | Yes | Setup profile |
+| `harness` | Yes | `codex_cli` for MVP |
+| `provider_session_id_hash` | No | Opaque Codex conversation or session ID |
+| `started_at_utc` | No | First observed event |
+| `ended_at_utc` | No | Completion or last observed event |
+| `session_status` | Yes | `active`, `completed`, `failed`, `partial`, `expired` |
+| `environment` | No | Harness environment label |
+| `sandbox_setting` | No | Emitted sandbox setting |
+| `approval_setting` | No | Emitted approval policy |
+| `repository_evidence_state` | Yes | `observed`, `correlated`, `inferred`, `unavailable`, `mixed` |
+| `content_capture_summary` | Yes | `none`, `metadata_only`, `captured`, `review_required`, `redaction_failed`, `mixed` |
+| `recommendation_status` | Yes | `not_started`, `queued`, `generated`, `failed`, `disabled` |
+| `created_at_utc` | Yes | Creation timestamp |
+| `updated_at_utc` | Yes | Last update timestamp |
 
 ### `agent_turn`
 
-Represents an agent turn observed in Copilot logs.
+Represents an observed or derived turn within a session.
 
-| Column | Type | Nullability | Purpose | MVP |
-| --- | --- | --- | --- | --- |
-| `agent_turn_id` | UUID | Not null, primary key | Internal turn id | Yes |
-| `agent_session_id` | UUID | Not null, foreign key | Parent session | Yes |
-| `telemetry_record_id` | UUID | Nullable, foreign key | Source record | Yes |
-| `turn_index` | integer | Nullable | Observed turn index | Yes |
-| `tool_call_count` | integer | Nullable | Observed tool count | Yes |
-| `success` | boolean | Nullable | Observed success where emitted | Yes |
-| `started_at_utc` | timestamptz | Nullable | Start time if available | P2 |
-| `ended_at_utc` | timestamptz | Nullable | End time if available | P2 |
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `agent_turn_id` | Yes | Turn identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `agent_session_id` | Yes | Parent session |
+| `turn_index` | No | Derived or observed order |
+| `started_at_utc` | No | Turn start |
+| `ended_at_utc` | No | Turn end |
+| `status` | Yes | `observed`, `derived`, `partial`, `failed` |
+| `source_telemetry_envelope_id` | No | Source envelope |
 
 ### `model_invocation`
 
-Represents one GenAI model invocation.
+Represents a model request or response event.
 
-| Column | Type | Nullability | Purpose | MVP |
-| --- | --- | --- | --- | --- |
-| `model_invocation_id` | UUID | Not null, primary key | Internal invocation id | Yes |
-| `agent_session_id` | UUID | Not null, foreign key | Parent session | Yes |
-| `agent_turn_id` | UUID | Nullable, foreign key | Parent turn if correlated | Yes |
-| `telemetry_record_id` | UUID | Not null, foreign key | Source log record | Yes |
-| `operation_name` | text | Nullable | `chat` in fixture | Yes |
-| `provider_name` | text | Nullable | Provider for this invocation when emitted by a log or proven by deterministic correlation; NULL for the current fixture logs | Yes |
-| `request_model` | text | Nullable | Requested model | Yes |
-| `response_model` | text | Nullable | Response model | Yes |
-| `provider_response_id_hash` | text | Nullable | Hashed opaque response id | Yes |
-| `finish_reasons_json` | jsonb | Nullable | Response finish reasons | Yes |
-| `request_max_tokens` | integer | Nullable | Request max tokens setting | Yes |
-| `request_temperature` | numeric | Nullable | Request temperature setting | Yes |
-| `input_tokens` | bigint | Nullable | Observed input tokens | Yes |
-| `output_tokens` | bigint | Nullable | Observed output tokens | Yes |
-| `token_total_type` | text | Not null | `observed`, `estimated`, `mixed`, or `unavailable` | Yes |
-| `estimated_cost_usd` | numeric | Nullable | Estimated Token Cost when matched to a Harness Pricing Basis | Yes |
-| `estimated_cost_status` | text | Not null | `estimated`, `unavailable`, or `not_applicable` | Yes |
-| `pricing_basis_id` | UUID | Nullable, foreign key | Pricing rule used for Estimated Token Cost when matched | Yes |
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `model_invocation_id` | Yes | Invocation identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `agent_session_id` | Yes | Parent session |
+| `agent_turn_id` | No | Parent turn |
+| `source_telemetry_envelope_id` | Yes | Source envelope |
+| `provider_name` | No | `openai`, `anthropic`, or provider when known |
+| `model_name` | No | Model name when emitted |
+| `operation_name` | No | Operation when emitted |
+| `duration_ms` | No | Observed duration |
+| `status` | Yes | `succeeded`, `failed`, `partial`, `unknown` |
+| `error_code` | No | Error when emitted |
+| `cache_evidence_state` | Yes | `observed`, `correlated`, `llm_inferred`, `unavailable`, `not_applicable` |
 
-### `token_metric`
+### `tool_activity`
 
-Stores explicit status for token metrics so missing values are not confused with zero.
+Represents tool decisions and tool results.
 
-| Column | Type | Nullability | Purpose | MVP |
-| --- | --- | --- | --- | --- |
-| `token_metric_id` | UUID | Not null, primary key | Internal metric id | Yes |
-| `model_invocation_id` | UUID | Nullable, foreign key | Invocation metric | Yes |
-| `agent_session_id` | UUID | Nullable, foreign key | Session aggregate metric | Yes |
-| `metric_name` | text | Not null | `input_tokens`, `output_tokens`, or `total_tokens` | Yes |
-| `metric_status` | text | Not null | `observed`, `estimated`, `unavailable`, or `not_applicable` | Yes |
-| `metric_confidence` | text | Not null | `observed`, `estimated`, `inferred`, or `unavailable` | Yes |
-| `value` | bigint | Nullable | Token count; NULL when unavailable | Yes |
-| `source` | text | Not null | `log_attribute`, `metric_histogram`, `estimator`, or `missing_log_attribute` | Yes |
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `tool_activity_id` | Yes | Tool activity identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `agent_session_id` | Yes | Parent session |
+| `agent_turn_id` | No | Parent turn |
+| `source_telemetry_envelope_id` | Yes | Source envelope |
+| `tool_name` | No | Tool name when emitted |
+| `decision` | No | `approved`, `denied`, `auto_allowed`, `config_allowed`, `unknown` |
+| `duration_ms` | No | Observed duration |
+| `success` | No | Observed success |
+| `content_reference_id` | No | Redacted content evidence when allowed |
 
-### `harness_pricing_basis`
+## Token And Cost
 
-Stores local, versioned rules for Estimated Token Cost. It is dashboard guidance and not a provider invoice.
+### `token_observation`
 
-| Column | Type | Nullability | Purpose | MVP |
-| --- | --- | --- | --- | --- |
-| `pricing_basis_id` | UUID | Not null, primary key | Internal pricing rule id | Yes |
-| `harness` | text | Not null | Coding-Agent Harness, such as `copilot` | Yes |
-| `provider_name` | text | Nullable | Provider or billing provider when known | Yes |
-| `model_name` | text | Nullable | Model name matched from telemetry | Yes |
-| `billing_route` | text | Nullable | Billing route, such as Copilot AI credits or provider API rate | Yes |
-| `input_price_per_million_tokens_usd` | numeric | Nullable | Input token rate | Yes |
-| `output_price_per_million_tokens_usd` | numeric | Nullable | Output token rate | Yes |
-| `currency` | text | Not null | Currency for the rate, initially `USD` | Yes |
-| `pricing_version` | text | Not null | Local version label for deterministic estimates | Yes |
-| `effective_from_utc` | timestamptz | Nullable | Start of pricing validity when known | Yes |
-| `source_label` | text | Nullable | Human-readable pricing source label | Yes |
+Stores token values without confusing missing values with zero.
 
-### `tool_call`
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `token_observation_id` | Yes | Token observation identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `agent_session_id` | Yes | Session |
+| `model_invocation_id` | No | Invocation |
+| `metric_name` | Yes | `input_tokens`, `output_tokens`, `cached_input_tokens`, `reasoning_output_tokens`, `total_tokens` |
+| `value` | No | Token count, null when unavailable |
+| `metric_status` | Yes | `observed`, `derived`, `estimated`, `unavailable`, `not_applicable`, `mixed` |
+| `metric_confidence` | Yes | `observed`, `deterministic`, `estimated`, `llm_inferred`, `unavailable` |
+| `source_kind` | Yes | `codex_event`, `otel_metric`, `derived_summary`, `estimator`, `missing` |
+| `source_telemetry_envelope_id` | No | Source envelope |
 
-Represents an observed tool call.
+### `cost_estimate`
 
-| Column | Type | Nullability | Purpose | MVP |
-| --- | --- | --- | --- | --- |
-| `tool_call_id` | UUID | Not null, primary key | Internal tool call id | Yes |
-| `agent_session_id` | UUID | Not null, foreign key | Parent session | Yes |
-| `agent_turn_id` | UUID | Nullable, foreign key | Parent turn if correlated | Yes |
-| `telemetry_record_id` | UUID | Nullable, foreign key | Source record | Yes |
-| `tool_name` | text | Nullable | Tool name only | Yes |
-| `duration_ms` | bigint | Nullable | Observed tool duration | Yes |
-| `success` | boolean | Nullable | Observed success flag | Yes |
-| `arguments_captured` | boolean | Not null | False by default | Yes |
-| `result_captured` | boolean | Not null | False by default | Yes |
+Stores estimated cost derived from token observations and pricing basis.
 
-### `metric_observation`
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `cost_estimate_id` | Yes | Cost estimate identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `agent_session_id` | Yes | Session |
+| `model_invocation_id` | No | Invocation |
+| `pricing_basis_id` | Yes | Pricing basis used |
+| `pricing_version` | Yes | Pricing version |
+| `currency` | Yes | Currency |
+| `estimated_cost` | No | Null when unavailable |
+| `cost_status` | Yes | `estimated`, `unavailable`, `not_applicable`, `mixed` |
+| `source_kind` | Yes | `derived_from_observed_tokens`, `derived_from_estimated_tokens`, `manual_override`, `unavailable` |
 
-Stores aggregate OTel metrics without treating them as per-turn facts.
+Estimated cost is product guidance, not a provider invoice.
 
-| Column | Type | Nullability | Purpose | MVP |
-| --- | --- | --- | --- | --- |
-| `metric_observation_id` | UUID | Not null, primary key | Internal metric observation id | Yes |
-| `telemetry_import_id` | UUID | Not null, foreign key | Source import | Yes |
-| `agent_session_id` | UUID | Nullable, foreign key | Session association | Yes |
-| `scope_name` | text | Nullable | OTel instrumentation scope name | Yes |
-| `scope_version` | text | Nullable | OTel instrumentation scope version | Yes |
-| `metric_name` | text | Not null | Descriptor name | Yes |
-| `metric_type` | text | Not null | Descriptor type | Yes |
-| `value_type` | integer | Nullable | Descriptor value type | Yes |
-| `unit` | text | Nullable | Descriptor unit | Yes |
-| `description` | text | Nullable | Descriptor description | Yes |
-| `aggregation_temporality` | integer | Nullable | OTel temporality enum value | Yes |
-| `is_monotonic` | boolean | Nullable | Counter monotonic flag | Yes |
-| `data_point_type` | integer | Nullable | Data point type enum value | Yes |
-| `start_time_utc` | timestamptz | Nullable | Data point start | Yes |
-| `end_time_utc` | timestamptz | Nullable | Data point end | Yes |
-| `attributes_json` | jsonb | Nullable | Metric dimensions | Yes |
-| `value_json` | jsonb | Nullable | Scalar or histogram value | Yes |
-| `bucket_boundaries_json` | jsonb | Nullable | Histogram bucket boundaries | Yes |
+## Content Capture
 
-### `context_source`
+### `content_reference`
 
-Represents Repo Context Enrichment output.
+Metadata reference to captured content or a blocked content candidate.
 
-| Column | Type | Nullability | Purpose | MVP |
-| --- | --- | --- | --- | --- |
-| `context_source_id` | UUID | Not null, primary key | Internal context source id | Yes |
-| `workspace_repo_id` | UUID | Not null, foreign key | Repository scanned | Yes |
-| `source_type` | text | Not null | `file`, `folder`, `spec`, `instruction`, or `generated_artifact` | Yes |
-| `path_hash` | text | Not null | Salted path hash | Yes |
-| `display_path` | text | Nullable | Repo-relative or absolute local dashboard display path when supplied by Repo Context Enrichment or explicit input | Yes |
-| `display_path_scope` | text | Nullable | `repo_relative`, `absolute_local`, or `unknown` | Yes |
-| `file_category` | text | Not null | File Context Category | Yes |
-| `spec_artifact_status` | text | Nullable | `active`, `bloat`, or `neutral` | Yes |
-| `eligible_for_inferred_hotspot` | boolean | Not null | Generated artifact policy result | Yes |
-| `size_bytes` | bigint | Nullable | File size | Yes |
-| `line_count` | integer | Nullable | File line count | Yes |
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `content_reference_id` | Yes | Content reference identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `agent_session_id` | No | Session |
+| `telemetry_envelope_id` | Yes | Source envelope |
+| `content_class` | Yes | `prompt_snippet`, `tool_input_excerpt`, `tool_output_excerpt`, `model_response_excerpt`, `command_summary`, `file_content_excerpt`, `metadata_only` |
+| `capture_state` | Yes | `not_allowed`, `metadata_only`, `captured`, `redaction_failed`, `review_required`, `discarded`, `approved_excerpt` |
+| `redaction_status` | Yes | `not_required`, `passed`, `failed`, `review_required`, `manually_approved` |
+| `content_hash` | No | Hash when allowed |
+| `blob_uri` | No | Blob pointer only when redacted content is stored |
+| `blob_version` | No | Blob version or ETag |
+| `policy_version_id` | Yes | Content policy version |
+| `retention_class` | Yes | Retention classification |
+| `expires_at_utc` | No | Deletion deadline |
+| `audit_event_id` | Yes | Content decision audit |
 
-### `hotspot`
+`blob_uri` must be null unless content has passed redaction or manual approval.
 
-Represents a Token Hotspot.
+### `redaction_review`
 
-| Column | Type | Nullability | Purpose | MVP |
-| --- | --- | --- | --- | --- |
-| `hotspot_id` | UUID | Not null, primary key | Internal hotspot id | Yes |
-| `agent_session_id` | UUID | Nullable, foreign key | Session scoped hotspot | Yes |
-| `workspace_repo_id` | UUID | Nullable, foreign key | Repo scoped hotspot | Yes |
-| `source_type` | text | Not null | `spec`, `file`, `folder`, `tool`, `model`, `harness`, or `workspace` | Yes |
-| `source_ref` | text | Nullable | Human-readable source reference, which may include repo-relative paths or absolute local Repo Display Paths when available | Yes |
-| `attribution_type` | text | Not null | `direct`, `correlated`, or `inferred` | Yes |
-| `confidence` | text | Not null | `high`, `medium`, or `low` | Yes |
-| `suspected_cause` | text | Not null | Explanation of Token Burn | Yes |
-| `evidence_refs_json` | jsonb | Not null | References to telemetry/context rows | Yes |
-| `token_burn_score` | numeric | Nullable | Ranking score independent of dollar cost | Yes |
+Tracks privileged review decisions.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `redaction_review_id` | Yes | Review identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `content_reference_id` | Yes | Content reference |
+| `reviewer_product_user_id` | Yes | SecurityReviewer |
+| `decision` | Yes | `retry`, `discard`, `approve_excerpt`, `reject_excerpt` |
+| `decision_reason` | No | Reviewer note |
+| `decided_at_utc` | Yes | Decision timestamp |
+| `audit_event_id` | Yes | Governance audit reference |
+
+## Hotspots And Recommendations
+
+### `token_hotspot`
+
+Represents a confirmed or candidate token hotspot.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `token_hotspot_id` | Yes | Hotspot identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `agent_session_id` | No | Session scope |
+| `repository_id` | No | Repository scope |
+| `hotspot_type` | Yes | `prompt_cache_breakage`, `large_context`, `tool_loop`, `model_retry`, `repo_context_bloat`, `generated_artifact_bloat`, `expensive_model_choice`, `error_rework`, `unknown` |
+| `finding_state` | Yes | `confirmed`, `candidate_llm_inferred`, `candidate_correlated`, `rejected`, `superseded` |
+| `attribution_type` | Yes | `direct`, `correlated`, `llm_inferred`, `unavailable` |
+| `confidence` | Yes | `high`, `medium`, `low`, `unavailable` |
+| `token_burn_score` | No | Relative burn score |
+| `estimated_cost_impact` | No | Estimated cost impact |
+| `evidence_refs_json` | Yes | Evidence references |
+| `created_at_utc` | Yes | Creation timestamp |
+
+LLM-inferred candidate hotspots must not be displayed as confirmed findings.
 
 ### `recommendation`
 
-Represents a Deterministic Recommendation.
+Represents optimization coaching generated from evidence.
 
-| Column | Type | Nullability | Purpose | MVP |
-| --- | --- | --- | --- | --- |
-| `recommendation_id` | UUID | Not null, primary key | Internal recommendation id | Yes |
-| `hotspot_id` | UUID | Not null, foreign key | Parent hotspot | Yes |
-| `recommendation_type` | text | Not null | `deterministic` for MVP | Yes |
-| `rule_id` | text | Not null | Rule identifier, such as `rule-2-superseded-spec-bloat` | Yes |
-| `trigger_condition` | text | Not null | What caused the rule to fire | Yes |
-| `recommended_action` | text | Not null | Action to take | Yes |
-| `expected_benefit` | text | Not null | Benefit statement | Yes |
-| `confidence` | text | Not null | Recommendation confidence | Yes |
-| `evidence_refs_json` | jsonb | Not null | References to supporting rows | Yes |
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `recommendation_id` | Yes | Recommendation identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `token_hotspot_id` | No | Parent hotspot |
+| `agent_session_id` | No | Session scope |
+| `recommendation_kind` | Yes | `deterministic`, `llm_assisted`, `manual` |
+| `recommendation_state` | Yes | `candidate`, `validated`, `rejected`, `superseded` |
+| `visibility_scope` | Yes | `self`, `team_scoped`, `security_review`, `admin`, `aggregate_only` |
+| `model_policy_version_id` | No | Recommendation Model Policy version |
+| `prompt_template_version` | No | Prompt template version |
+| `evidence_packet_hash` | Yes | Evidence packet hash |
+| `summary` | Yes | User-facing recommendation |
+| `expected_benefit` | No | Expected improvement |
+| `created_at_utc` | Yes | Creation timestamp |
+| `audit_event_id` | Yes | Generation audit |
 
-## Enum Values
+### `recommendation_evidence`
 
-| Enum | MVP values |
+Links recommendations to bounded evidence.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `recommendation_evidence_id` | Yes | Evidence link identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `recommendation_id` | Yes | Recommendation |
+| `evidence_kind` | Yes | `telemetry_envelope`, `token_observation`, `content_reference`, `repository_evidence`, `audit_event`, `pricing_basis` |
+| `evidence_id` | Yes | Referenced record |
+| `evidence_state` | Yes | `observed`, `derived`, `correlated`, `llm_inferred`, `unavailable` |
+
+## Pricing And Budgets
+
+### `pricing_basis`
+
+Versioned pricing basis for estimated cost.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `pricing_basis_id` | Yes | Pricing basis identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `harness` | Yes | Harness |
+| `provider_name` | No | Provider |
+| `model_name` | No | Model |
+| `billing_route` | No | Billing route |
+| `currency` | Yes | Currency |
+| `input_price_per_million_tokens` | No | Input token rate |
+| `output_price_per_million_tokens` | No | Output token rate |
+| `cached_input_price_per_million_tokens` | No | Cached input token rate |
+| `pricing_version` | Yes | Active version |
+| `source_kind` | Yes | `automated_seed`, `admin_override`, `provider_docs`, `enterprise_contract` |
+| `review_state` | Yes | `candidate`, `approved`, `rejected`, `superseded` |
+| `effective_from_utc` | Yes | Start time |
+| `effective_to_utc` | No | End time |
+| `audit_event_id` | Yes | Review audit |
+
+Automated Pricing Seed creates candidate records. It must not silently change active cost estimates without Pricing Update Review.
+
+### `budget_policy`
+
+Defines non-punitive budget alerts.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `budget_policy_id` | Yes | Budget policy identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `scope_kind` | Yes | `organization`, `team`, `repository`, `workflow`, `harness`, `model` |
+| `scope_id` | No | Scoped resource |
+| `metric_kind` | Yes | `tokens`, `estimated_cost`, `cache_miss_rate`, `error_rework` |
+| `threshold_json` | Yes | Threshold definition |
+| `status` | Yes | `active`, `disabled` |
+| `audit_event_id` | Yes | Governance audit reference |
+
+No budget policy can rank individual developers by waste or wrongness.
+
+## Audit And Lifecycle
+
+### `audit_event`
+
+Represents a Governance Audit Event.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `audit_event_id` | Yes | Audit event identifier |
+| `customer_organization_id` | No | Tenant when applicable |
+| `actor_product_user_id` | No | User actor |
+| `actor_service_identity` | No | Service actor |
+| `action` | Yes | Action name |
+| `target_kind` | Yes | Target entity kind |
+| `target_id` | No | Target record |
+| `decision` | Yes | `allowed`, `denied`, `created`, `updated`, `deleted`, `generated`, `rejected` |
+| `effective_role` | No | Role used |
+| `correlation_id` | Yes | Request or job correlation |
+| `metadata_json` | No | Non-sensitive audit metadata |
+| `created_at_utc` | Yes | Audit timestamp |
+
+### `data_lifecycle_request`
+
+Tracks export, deletion, legal hold, and offboarding workflows.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `data_lifecycle_request_id` | Yes | Request identifier |
+| `customer_organization_id` | Yes | Tenant owner |
+| `request_type` | Yes | `export`, `delete`, `legal_hold`, `offboard` |
+| `scope_kind` | Yes | `organization`, `user`, `repository`, `session`, `content` |
+| `scope_id` | No | Scoped record |
+| `status` | Yes | `requested`, `approved`, `running`, `completed`, `failed`, `cancelled` |
+| `requested_by_product_user_id` | Yes | Requester |
+| `approved_by_product_user_id` | No | Approver |
+| `audit_event_id` | Yes | Governance audit reference |
+
+## Indexing And Constraints
+
+Required constraints:
+
+- Tenant-owned tables include `customer_organization_id`.
+- Foreign keys include tenant-compatible relationships in application logic and migrations.
+- External identity references are unique per `customer_organization_id`, `identity_tenant_id`, and `external_subject_id`.
+- Active role mappings are unique by principal, role, and scope.
+- Active ingestion credentials are unique by credential hash.
+- `telemetry_envelope.dedupe_key_hash` is unique per Customer Organization.
+- Token observations allow null values for unavailable metrics.
+- Content references cannot have `blob_uri` when redaction status is failed, review required, or not allowed.
+
+Recommended indexes:
+
+- `(customer_organization_id, status)` on tenant configuration tables.
+- `(customer_organization_id, product_user_id, started_at_utc desc)` on `agent_session`.
+- `(customer_organization_id, repository_id, started_at_utc desc)` where repository joins are materialized.
+- `(customer_organization_id, agent_session_id)` on session child tables.
+- `(customer_organization_id, source_event_timestamp_utc)` on `telemetry_envelope`.
+- `(customer_organization_id, dedupe_key_hash)` unique on `telemetry_envelope`.
+- `(customer_organization_id, content_reference_id, capture_state)` for review queues.
+- `(customer_organization_id, created_at_utc desc)` on `audit_event`.
+
+## MVP Boundary
+
+The Azure Production MVP needs these tables first:
+
+- `customer_organization`.
+- `identity_tenant`.
+- `product_user`.
+- `product_role_mapping`.
+- `harness_setup_profile`.
+- `scoped_ingestion_credential`.
+- `telemetry_envelope`.
+- `ingestion_rejection`.
+- `agent_session`.
+- `agent_turn`.
+- `model_invocation`.
+- `tool_activity`.
+- `token_observation`.
+- `cost_estimate`.
+- `content_reference`.
+- `redaction_review`.
+- `token_hotspot`.
+- `recommendation`.
+- `recommendation_evidence`.
+- `pricing_basis`.
+- `budget_policy`.
+- `audit_event`.
+
+Target-state tables such as `source_provider_connection`, full `repository` discovery, `repository_evidence`, and `data_lifecycle_request` can be introduced in slices, but their relationships are defined here so MVP schema decisions do not block SaaS tenancy later.
+
+## Migration From Current Implementation
+
+The current codebase still contains local-first concepts such as direct file import, Copilot fixture parsing, and local workspace repository enrichment. Those are implementation artifacts of the superseded MVP.
+
+Production implementation should introduce new tables rather than trying to mutate local-only imports into tenant-aware product ingestion records in place.
+
+Mapping guidance:
+
+| Superseded local-first concept | Production replacement |
 | --- | --- |
-| `harness` | `copilot` |
-| `source_kind` | `direct_file` |
-| `record_kind` | `log`, `metric`, `resource` |
-| `metric_status` | `observed`, `estimated`, `unavailable`, `not_applicable` |
-| `metric_confidence` | `observed`, `estimated`, `inferred`, `unavailable` |
-| `token_metric.source` | `log_attribute`, `metric_histogram`, `estimator`, `missing_log_attribute` |
-| `token_total_type` | `observed`, `estimated`, `mixed`, `unavailable` |
-| `estimated_cost_status` | `estimated`, `unavailable`, `not_applicable` |
-| `attribution_type` | `direct`, `correlated`, `inferred` |
-| `display_identity_source` | `explicit_import`, `repo_enrichment`, `harness_telemetry` |
-| `display_path_scope` | `repo_relative`, `absolute_local`, `unknown` |
-| `file_category` | `source`, `generated`, `lockfile`, `vendor`, `binary`, `build_artifact`, `spec`, `instruction`, `unknown` |
-| `spec_artifact_status` | `active`, `bloat`, `neutral` |
-| `recommendation_type` | `deterministic` |
-| `import_status` | `succeeded`, `failed`, `partial` |
+| `telemetry_import` | `telemetry_envelope` plus `ingestion_rejection` |
+| `agent_session` without tenant | Tenant-scoped `agent_session` |
+| `workspace_repo` | `repository` plus `repository_evidence` |
+| `token_metric` | `token_observation` |
+| `harness_pricing_basis` | Tenant-scoped `pricing_basis` |
+| `context_source` | `repository_evidence` and later content-scanning records |
+| `hotspot` | `token_hotspot` |
+| `recommendation` deterministic only | `recommendation` with deterministic and LLM-assisted states |
 
-## Indexes
+## Verified Platform Facts
 
-MVP query indexes:
-
-* `agent_session(harness, started_at_utc)`
-* `agent_session(user_hash)`
-* `agent_session(developer_display_label)`
-* `agent_session(token_total_type)`
-* `agent_session(estimated_cost_status)`
-* `agent_turn(agent_session_id, turn_index)`
-* `model_invocation(agent_session_id)`
-* `model_invocation(request_model)`
-* `model_invocation(response_model)`
-* `tool_call(agent_session_id, tool_name)`
-* `workspace_repo(repo_path_hash)`
-* `workspace_repo(repo_full_name)`
-* `context_source(workspace_repo_id, file_category)`
-* `context_source(workspace_repo_id, spec_artifact_status)`
-* `hotspot(agent_session_id, token_burn_score)`
-* `hotspot(workspace_repo_id, attribution_type)`
-* `recommendation(hotspot_id)`
-* `metric_observation(agent_session_id, metric_name)`
-* `harness_pricing_basis(harness, model_name, billing_route, pricing_version)`
-
-## Dashboard Overview Read Model
-
-`/dashboard/overview` is a read model produced from the normalized tables, not an MVP persistence table. The API owns Dashboard Range filtering, aggregation, dense daily buckets, 30-day Moving Burn Average, Metric Quality Marker propagation, filter option lists, freshness summary, hotspot ranking, and Recommendation Rationale.
-
-Request parameters:
-
-* `range`: Dashboard Range preset, defaulting to `90d`.
-* `repository`: optional Workspace Repo filter by stable id or display option value.
-* `harness`: optional Coding-Agent Harness filter.
-* `model`: optional requested or response model filter.
-* `metric_status`: optional Metric Status filter.
-* `timezone`: optional Dashboard Timezone for date bucketing; timestamps remain stored in UTC.
-
-Response components:
-
-* Dashboard Freshness Summary: latest telemetry import time, latest Repo Context Enrichment time when available, and Harness Pricing Basis version or date.
-* Filter options: repository, Coding-Agent Harness, model, and Metric Status options that match the current data set.
-* Typed Burn Total: raw token values plus Token Total Type and Metric Quality Markers.
-* Estimated Token Cost: raw dollar value when matched to Harness Pricing Basis, or Unavailable Token Cost when unmatched.
-* Token Burn Timeline: one bucket for every day in the selected Dashboard Range, including zero-burn days.
-* Moving Burn Average: server-computed 30-day Moving Burn Average.
-* Model Cost Mix and compact tool behavior summary.
-* Hotspot Driver View rows with Token Hotspots, attribution, confidence, exact values, and Dashboard Fragment Targets.
-* Recommendation Action Section rows with Recommendation Rationale, expected benefit, confidence, and evidence links.
-* SessionsEvidenceTable rows with session, developer label, repo display, token split, and evidence references.
-
-The read model returns raw values plus semantic fields. Blazor owns display strings, local timezone presentation, compact token labels, badges, CSS states, and component layout.
-
-## Fixture-to-Table Mapping
-
-| Fixture record | Normalized rows |
-| --- | --- |
-| Empty object `{}` | No domain rows; increment `telemetry_import.skipped_record_count` |
-| Resource-only object | `telemetry_import`, optional `agent_session` enrichment |
-| Direct File Import source file | `telemetry_import.source_file_hash` from file contents only; do not hash or store the raw source file path by default |
-| Direct File Import repo option | Optional `workspace_repo` when the import command receives explicit repo root/path, full repo name, or repo display metadata. Repo path is salted and hashed into `repo_path_hash` when present. The parser must not invent repo association from telemetry or source file path |
-| Direct File Import developer option | `agent_session.user_hash`, `agent_session.developer_display_label`, and `agent_session.display_identity_source` when developer identity is supplied explicitly or clearly emitted by telemetry |
-| `copilot_chat.session.start` log | `telemetry_record`, `agent_session` |
-| `copilot_chat.agent.turn` log | `telemetry_record`, `agent_turn`; do not create token metrics from turn logs unless future telemetry emits turn-level token attributes with an explicit model boundary |
-| `copilot_chat.tool.call` log | `telemetry_record`, `tool_call` |
-| `gen_ai.client.inference.operation.details` log | `telemetry_record`, `model_invocation`, `token_metric` rows |
-| `gen_ai.client.token.usage` metric | `telemetry_record`, `metric_observation`; optional aggregate `token_metric` only when implementation can prove session association |
-| Other `copilot_chat.*` metrics | `telemetry_record`, `metric_observation` |
-
-## Privacy Defaults
-
-Default Local-First MVP imports are metadata-only for content capture. The MVP has one privacy mode.
-
-* Full prompt text is not persisted.
-* Full response text is not persisted.
-* Full code file content is not persisted.
-* Full tool arguments and results are not persisted.
-* Developer Display Labels may be persisted when supplied explicitly, produced by Repo Context Enrichment, or clearly emitted by telemetry.
-* Full repo names and Repo Display Paths may be persisted when supplied explicitly, produced by Repo Context Enrichment, or clearly emitted by telemetry.
-* `telemetry_import.source_file_hash` hashes file contents only. If a future feature needs source path matching, it must use a separate salted path hash field.
-* The MVP must not silently scrape Git config, OS user accounts, shell environment, or unrelated local files to populate display identity.
-* `context_source.display_path` may store repo-relative paths for main-dashboard context and absolute local paths for expanded evidence detail when available.
-* `hotspot.source_ref` may contain repo-relative paths or absolute local Repo Display Paths when available. It must not contain provider response ids, session ids, trace ids, span ids, prompt text, response text, tool arguments, or tool results.
-* Raw team labels are hashed before storage.
-* Provider response ids, trace ids, span ids, resource session ids, and log session ids are hashed before storage.
-
-## Migration Strategy
-
-Use normal PostgreSQL migrations once implementation starts. The first migration should create all MVP tables and enum-compatible check constraints or lookup tables. Later migrations should add:
-
-* OpenTelemetry Collector ingestion fields.
-* Claude Code and Codex adapter-specific fields.
-* Content Capture Mode columns.
-* Pricing Refresh Workflow metadata.
-* Work Family rollup tables.
-* Identity Mapping tables if later phases need cross-system identity merge behavior beyond Developer Display Labels and User Hash.
-* Azure Production Path operational metadata.
-
-## Implementation Gate
-
-Issue #1 satisfies the PRD implementation-start gate when:
-
-* `docs/architecture/copilot-otel-field-mapping.md` exists.
-* This data model document exists.
-* Direct File Import implementation starts from the observed fixture fields and nullable metric semantics documented here.
-* Missing token metrics are explicitly represented as `NULL` plus status, never zero.
+- Azure Database for PostgreSQL Flexible Server supports private access through Azure virtual network integration and denies public endpoint access in that model: https://learn.microsoft.com/en-us/azure/postgresql/overview#automatic-backups
+- Azure Database for PostgreSQL Flexible Server automatically performs backups and supports point-in-time restore within the configured retention period: https://learn.microsoft.com/en-us/azure/postgresql/backup-restore/concepts-business-continuity
+- Azure Database for PostgreSQL Flexible Server supports zone-redundant high availability in supported regions and tiers: https://learn.microsoft.com/en-us/azure/postgresql/high-availability/concepts-high-availability
+- Azure Storage encrypts data at rest: https://learn.microsoft.com/en-us/azure/storage/common/storage-service-encryption
+- Blob lifecycle management supports rule-based transition and deletion: https://learn.microsoft.com/en-us/azure/storage/blobs/lifecycle-management-overview

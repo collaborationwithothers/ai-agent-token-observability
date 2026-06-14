@@ -32,23 +32,38 @@ If I upload a file, make sure you index it even if it has been indexed previousl
 
 ## Project Shape
 
-This is a .NET 10 local-first observability platform for AI coding-agent token burn. The Local-First MVP uses .NET Aspire, a Blazor Local Dashboard, an ASP.NET Core Dashboard API, an ingestion worker, and local PostgreSQL.
+This repository is being reworked into an Azure Production MVP for AI coding-agent token observability.
 
-Primary harness: VS Code Copilot.
+The previous local-first MVP is superseded. The existing .NET Aspire AppHost, Blazor Local Dashboard, direct file import worker, local storage/import model, and Copilot JSONL tests are transition scaffolding only.
 
-Secondary or future harnesses: Claude Code and Codex.
+First production harness: Codex CLI.
 
-Do not implement secondary harnesses, OpenTelemetry Collector ingestion, Azure deployment, Content Capture Mode, Identity Mapping, or LLM-Assisted Recommendations unless explicitly requested.
+Target-state harnesses: VS Code Copilot, Claude Code, and Codex.
+
+Do not reintroduce supported local-only mode. Do not implement VS Code Copilot or Claude Code adapters before Codex production ingestion is implemented. Do not treat direct file import, Aspire AppHost, or Blazor Local Dashboard as production architecture.
 
 ## Source Of Truth
 
 Read these before changing behavior:
 
 - `CONTEXT.md` for domain language.
-- `docs/prd/local-first-mvp.md` for MVP scope.
-- `docs/architecture/copilot-otel-field-mapping.md` before changing parser behavior.
+- `docs/prd/azure-production-mvp.md` for first-release scope.
+- `docs/specs/production-target-state.md` for final production direction.
+- `docs/architecture/azure-production-architecture.md` for top-level production architecture.
+- `docs/architecture/codex-production-ingestion-contract.md` before changing production ingestion behavior.
 - `docs/architecture/data-model.md` before changing persistence or contracts.
-- `docs/adr/0001-use-dotnet-aspire-and-blazor-for-local-first-mvp.md` for stack decisions.
+- `docs/architecture/production-codebase-transition.md` before deleting, replacing, retaining, or quarantining current local-first code.
+- `docs/architecture/implementation-readiness-review.md` before creating GitHub implementation issues.
+- `docs/adr/0002-replace-local-first-with-azure-production-saas.md` for the production pivot decision.
+- `docs/adr/0003-use-react-spa-for-production-dashboard.md` for the production dashboard stack decision.
+
+Superseded or historical references:
+
+- `docs/prd/local-first-mvp.md`.
+- `docs/adr/0001-use-dotnet-aspire-and-blazor-for-local-first-mvp.md`.
+- `docs/architecture/copilot-otel-field-mapping.md`.
+
+Use superseded references only as historical context or future-adapter evidence. They must not drive Azure Production MVP implementation.
 
 ## Build And Test
 
@@ -63,17 +78,11 @@ Use:
 - `dotnet build AiAgentTokenObservability.slnx`
 - `dotnet test AiAgentTokenObservability.slnx --no-restore`
 
-Run the local platform with:
-
-- `dotnet run --project src/AiAgentTokenObservability.AppHost/AiAgentTokenObservability.AppHost.csproj`
-
-For direct file import, set `DirectFileImport__SourceFilePath`.
-
-For repo attribution, optionally set `DirectFileImport__RepoPath` and `DirectFileImport__RepoFriendlyName`.
+These commands validate the current transition scaffolding until the production solution skeleton replaces it. They are not production deployment commands.
 
 ## Implementation Rules
 
-Preserve metadata-only capture by default. The MVP has one privacy mode: real developer display labels, full repo names, and repo display paths are allowed when supplied by explicit import or enrichment input or clearly emitted telemetry. Do not persist prompt text, code content, command output, or tool results unless Content Capture Mode is explicitly enabled. Do not silently scrape Git config, OS users, shell environment, or unrelated local files for identity or path data.
+Preserve metadata-only capture by default. Content Capture Mode is disabled by default and must follow Content Capture Policy, pre-storage redaction, and the Redaction Failure Gate before any Captured Content Blob is stored. Do not persist prompt text, code content, command output, or tool results unless Content Capture Mode is explicitly enabled and redaction succeeds. Do not silently scrape Git config, OS users, shell environment, or unrelated local files for identity or path data.
 
 Represent unavailable token metrics as null, not zero.
 
@@ -81,6 +90,10 @@ Keep observed, estimated, unavailable, not applicable, and mixed metric states d
 
 Keep Repo Context Enrichment separate from telemetry ingestion. Scanner findings are not harness-emitted facts.
 
+Scoped Ingestion Credential identity is authoritative for production telemetry upload and session ownership. Harness-emitted identity is evidence, not authorization authority.
+
 Prefer deterministic, evidence-backed behavior over LLM-generated findings.
 
-Keep changes narrowly scoped to the module involved: contracts, storage, ingestion worker, dashboard API, dashboard web, AppHost, or service defaults.
+LLM-inferred hotspots must remain clearly labelled as candidates until product validation confirms them.
+
+Keep changes narrowly scoped to the production boundary involved: Product API, Product Ingestion Endpoint, Product Jobs, React Product Dashboard, domain contracts, storage, Terraform, operations docs, or transition cleanup.

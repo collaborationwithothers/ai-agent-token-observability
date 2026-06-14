@@ -8,13 +8,17 @@ This context defines the project language for observing token usage across AI co
 The tool or runtime that mediates an AI coding-agent session, such as VS Code Copilot, Claude Code, or Codex.
 _Avoid_: Agent vendor, AI tool
 
-**Primary Harness**:
-The first Coding-Agent Harness used to prove the Local-First MVP. For this project, the Primary Harness is VS Code Copilot.
-_Avoid_: First vendor, main agent
+**Production MVP Harness**:
+The Coding-Agent Harness implemented first for the Azure Production MVP. For this project, the Production MVP Harness is Codex.
+_Avoid_: Primary local harness, secondary harness
 
-**Secondary Harness**:
-A later Coding-Agent Harness added after the normalized schema works, used to prove cross-harness comparison. For this project, Claude Code is the first Secondary Harness, and Codex is a later Secondary Harness.
-_Avoid_: Optional vendor, stretch agent
+**Target-State Harness**:
+A Coding-Agent Harness supported in the Production Target State Spec. Codex, VS Code Copilot, and Claude Code are Target-State Harnesses.
+_Avoid_: Stretch harness, optional vendor
+
+**Codex Surface**:
+The Codex runtime surface that emits or may emit Agent Telemetry Signals, including Codex CLI for the Azure Production MVP and Codex desktop app for the Production Target State Spec after telemetry parity validation.
+_Avoid_: Codex CLI only, unvalidated desktop parity
 
 **Token Burn**:
 Token usage that should be investigated because it may be expensive, repeated, wasteful, or poorly attributed.
@@ -24,8 +28,16 @@ _Avoid_: Token cost, token usage
 A source of token burn tied to a session, turn, tool, file, folder, instruction, specification, model, harness, or repository.
 _Avoid_: Finding, issue, alert
 
+**Prompt Cache Breakage**:
+A Token Hotspot where reusable prompt context was not read from cache, or cache effectiveness dropped, causing avoidable input token burn, latency, or cost.
+_Avoid_: Generic cache miss, provider billing issue
+
+**Cache Evidence Availability**:
+The evidence state for Prompt Cache Breakage analysis, distinguishing observed provider or harness cache fields, correlated cache patterns, LLM-inferred cache explanations, and unavailable cache evidence.
+_Avoid_: Assumed cache miss, hidden cache uncertainty
+
 **Work Family**:
-A later-phase rollup that groups token burn by the kind of work being performed across sessions, repositories, or teams. It is useful for portfolio-level analysis but is not the primary driver taxonomy for the Local-First MVP.
+A rollup that groups Token Burn by the kind of work being performed across sessions, repositories, or teams. It supports portfolio-level analysis without replacing evidence-backed Token Hotspots.
 _Avoid_: Primary hotspot, unsupported work label
 
 **Hotspot Attribution Type**:
@@ -53,11 +65,39 @@ The classification for a token aggregate: observed when all included values came
 _Avoid_: Total tokens
 
 **Content Capture Mode**:
-A future explicit opt-in capability that can store prompt snippets, tool results, command outputs, or file content after redaction. It is disabled by default and not implemented in the Local-First MVP.
+A production capability that can store policy-approved prompt snippets, tool results, command outputs, model excerpts, or file content only after the Pre-Storage Content Redaction Pipeline allows storage.
 _Avoid_: Default content capture, silent capture
 
+**Content Capture Policy**:
+A Customer Organization policy that controls whether prompt snippets, selected tool inputs, selected tool outputs, model response excerpts, command summaries, or error summaries may be captured, retained, reviewed, and used for recommendations.
+_Avoid_: Silent content logging, unrestricted prompt storage
+
+**Content Capture Store**:
+The product-owned encrypted storage boundary for policy-approved captured content and content references. It is separate from the observability backend used for aggregate metrics, traces, logs, and events.
+_Avoid_: Log Analytics content store, unrestricted telemetry logs
+
+**Pre-Storage Content Redaction Pipeline**:
+The content safety boundary that detects, redacts, rejects, or routes captured content for review before any Captured Content Blob is written to the Content Capture Store.
+_Avoid_: Store-then-redact, raw-content default
+
+**Redaction Failure Gate**:
+The rule that content must not be stored as a Captured Content Blob when it cannot be redacted confidently. The product stores metadata only and marks the item as redaction failed or review required until a privileged reviewer retries, discards, or approves a bounded excerpt.
+_Avoid_: Best-effort raw storage, silent redaction failure
+
+**Captured Content Blob**:
+A policy-approved captured content artifact stored in Azure Blob Storage, referenced by the Product Metadata Store, and governed by Customer Organization retention, access, and isolation policy.
+_Avoid_: Telemetry log payload, database text dump
+
+**Observability Backend Split**:
+The production storage boundary that keeps Managed Prometheus metrics, Application Insights or Log Analytics traces and logs or events, product metadata, and captured content in separate stores with separate query, retention, and access patterns.
+_Avoid_: One telemetry database, all-in-logs storage
+
+**Product Metadata Store**:
+The tenant-aware transactional store for Customer Organizations, users, role mappings, teams, repositories, sessions, normalized telemetry summaries, Token Hotspots, recommendations, policies, content references, and audit metadata.
+_Avoid_: Telemetry log store, captured-content store
+
 **Deterministic Recommendation**:
-A recommendation generated by a rule with known trigger conditions, evidence, confidence, and expected benefit. This is the only recommendation type in the Local-First MVP.
+A recommendation generated by a rule with known trigger conditions, evidence, confidence, and expected benefit.
 _Avoid_: AI recommendation, generated advice
 
 **Recommendation Rationale**:
@@ -68,133 +108,217 @@ _Avoid_: Unsupported action, evidence-only link
 A production-path recommendation explanation drafted by an LLM from existing hotspot evidence, deterministic recommendations, and policy constraints. It must not create new unsupported findings.
 _Avoid_: LLM finding, autonomous recommendation
 
+**Asynchronous Recommendation Generation**:
+The production workflow that generates recommendation records after ingestion and hotspot detection, with authorized on-demand regeneration when evidence, policy, model, or prompt-template versions change.
+_Avoid_: Click-time-only model call, unversioned recommendation
+
+**LLM-Inferred Candidate Hotspot**:
+A proposed Token Hotspot generated by an LLM from explicit telemetry, content, or policy evidence. It must remain labelled as a candidate until product validation promotes it or rejects it.
+_Avoid_: Confirmed hotspot, unsupported LLM finding
+
+**Recommendation Evidence Packet**:
+The immutable, policy-filtered evidence bundle used to generate a deterministic or LLM-assisted recommendation version.
+_Avoid_: Raw prompt bundle, mutable recommendation context
+
+**Recommendation Validation Gate**:
+The product-owned validation boundary that rejects unsupported, ungrounded, policy-violating, blame-oriented, or schema-invalid recommendation output before it becomes visible.
+_Avoid_: LLM self-check, best-effort validation
+
+**Candidate Hotspot Review**:
+The workflow that allows authorized reviewers to promote, reject, expire, or supersede LLM-Inferred Candidate Hotspots based on product validation and evidence.
+_Avoid_: automatic LLM promotion, unreviewed finding
+
 **Optimization Feedback Loop**:
 The path from normalized telemetry to Token Hotspots, evidence, confidence, and recommendations. It is what distinguishes the platform from a token-count dashboard.
 _Avoid_: Dashboard, report
 
-**Local-First MVP**:
-The first releasable slice that proves token observability from local telemetry without requiring enterprise access or cloud deployment.
-_Avoid_: Enterprise MVP, cloud-first MVP
+**Azure Production MVP**:
+The first production-hosted Azure release of the platform, with local execution treated only as developer convenience and not as a product mode.
+_Avoid_: Local-first MVP, production-only
 
-**Azure Production Path**:
-A later deployment path that shows how the observability platform can run as a production-style Azure workload after the Local-First MVP is proven.
-_Avoid_: MVP requirement, mandatory Azure deployment
+**Production Target State Spec**:
+The complete production-state product specification that describes the intended mature platform across ingestion, storage, visualization, security, recommendations, operations, and governance.
+_Avoid_: MVP PRD, implementation plan
 
-**Local App Platform**:
-The .NET Aspire application model used by the Local-First MVP to run the dashboard, API, ingestion worker, and PostgreSQL together.
-_Avoid_: Docker-only app, Python app
+**Single-Enterprise Release**:
+A production release used by one enterprise boundary, where teams, repositories, harnesses, and users are dimensions inside that enterprise rather than separate SaaS customers.
+_Avoid_: Final target state, multi-customer SaaS
 
-**Local Dashboard**:
-The Blazor Web App used by the Local-First MVP to inspect token burn over time, drivers, sessions, token splits, Token Hotspots, and recommendations.
-_Avoid_: Streamlit dashboard, Next.js dashboard
+**Tenant-Aware First Release**:
+The Single-Enterprise Release constraint that supports one Customer Organization on shared or single Azure resources while keeping code, data, authorization, and APIs explicitly scoped by Customer Organization.
+_Avoid_: One-tenant-forever schema, tenantless MVP
 
-**Dashboard Overview**:
-A range-scoped summary of Token Burn, Coding-Agent Harness activity, Token Hotspots, and recommendations used to orient the Local Dashboard before drilling into session details.
-_Avoid_: Status page, raw sessions table
+**Multi-Tenant SaaS Target State**:
+The final production model where the platform serves multiple customer tenants with tenant-aware identity, isolation, governance, operations, and billing boundaries.
+_Avoid_: Single-enterprise deployment, internal-only platform
 
-**Dashboard Information Architecture**:
-The ordering of Local Dashboard sections from headline Token Burn, to daily trend, to Token Hotspots and recommendations, to session and evidence detail.
-_Avoid_: Session-first log viewer, equal-weight sections
+**Vendor-Operated SaaS**:
+The target operating model where the product team operates the Azure platform, telemetry pipeline, stores, dashboards, recommendations, and upgrades for Customer Organizations, including optional dedicated resource tiers.
+_Avoid_: Customer-operated deployment, unmanaged customer install
 
-**Desktop-Led Responsive Dashboard**:
-A Local Dashboard layout optimized for desktop and laptop scanning while remaining usable on narrow screens through stacked sections and readable tables.
-_Avoid_: Mobile-first dashboard, desktop-only layout
+**Platform-Managed Encryption**:
+The product encryption boundary where Azure platform-managed encryption is used for product stores and Customer Managed Keys are not offered as a product capability.
+_Avoid_: Customer-managed key, tenant-owned encryption key
 
-**Dashboard Component Boundary**:
-The Blazor component split for a Local Dashboard section, keeping the route page responsible for orchestration while focused components render the top rail, headline, heatmap, hotspots, recommendations, sessions, evidence, and empty states.
-_Avoid_: Monolithic dashboard page, component per table cell
+**Customer Organization**:
+The product tenant in the Multi-Tenant SaaS Target State. A Customer Organization can connect one or more identity tenants and contains its teams, users, repositories, harness configurations, dashboards, retention policies, role mappings, and billing boundary.
+_Avoid_: Entra tenant, team, repository
 
-**Dashboard Style Boundary**:
-The CSS ownership split for the Local Dashboard redesign: shared theme tokens and base styles live globally, while section-specific layout and visual details live in component-scoped styles.
-_Avoid_: One large CSS dump, unshared component colors
+**Customer Data Residency Region**:
+The primary Azure region where a Customer Organization's product metadata, captured content, detailed telemetry, and recommendation evidence are stored and processed unless its policy allows replication or cross-region processing.
+_Avoid_: Regionless tenant, accidental cross-region processing
 
-**Dashboard Test Boundary**:
-The verification split for the Local Dashboard redesign, with API and contract tests covering dashboard semantics before visual smoke checks cover page rendering.
-_Avoid_: Screenshot-only confidence, untested aggregation
+**Hybrid Tenant Isolation**:
+The target-state tenancy model where most Customer Organizations use shared infrastructure with strict tenant-aware controls, while higher-risk or larger Customer Organizations can use dedicated data, observability, storage, or deployment resources.
+_Avoid_: Shared-only tenancy, dedicated-only tenancy
 
-**Dashboard Implementation Slice**:
-A PR-sized vertical part of the Local Dashboard redesign that can be implemented and verified independently while still contributing to one cohesive page.
-_Avoid_: Big-bang redesign, unrelated refactor batch
+**Federated Customer Identity**:
+An identity model where users authenticate with a Customer Organization identity provider, such as Microsoft Entra ID, while the product maps those external identities and groups into Customer Organization roles.
+_Avoid_: SaaS-owned employee accounts, local password store
 
-**Dashboard Overview Contract**:
-The API response shape used by the Local Dashboard redesign to render range-filtered headline totals, freshness, heatmap buckets, moving averages, metric quality, hotspot ranking, recommendations, sessions, evidence, and matching top-level filter options using raw values plus semantic fields rather than preformatted display strings.
-_Avoid_: UI-only aggregation, pass-through session dump
+**Product Role Mapping**:
+A Customer Organization authorization rule that maps external identity users or groups into product-owned roles and scopes used for runtime authorization.
+_Avoid_: Raw group-name authorization, hardcoded Entra groups
 
-**Dashboard Top Rail**:
-A compact Local Dashboard navigation and control area for MVP-level range, repository, harness, model, metric status, context, and same-page section access.
-_Avoid_: Persistent sidebar, multi-area app shell
+**Recommendation Model Policy**:
+A Customer Organization policy that controls whether LLM-assisted recommendations are enabled and which model providers, deployments, prompt templates, and evidence classes may be used.
+_Avoid_: Hardcoded model provider, ungoverned recommendation model
 
-**Dashboard Query State**:
-The URL query string representation of Dashboard Range, repository, Coding-Agent Harness, model, and Metric Status filters for the Local Dashboard.
-_Avoid_: Hidden component-only filter state, separate saved view model
+**Managed Grafana Surface**:
+The Azure Managed Grafana visualization layer for aggregate observability views such as token burn trends, cost trends, harness and model breakdowns, and high-level hotspot panels.
+_Avoid_: Whole product dashboard, recommendation workspace
 
-**Dashboard Freshness Summary**:
-A compact dashboard trust indicator that shows the latest telemetry import time, latest Repo Context Enrichment time, and Harness Pricing Basis version or date.
-_Avoid_: Hidden staleness, decorative status text
+**Product Dashboard**:
+The role-protected product application for session drill-down, hotspot evidence, recommendation review, content capture workflows, governance, and administration.
+_Avoid_: Grafana-only dashboard, metric-only dashboard
 
-**Dashboard Range**:
-The selected time horizon for the Dashboard Overview and Token Burn Timeline, such as 30 days, 90 days, 180 days, one year, or all available telemetry.
-_Avoid_: Unbounded default, import batch
+**React Product Dashboard**:
+The production Product Dashboard implementation choice: a React, TypeScript, and Vite single-page application backed by Product API.
+_Avoid_: Blazor carry-forward, browser-direct data store access
 
-**Token Burn Timeline**:
-A range-scoped dense sequence of Token Burn buckets based on model invocation time when available, with session start time used only when more specific activity timing is unavailable, including zero-burn days so absence remains visible.
-_Avoid_: Session-start-only chart, import-time chart
+**Product API Contract**:
+The versioned product application API boundary for Product Dashboard, administration, session investigation, content review, recommendations, pricing, budgets, and audit workflows.
+_Avoid_: OTLP ingestion contract, browser-direct telemetry store access
 
-**Token Burn Heatmap**:
-The primary visual form of the Token Burn Timeline, using daily cells to reveal spikes, quiet days, and recurring burn patterns across the selected Dashboard Range as the first major visual band after the dashboard headline.
-_Avoid_: Raw date table, chart-only proof
+**Session Investigation View**:
+The Product Dashboard click-through view for a Coding-Agent Harness session, showing summary, timeline, Token Hotspots, cache diagnostics, policy-approved content evidence, recommendations, and audit context.
+_Avoid_: Raw trace viewer, Grafana session page
 
-**Moving Burn Average**:
-A rolling average view of Token Burn, initially using a 30-day window to show sustained burn trends separate from individual spike days.
-_Avoid_: Spike-only chart, cosmetic trend
+**Optimization Coaching**:
+Evidence-backed guidance that explains what behavior, prompt, context choice, or workflow likely increased Token Burn and how the user could improve it.
+_Avoid_: Blame, unsupported user-error claim
 
-**Static Dashboard Visual**:
-A Local Dashboard visual rendered directly in Blazor using HTML, CSS, or SVG for the Local-First MVP, without taking a dependency on a charting library.
-_Avoid_: Chart framework prerequisite, decorative chart
+**Coaching Visibility Scope**:
+The role and resource boundary that controls who can view Optimization Coaching for a session, keeping individual coaching separate from broad read-only dashboard access.
+_Avoid_: Public user coaching, leaderboard feedback
 
-**Analytical Sepia Palette**:
-The Local Dashboard visual tone that uses a warm, sepia-adjacent base while preserving semantic contrast for burn severity, estimated cost, evidence confidence, and recommendations.
-_Avoid_: Template clone, one-note beige dashboard
+**Non-Punitive Optimization**:
+The product principle that metrics, Token Hotspots, and recommendations exist to improve agentic coding workflows, reduce cost, and increase efficiency without enabling blame, surveillance, or public developer ranking.
+_Avoid_: Developer leaderboard, blame dashboard, individual waste ranking
 
-**Dashboard Timezone**:
-The timezone used to bucket and display daily Token Burn in the Local Dashboard. Timestamps remain stored in UTC, while daily dashboard buckets use the configured or local dashboard timezone.
-_Avoid_: Silent UTC display, unlabelled local time
+**Identity-Minimized Dashboard**:
+A dashboard default that emphasizes team, repository, harness, model, workflow, and hotspot dimensions while limiting individual identity display to self-view, authorized investigation, or scoped leadership contexts.
+_Avoid_: Person-first dashboard, public individual analytics
 
-**Dashboard Drill-Down**:
-A navigation path from a Dashboard Overview item to the lower-level session, hotspot, recommendation, or day evidence that explains it.
-_Avoid_: Hidden evidence, disconnected table
+**Agent Telemetry Signals**:
+The OpenTelemetry metrics, traces, and logs or events emitted by Coding-Agent Harnesses. Metrics power aggregate observability, while traces and logs or events support session reconstruction, hotspot evidence, content capture, and recommendations.
+_Avoid_: Metrics-only telemetry, raw logs only
 
-**Dashboard Fragment Target**:
-A stable same-page URL fragment target for Dashboard Drill-Down, such as a session, hotspot, recommendation, or day evidence anchor.
-_Avoid_: Detail page route, hidden internal state only
+**Product Ingestion Endpoint**:
+The tenant-aware OTLP ingestion boundary that validates source identity, Customer Organization, schema version, and Content Capture Policy before normalizing telemetry and routing observability signals to downstream Azure backends.
+_Avoid_: Direct-to-monitor-only ingestion, unvalidated harness upload
 
-**Hotspot Driver View**:
-A Dashboard Overview section that ranks Token Hotspots using compact visual bars while retaining table columns for exact values, Hotspot Attribution Type, Metric Confidence, and drill-down links.
-_Avoid_: Decorative-only bar chart, evidence-free ranking
+**Production Ingestion Contract**:
+The versioned product contract that defines which harness telemetry signals are accepted, how they are authenticated, how tenant and developer identity are resolved, how content-bearing fields are governed, and how normalized records are routed.
+_Avoid_: Informal log scrape, monitor-only contract, harness-specific guesswork
 
-**Guided Empty State**:
-A Local Dashboard state that explains the next required action when telemetry, repo context, hotspots, or recommendations are missing, without using demo fixtures or synthetic sample data.
-_Avoid_: Blank dashboard, silent sample data, demo fixture
+**Harness Telemetry Envelope**:
+The product-normalized wrapper around an incoming harness telemetry record, containing tenant, harness, credential, schema, session, signal, evidence state, content policy, and routing metadata.
+_Avoid_: Raw OTLP record as domain model, unscoped telemetry event
 
-**Evidence Summary**:
-A compact, dashboard-visible explanation of why a Token Hotspot or recommendation exists, with expandable same-page detail for the underlying evidence references.
-_Avoid_: Raw evidence dump, hidden proof
+**Signal Routing Policy**:
+The product rule set that decides whether normalized telemetry becomes aggregate metrics, traces or logs, product metadata, captured content, audit evidence, or rejection records.
+_Avoid_: Store everything everywhere, direct raw fan-out
 
-**Rich Dashboard Interaction**:
-A later-phase interaction model where chart selection, brushing, zooming, cross-filtering, and coordinated panel updates help users explore Token Burn without leaving the Dashboard Overview.
-_Avoid_: MVP requirement, decorative animation
+**Manual Harness Telemetry Setup**:
+The onboarding model where each developer explicitly configures each Coding-Agent Harness to export Agent Telemetry Signals using a Customer Organization setup profile, rather than relying on centralized silent rollout.
+_Avoid_: Silent harness enrollment, device-management-only rollout
 
-**Typed Burn Total**:
-A headline Token Burn number paired with visible observed, estimated, mixed, and unavailable metric splits so users can scan magnitude without losing evidence quality.
-_Avoid_: Naked total tokens, missing-as-zero total
+**Scoped Ingestion Credential**:
+A revocable credential issued for a specific Customer Organization, developer, and Coding-Agent Harness setup profile to authenticate telemetry uploads to the Product Ingestion Endpoint.
+_Avoid_: Shared tenant upload key, anonymous telemetry upload
 
-**Dashboard Metric Strip**:
-A compact set of supporting Dashboard Overview metrics shown near the Typed Burn Total, such as Estimated Token Cost, active sessions, top Token Hotspot, and Metric Status.
-_Avoid_: Equal-weight KPI wall, competing headline metrics
+**Credential-Derived Developer Identity**:
+The product identity attributed from the authenticated Scoped Ingestion Credential and used for authorization, self-view, and session ownership, with harness-emitted identity retained as evidence rather than access-control authority.
+_Avoid_: Telemetry-authorized user, unchecked harness identity
 
-**Recommendation Action Section**:
-A full-width Dashboard Overview section that turns Token Hotspots into next actions before users drill into session evidence.
-_Avoid_: Recommendation side note, hidden action panel
+**Repository Discovery and Enrollment**:
+The product model where Customer Organizations connect source providers, discover repositories, and enroll repositories through policy rules, self-service requests, or review of unmatched telemetry candidates.
+_Avoid_: Manual repo list only, arbitrary harness repo authority
+
+**Repository Content Scanning Policy**:
+A repository-level or Customer Organization policy that controls whether the product may inspect repository file content, store derived facts, or use repository content as recommendation evidence.
+_Avoid_: Implicit source-code scanning, discovery-equals-content-access
+
+**Correlatable Repository Evidence**:
+Repository-derived evidence that can support Token Hotspot attribution only when correlated with Agent Telemetry Signals or other session evidence, and must not be presented as a harness-emitted session fact.
+_Avoid_: Scanner-as-session-fact, unsupported repo attribution
+
+**Production App Compute**:
+The Azure Container Apps compute boundary for product HTTP services and Azure Container Apps Jobs for bounded background processing such as normalization, recommendation generation, content redaction, retention cleanup, reprocessing, and tenant maintenance.
+_Avoid_: VM-hosted app, local app platform
+
+**Production Ingress Boundary**:
+The production network boundary where Product Dashboard and Product Ingestion Endpoint use public HTTPS ingress through the Production Edge, while direct public origin bypass and public data stores are not allowed in production.
+_Avoid_: Private-only developer ingestion, public data plane
+
+**Private Data Plane**:
+The production networking boundary where product stores and internal dependencies use private access patterns, public network access is disabled where feasible, and application access uses managed identity and least privilege.
+_Avoid_: Public database endpoint, network-open storage
+
+**Production Edge**:
+The first-release public edge pattern where Azure Front Door Premium WAF serves public product hostnames, uses managed certificates, and reaches Azure Container Apps origins through Private Link, with Azure API Management reserved as a later API lifecycle and policy gateway option.
+_Avoid_: Application Gateway first, APIM as first-release requirement, public ACA origin bypass
+
+**Product DNS Zone**:
+The delegated public DNS zone used for product-owned hostnames, certificate validation records, and production edge routing while the apex domain can remain with an external DNS provider.
+_Avoid_: Apex takeover, unmanaged product DNS
+
+**Product TLS Certificate Boundary**:
+The public TLS boundary for product hostnames, where the first release uses Azure Front Door managed certificates for explicit product hostnames and defers shared Key Vault BYOC wildcard certificates to a later decision.
+_Avoid_: App-local certificate, per-environment certificate sprawl, first-release BYOC requirement
+
+**Future API Gateway Option**:
+A target-state option to introduce Azure API Management as the external API entry point when API lifecycle management, policy centralization, partner access, or product scale requires it.
+_Avoid_: First-release APIM dependency, direct-only forever
+
+**Production Stack Boundary**:
+The technology boundary that keeps .NET for backend services, ingestion, and jobs while treating the Product Dashboard frontend as a separate production architecture decision rather than inheriting the local-first Blazor choice.
+_Avoid_: Local-first stack carryover, frontend stack by default
+
+**Runtime Service Topology**:
+The production runtime split between long-running product HTTP services and bounded background job commands.
+_Avoid_: one-app-for-everything, accidental service split
+
+**Terraform Production Infrastructure**:
+The infrastructure-as-code boundary for Azure production resources, using Terraform with Azure Blob Storage remote state, environment-region-customer-scoped workspaces, and Azure Verified Modules where suitable modules exist.
+_Avoid_: Bicep-first infrastructure, local-only provisioning
+
+**Region Environment Workspace**:
+A Terraform workspace scope that combines deployment environment, such as `dv`, `qa`, `pp`, or `pd`, Azure region, such as `eastus`, `eastus2`, or `westeurope`, and Customer Organization slug, such as `internal`, so state and deployments are separated by production stage, geography, and tenant boundary.
+_Avoid_: Default workspace, unscoped state
+
+**Regional Release Strategy**:
+The deployment strategy where the Azure Production MVP runs active in a single region per environment while the Production Target State Spec documents multi-region placement, failover, and tenant data-residency options.
+_Avoid_: Active-active MVP, regionless deployment
+
+**Guarded Terraform Apply**:
+A manual GitHub Actions deployment path that may run Terraform apply only after repository, actor, environment, region, workspace, branch, confirmation, OIDC, least-privilege, and environment-protection checks pass.
+_Avoid_: Unguarded apply, PR-triggered deployment
+
+**Public Repository Workflow Guardrail**:
+The GitHub Actions safety boundary for this public repository, requiring deployment-capable workflows to be manually triggered, reject fork or PR execution paths, verify the expected repository and triggering actor, keep token permissions least-privileged, and be enforced by committed validation scripts and tests.
+_Avoid_: Fork-triggered deployment, unguarded public workflow
 
 **Estimated Token Cost**:
 A dollar-denominated estimate of Token Burn based on the configured pricing basis for the Coding-Agent Harness, model, token type, and billing route. It is dashboard guidance, not a provider invoice.
@@ -208,12 +332,52 @@ _Avoid_: Fallback average cost, guessed cost
 The pricing rule set used to turn token metrics into Estimated Token Cost for a specific Coding-Agent Harness, such as GitHub Copilot AI credit pricing, OpenAI API pricing, Anthropic API pricing, or a later enterprise-specific rate table.
 _Avoid_: Universal API rate, hardcoded model cost
 
+**Automated Pricing Seed**:
+The product workflow that refreshes default provider pricing candidates for supported harnesses, providers, models, token classes, and billing routes before Customer Organization overrides are applied.
+_Avoid_: Hardcoded pricing table, manual-only provider pricing
+
+**Pricing Update Review**:
+The PlatformAdmin workflow that reviews, accepts, rejects, or overrides automated pricing changes before they affect Estimated Token Cost, budgets, forecasts, or trend comparisons.
+_Avoid_: Silent pricing update, unversioned cost recalculation
+
+**Non-Punitive Budget Alert**:
+A token or estimated-cost alert scoped to a team, repository, workflow, harness, model, or Customer Organization policy boundary, designed to prompt optimization without ranking or blaming individual developers.
+_Avoid_: Individual waste alert, blame notification
+
+**Governance Audit Event**:
+A product audit record for security, policy, content, recommendation, pricing, tenant administration, data export, and deletion decisions that must remain traceable to an actor, scope, time, and evidence context.
+_Avoid_: Best-effort admin log, hidden policy change
+
+**Data-Class Retention Policy**:
+A Customer Organization retention rule set that applies different retention periods and deletion behavior to aggregate metrics, normalized session metadata, traces, logs or events, captured content, audit events, pricing versions, and recommendation versions.
+_Avoid_: Single global retention, content-retained-like-metrics
+
+**Data Lifecycle Workflow**:
+The export, deletion, retention cleanup, offboarding, and legal-hold workflow set for Customer Organization data across product metadata, captured content, telemetry stores, recommendations, audits, and backups.
+_Avoid_: Delete-from-one-store only, retention without audit
+
+**Infrastructure Deletion Workflow**:
+A guarded Terraform workflow that destroys disposable Azure environment stages in an approved order while retaining shared foundation resources.
+_Avoid_: Tag-based resource deletion, portal cleanup, unscoped destroy
+
+**Retained Shared Resource**:
+An Azure resource that must survive environment deletion because it supports shared identity, state, DNS, certificates, container images, audit, or recovery boundaries.
+_Avoid_: Disposable environment resource, accidental shared cleanup
+
+**Day-1 Operable Baseline**:
+The first-release operations target that makes the production system runnable and recoverable with health checks, internal SLOs, private alerts, validation drills, audit visibility, and incident runbooks without claiming a mature external SLA.
+_Avoid_: Full SRE program, no-ops MVP, public incident disclosure
+
+**Production Codebase Transition**:
+The migration boundary that treats local-first implementation code as delete, replace, retain, or quarantine material before building the Azure Production MVP runtime shape.
+_Avoid_: Evolve local-only mode, hidden local dependency
+
 **Model Cost Mix**:
 A dashboard overview of Token Burn and Estimated Token Cost by model within the selected Dashboard Range.
 _Avoid_: Harness comparison, provider invoice
 
 **Pricing Refresh Workflow**:
-A later-phase workflow that fetches provider pricing sources, compares them with the local Harness Pricing Basis, shows a reviewable diff, and updates the local pricing configuration only after explicit acceptance.
+A workflow that fetches provider pricing sources, compares them with the Harness Pricing Basis, shows a reviewable diff, and updates product pricing configuration only after explicit acceptance.
 _Avoid_: Automatic live scraping, silent cost changes
 
 **Dashboard Export Workflow**:
@@ -223,18 +387,6 @@ _Avoid_: First redesign action, automatic report generation
 **Scale Equivalent**:
 A later-phase illustrative estimate that translates Token Burn into a familiar comparison. It is not evidence for a Token Hotspot or recommendation.
 _Avoid_: MVP proof, hotspot evidence
-
-**Local Store**:
-The local PostgreSQL database used by the Local-First MVP to persist normalized telemetry, session summaries, Token Hotspots, and recommendations.
-_Avoid_: DuckDB store, SQLite store
-
-**Local Pipeline Projects**:
-The separate .NET projects orchestrated by the Local App Platform: ingestion worker, dashboard API, and Blazor Local Dashboard.
-_Avoid_: Single app, monolithic dashboard
-
-**Direct File Import**:
-The initial ingestion path where the Local-First MVP imports exported OTel JSONL files directly before running an OpenTelemetry Collector.
-_Avoid_: Collector-first ingestion
 
 **Copilot Field Mapping**:
 The Phase 0 document that maps VS Code Copilot OTel fields into the normalized model and classifies each field as documented, fixture-observed, optional when available, or content-capture-only.
@@ -296,306 +448,6 @@ _Avoid_: File type, extension
 The rule that generated files, lockfiles, vendor files, binaries, and build artifacts can explain token burn but are excluded from correlated or inferred Token Hotspot attribution unless harness telemetry directly references them.
 _Avoid_: Ignore generated files, hide lockfiles
 
-**Production Dashboard**:
-The Azure Managed Grafana dashboard used by the Azure Production Path to inspect production telemetry and platform health.
-_Avoid_: Local dashboard, Next.js dashboard
-
-## Flagged Ambiguities
-
-**MVP deployment scope**:
-The idea originally mixed local-first development with enterprise access and full Azure deployment requirements. Resolved: the MVP is local-first, while Azure deployment is a later production path.
-
-**Harness sequencing**:
-The idea listed multiple coding-agent harnesses in scope. Resolved: VS Code Copilot is the Primary Harness, Claude Code is the first Secondary Harness once the normalized schema works, and Codex is a later Secondary Harness.
-
-**Dashboard technology**:
-The idea named Streamlit, Grafana, and Next.js as possible dashboard choices. Resolved: the Local Dashboard is a Blazor Web App, the Production Dashboard is Grafana, and Streamlit and Next.js are out of scope.
-
-**Local storage technology**:
-The idea originally proposed DuckDB for the local MVP. Resolved: the Local Store is PostgreSQL so the local schema and production path stay closer together.
-
-**Local application platform**:
-The idea originally assumed a Python and Streamlit local application. Resolved: the Local App Platform is .NET Aspire so the MVP can model the app, PostgreSQL, and workers as one local distributed system.
-
-**Local project boundaries**:
-The idea listed local components but did not explicitly settle project boundaries. Resolved: the Local Pipeline Projects are separate .NET projects for ingestion, API, and dashboard, all orchestrated by Aspire.
-
-**Collector sequencing**:
-The idea included an OpenTelemetry Collector but did not settle whether it is required on day one. Resolved: Phase 0 and Phase 1 use Direct File Import first, but the schema and ingestion worker must preserve a planned Collector Ingestion Path.
-
-**Unavailable metrics**:
-The idea included missing provider metrics as a failure mode but did not define storage semantics. Resolved: an Unavailable Token Metric is stored as `NULL`, never zero, with Metric Status and Metric Confidence.
-
-**Estimated versus observed tokens**:
-The idea used generic total-token wording. Resolved: dashboards and storage must separate observed, estimated, and mixed token totals using Token Total Type.
-
-**Content capture**:
-The idea considered storing prompt, code, command, and tool-result content for deeper diagnosis. Resolved: Content Capture Mode is a future capability, disabled by default, explicit opt-in when implemented, and not part of the Local-First MVP.
-
-**Repo scanning boundary**:
-The idea included repository scanning but did not define its relationship to telemetry ingestion. Resolved: repo scanning is Repo Context Enrichment, separate from ingestion and lower-confidence than harness-emitted telemetry.
-
-**Hotspot proof standard**:
-The idea asked how the engine proves that a file caused token burn. Resolved: only direct Hotspot Attribution Type can be described as proven; correlated and inferred hotspots must be labelled as suspected.
-
-**Recommendation engine scope**:
-The MVP uses Deterministic Recommendations only. The Azure Production Path plans LLM-Assisted Recommendations, but they must be grounded in existing evidence and never invent unsupported hotspots.
-
-**Copilot field certainty**:
-The idea listed expected VS Code Copilot OTel fields but did not distinguish documented fields from observed fixture fields. Resolved: Phase 0 must produce a Copilot Field Mapping before parser implementation is treated as stable.
-
-**Multi-root workspace scope**:
-The idea assumed session-level repo fields. Resolved: a session has a `workspace_id` and zero or more Workspace Repo records; ambiguous hotspots attach to workspace scope instead of forcing false repo attribution.
-
-**Multiple developer attribution**:
-The idea needed a way to compare agent usage across developers while keeping the dashboard usable. Resolved: sessions may show Developer Display Labels in the single MVP privacy mode, while User Hash remains available for stable joins.
-
-**Private repo paths**:
-The idea included repo path fields but needed a privacy and usability boundary. Resolved: the single MVP privacy mode may show full repo names and Repo Display Paths, including absolute local paths for context sources when available, while Repo Path Hash remains available for stable joins.
-
-**Privacy mode boundary**:
-The idea originally separated raw paths and identities behind trusted-mode features. Resolved: do not maintain separate privacy modes for the MVP. The single MVP privacy mode allows Developer Display Labels, full repo names, and Repo Display Paths, but keeps Content Capture Mode disabled by default and explicit opt-in.
-
-**Display identity source boundary**:
-Developer Display Labels, full repo names, and Repo Display Paths must come from explicit import or enrichment input first, or from clearly emitted telemetry fields. Resolved: the MVP must not silently scrape Git config, OS user accounts, shell environment, or unrelated local files to populate display identity.
-
-**Developer display density**:
-Developer Display Labels are allowed in the single MVP privacy mode. Resolved: show developer labels in session rows, filters, and expanded evidence detail, but avoid top-level person rankings in the MVP Dashboard Overview.
-
-**Repo path display density**:
-Repo Display Paths are allowed in the single MVP privacy mode. Resolved: show repo-relative paths in the main dashboard by default, and show absolute local paths in same-page expanded evidence detail when available.
-
-**Generated and lockfile attribution**:
-The idea needed a rule for noisy files that often consume tokens but rarely imply useful remediation. Resolved: classify File Context Category during Repo Context Enrichment, exclude generated files and lockfiles from correlated or inferred hotspots by default, but keep direct harness references visible as direct hotspots.
-
-**MVP scope boundary**:
-The idea needed a strict boundary so the Local-First MVP stays provable. Resolved: keep the MVP to the Primary Harness, Direct File Import, Local Store, Deterministic Recommendations, metadata-only defaults, and Local Dashboard; move additional harnesses, cloud deployment, and assisted recommendation text to later phases.
-
-**Dashboard versus optimization system**:
-The idea needed a bar for being more than token charts. Resolved: the Local-First MVP must include the Optimization Feedback Loop, showing Token Hotspots, attribution type, confidence, evidence, recommendations, and expected benefit.
-
-**Driver taxonomy sequencing**:
-The reference dashboard uses Work Family rollups for "What is driving the burn?" analysis. Resolved: the Local-First MVP uses Token Hotspots as the primary driver taxonomy, while Work Family is captured as a later-phase rollup once assignment rules and evidence standards are defined.
-
-**Dashboard scenario framing**:
-The Local Dashboard first screen is a general Dashboard Overview for token burn and optimization, not a Spec Kit-only demo page. Resolved: the Spec Kit Spec-Bloat Scenario appears as the primary proof point when present, usually through the top Token Hotspot and Deterministic Recommendation.
-
-**Dashboard time framing**:
-The Local Dashboard first screen is trend-first, not current-state-first. Resolved: the Dashboard Overview should orient users around range-scoped Token Burn, daily burn, peak days, and top drivers before lower-level session detail.
-
-**Headline token burn semantics**:
-The Local Dashboard may show a combined headline Token Burn value only when the observed, estimated, mixed, and unavailable metric split is visible near the headline. Resolved: avoid a naked total that hides evidence quality or implies unavailable metrics are zero.
-
-**Dollar cost semantics**:
-The Local Dashboard includes Estimated Token Cost for MVP usability. Resolved: dollar values are estimates derived from a Harness Pricing Basis and must not be presented as billed provider invoices, because pricing differs across GitHub Copilot, OpenAI API, Anthropic API, Codex, Claude Code, and future enterprise billing routes.
-
-**Pricing source sequencing**:
-The MVP uses a local, versioned Harness Pricing Basis for deterministic Estimated Token Cost. Resolved: automatic live provider scraping is out of scope for the MVP, while a Pricing Refresh Workflow is captured as a later-phase capability.
-
-**Cost match failure**:
-When the dashboard cannot match a session, model invocation, or aggregate to the Harness Pricing Basis, it shows Unavailable Token Cost while still showing token metrics. Resolved: do not use fallback average rates for the MVP.
-
-**Dashboard comparison priority**:
-The Local Dashboard compares Token Hotspots and recommendations first, model and harness Estimated Token Cost second, and tool behavior third. Resolved: the MVP comparison story should answer what can be fixed before it answers which model, harness, or tool was expensive.
-
-**Model and harness comparison sequencing**:
-The Local-First MVP shows Model Cost Mix in the Dashboard Overview and keeps the Coding-Agent Harness as filter and context. Resolved: dedicated harness comparison is deferred until a Secondary Harness adapter exists.
-
-**Tool behavior comparison**:
-The Local-First MVP includes a compact tool comparison section that summarizes tool activity across the selected Dashboard Range, while keeping Token Hotspots and recommendations as the primary comparison story.
-
 **Tool-Associated Token Burn**:
 Token Burn associated with tool behavior through direct evidence or correlation across turns and model invocations. It must be labelled with evidence quality and shown as unavailable when the association cannot be proven or responsibly inferred.
 _Avoid_: Tool cost guess, unlabelled tool attribution
-
-**Scale equivalent sequencing**:
-Scale equivalents are visually useful but not required to prove the Optimization Feedback Loop. Resolved: defer Scale Equivalents until a later phase and label them as illustrative estimates when implemented.
-
-**Tool metric semantics**:
-The MVP tool comparison shows both tool call counts and Tool-Associated Token Burn. Resolved: call counts may be direct telemetry, while token burn must preserve attribution and confidence rather than implying every tool call has directly measured token cost.
-
-**Dashboard range presets**:
-The Local Dashboard uses range presets for trend-first analysis. Resolved: default to 90 days, with 30 days, 90 days, 180 days, one year, and all available telemetry as the initial preset set.
-
-**Daily burn visual form**:
-The Local Dashboard uses a Token Burn Heatmap as the primary daily burn visual, with a compact trend line or moving average for shape over time. Resolved: keep an accessible tabular representation available so the dashboard is not chart-only.
-
-**Moving average sequencing**:
-The Local-First MVP includes a 30-day Moving Burn Average table or line alongside the Token Burn Heatmap. Resolved: the moving average is part of the MVP trend-first dashboard, not a later-phase illustrative feature.
-
-**Chart library sequencing**:
-The Local-First MVP uses Static Dashboard Visuals for the first visual redesign. Resolved: chart library selection is deferred until Rich Dashboard Interaction or maintainability needs make the dependency worthwhile.
-
-**Dashboard visual tone**:
-The Local-First MVP uses an Analytical Sepia Palette. Resolved: borrow the warm paper-like feel from the reference dashboard, but do not closely clone it or let warmth replace observability-grade semantic color.
-
-**Dashboard metric hierarchy**:
-The Local-First MVP leads with one dominant Typed Burn Total and uses a Dashboard Metric Strip for supporting context. Resolved: Estimated Token Cost, active sessions, top Token Hotspot, and Metric Status should support the Token Burn story rather than compete as equal headline metrics.
-
-**Dashboard section ordering**:
-The Local-First MVP orders the main page as headline summary, daily Token Burn visual, drivers and Token Hotspots, Recommendation Action Section, then sessions and evidence detail. Resolved: sessions are drill-down evidence, not the primary page entry point.
-
-**Recommendation placement**:
-The Local-First MVP shows recommendations as a full-width Recommendation Action Section before sessions. Resolved: recommendations are the action layer of the dashboard, not small annotations beside hotspots.
-
-**Hotspot driver display**:
-The Local-First MVP shows Token Hotspots as a Hotspot Driver View with both visual bars and table semantics. Resolved: bars support scanning, while exact values, attribution, confidence, and drill-down links preserve evidence discipline.
-
-**Dashboard navigation shape**:
-The Local-First MVP uses a Dashboard Top Rail instead of a persistent left sidebar. Resolved: sidebar navigation is deferred until the product has multiple real dashboard areas that justify the horizontal space.
-
-**Heatmap visual priority**:
-The Local-First MVP gives the Token Burn Heatmap the widest visual treatment immediately after the headline summary. Resolved: hotspots and recommendations remain prominent below it, but the heatmap owns the first major shape-of-burn read.
-
-**Top-level dashboard filters**:
-The Local-First MVP keeps top-level filters to Dashboard Range, repository, Coding-Agent Harness, model, and Metric Status. Resolved: additional filters belong in section-level drill-downs until the dashboard has enough interaction depth to justify promoting them.
-
-**Dashboard freshness display**:
-The Local-First MVP shows a Dashboard Freshness Summary near the Dashboard Top Rail. Resolved: users should see telemetry import recency, repo context enrichment recency, and pricing basis recency before trusting Token Burn or Estimated Token Cost values.
-
-**Recommendation rationale display**:
-The Local-First MVP shows a Recommendation Rationale inline for each recommendation in the Recommendation Action Section. Resolved: each action needs a reason sentence, expected benefit, confidence, and evidence drill-down link, not only a back-link to hotspot evidence.
-
-**Responsive dashboard scope**:
-The Local-First MVP uses a Desktop-Led Responsive Dashboard. Resolved: desktop and laptop scanning drive the layout, while narrow screens must stack sections, preserve readable controls, and avoid broken tables.
-
-**Dashboard export scope**:
-The first Local Dashboard visual redesign does not include export actions. Resolved: Dashboard Export Workflow is deferred until real usage clarifies whether users need CSV sessions, hotspot reports, cost reports, or evidence bundles.
-
-**Dashboard component shape**:
-The first Local Dashboard visual redesign uses Dashboard Component Boundaries while keeping a single page route. Resolved: the page orchestrates data loading and state, while focused Blazor components render `DashboardTopRail`, `TokenBurnHero`, `TokenBurnHeatmap`, `HotspotDriverView`, `RecommendationActionSection`, `SessionsEvidenceTable`, and `GuidedEmptyState`.
-
-**Dashboard styling shape**:
-The first Local Dashboard visual redesign uses Dashboard Style Boundaries. Resolved: `app.css` owns palette tokens, base body styling, shared spacing, table defaults, and focus styles, while component-scoped `.razor.css` files own heatmap, hero, hotspot, recommendation, and session layout details.
-
-**Dashboard test shape**:
-The first Local Dashboard visual redesign prioritizes API and contract tests before visual verification. Resolved: tests should cover range filtering, dense daily buckets, 30-day Moving Burn Average, Metric Quality Marker propagation, filter options, and Recommendation Rationale; add a small Blazor smoke test only if the repo has a practical pattern for it, while CSS polish is verified manually or with browser screenshots after the endpoint is stable.
-
-**Dashboard implementation phasing**:
-The first Local Dashboard visual redesign is split into Dashboard Implementation Slices even if the work stays on one branch. Resolved: slice 1 is the `/dashboard/overview` contract and API with query parameters, aggregation, filter options, dense buckets, moving average, and tests; slice 2 is Blazor data loading with `DashboardOverviewClient`, URL query binding, loading, error, empty states, and component skeletons; slice 3 is the visual redesign with Analytical Sepia Palette, component CSS, heatmap, hero, hotspots, recommendations, and sessions/evidence layout; slice 4 is browser verification and documentation reconciliation.
-
-**Dashboard overview endpoint**:
-The first Local Dashboard visual redesign adds `/dashboard/overview` as the Dashboard Overview Contract API endpoint rather than computing the redesigned overview from separate status, sessions, and insights calls inside Blazor. Resolved: the API owns range filtering, aggregation, freshness summary, heatmap buckets, moving average, Metric Quality Markers, hotspot ranking, and recommendation summaries.
-
-**Dashboard data loading shape**:
-The first Local Dashboard visual redesign uses the Dashboard Overview Contract as the main page data source. Resolved: `/sessions` and `/insights` may remain lower-level or diagnostic endpoints, but the redesigned overview should not stitch together separate status, sessions, and insights responses in Blazor.
-
-**Dashboard filter option loading**:
-The Dashboard Overview Contract includes top-level filter option lists for repository, Coding-Agent Harness, model, and Metric Status alongside the displayed dashboard data. Resolved: the MVP should avoid separate filter-discovery endpoints so the options match the current overview data set.
-
-**Dashboard contract formatting boundary**:
-The Dashboard Overview Contract returns raw values plus semantic fields, while Blazor formats display strings and visual states. Resolved: the API returns UTC timestamps, token and cost values, Metric Status, Metric Confidence, attribution, labels, IDs, and bucket dates; Blazor owns local timezone presentation, compact labels, badges, and CSS states.
-
-**Moving average computation boundary**:
-The Dashboard Overview Contract computes the 30-day Moving Burn Average server-side. Resolved: moving average calculation is dashboard semantics owned by the API, not presentation formatting owned by Blazor.
-
-**Heatmap bucket density**:
-The Dashboard Overview Contract returns Token Burn Timeline buckets for every day in the selected Dashboard Range, including zero-burn days. Resolved: Blazor should not infer missing days, timezone boundaries, or zero values for the Token Burn Heatmap.
-
-**Dashboard filter state**:
-The first Local Dashboard visual redesign stores top-level filters in Dashboard Query State. Resolved: range, repository, Coding-Agent Harness, model, and Metric Status should survive browser refresh, support shareable drill-down URLs, and map directly to Dashboard Overview Contract request parameters.
-
-**Metric quality display**:
-The Local-First MVP repeats Metric Quality Markers anywhere exact token or cost numbers appear. Resolved: quality markers should be visually quiet but travel with table rows, aggregate values, and cost values instead of appearing only near the headline total.
-
-**Dashboard timezone semantics**:
-The Local Dashboard stores telemetry timestamps in UTC and buckets daily Token Burn using the configured or local Dashboard Timezone. Resolved: show the Dashboard Timezone near the range controls so date buckets are explicit.
-
-**Dashboard interaction phasing**:
-The Local-First MVP uses static analytical views with Dashboard Range controls and Dashboard Drill-Down links. Resolved: Rich Dashboard Interaction is captured as a later-phase capability for future brainstorming and implementation.
-
-**Dashboard drill-down placement**:
-The Local-First MVP keeps Dashboard Drill-Down on the same page through Dashboard Fragment Targets, expanded rows, anchored sections, or range/day filters. Resolved: separate session, hotspot, and day detail pages are deferred until the overview and evidence story are proven, and expand/collapse state remains presentation behavior rather than the only addressable drill-down mechanism.
-
-**Empty state behavior**:
-The Local Dashboard uses Guided Empty States instead of neutral no-data placeholders or demo fixtures. Resolved: when data is missing, the dashboard points users to the next action, such as importing telemetry, running Repo Context Enrichment, or reviewing why no Token Hotspot was found, and does not silently render sample data.
-
-**Demo readiness placement**:
-Manual Spec Kit demo readiness belongs in the Manual Spec Kit Spec-Bloat Demo Runbook, not the Local Dashboard. Resolved: keep the dashboard focused on token burn, evidence, hotspots, and recommendations rather than presenter checklist state.
-
-**Overview evidence density**:
-The Local-First MVP shows Evidence Summaries in the Dashboard Overview and exposes detailed evidence references through same-page expansion. Resolved: avoid full raw evidence detail inline by default so the overview remains scannable.
-
-**Spec Kit demo boundary**:
-The idea introduced GitHub Spec Kit as the way to demonstrate specification-driven development bloat. Resolved: keep the product scenario in `docs/scenarios/spec-kit-spec-bloat.md` and the live presentation runbook in `docs/demos/manual-spec-kit-spec-bloat.md`, without maintaining a committed Spec Kit corpus or expected hotspot fixture.
-
-**Spec artifact classification**:
-The manual Spec Kit demo needed a boundary between useful SDD context and bloat. Resolved: current feature specs, plans, tasks, and project principles are active; superseded specs, old plans, completed tasks, stale design logs, duplicate generated artifacts, and archived specs still visible to the agent are bloat; unreferenced generated task breakdowns or checklists are neutral unless repeated or visible in the expensive session.
-
-## Example Dialogue
-
-Developer: "Is Azure Container Apps required for the first demo?"
-
-Domain expert: "No. The Local-First MVP proves that a Coding-Agent Harness can produce telemetry, that the platform can normalize it, and that Token Hotspots can be shown locally."
-
-Developer: "So Azure is out of scope?"
-
-Domain expert: "No. Azure remains the Azure Production Path, but it comes after the local proof."
-
-Developer: "Should we build Copilot and Claude support at the same time?"
-
-Domain expert: "No. Start with VS Code Copilot as the Primary Harness, then add Claude Code as the first Secondary Harness and Codex as a later Secondary Harness to prove the common model holds across harnesses."
-
-Developer: "Do we need a Next.js dashboard?"
-
-Domain expert: "No. Use a Blazor Web App locally for the Local Dashboard and Grafana in the Azure Production Path."
-
-Developer: "Should we use DuckDB for the local data store?"
-
-Domain expert: "No. Use PostgreSQL as the Local Store so the Local-First MVP exercises a production-shaped relational schema."
-
-Developer: "Should the local app be Python-based?"
-
-Domain expert: "No. Use .NET Aspire as the Local App Platform, with a Blazor Local Dashboard, ASP.NET Core API, ingestion worker, and PostgreSQL."
-
-Developer: "Should ingestion and dashboard code live in one project?"
-
-Domain expert: "No. Keep ingestion worker, dashboard API, and Blazor Local Dashboard as separate Local Pipeline Projects under Aspire."
-
-Developer: "Do we need the OpenTelemetry Collector on day one?"
-
-Domain expert: "No. Start with Direct File Import, but design the ingestion worker so the Collector Ingestion Path can be added without changing the normalized model."
-
-Developer: "If reasoning tokens are missing, should we store zero?"
-
-Domain expert: "No. Store an Unavailable Token Metric as `NULL`, set Metric Status to unavailable, and expose Metric Confidence so the dashboard does not imply a real zero."
-
-Developer: "Can the dashboard show one total token number?"
-
-Domain expert: "Only if it is qualified by Token Total Type. Observed, estimated, and mixed token totals must remain visibly distinct."
-
-Developer: "Can I capture prompt or tool content if I need to debug?"
-
-Domain expert: "Yes, but only by enabling Content Capture Mode explicitly. The default remains metadata-only, and captured content must be redacted before storage."
-
-Developer: "Does the repo scanner produce telemetry?"
-
-Domain expert: "No. The repo scanner performs Repo Context Enrichment. It can explain likely causes, but it must not overwrite or masquerade as harness-emitted telemetry."
-
-Developer: "Can the hotspot engine say a file caused token burn?"
-
-Domain expert: "Only when Hotspot Attribution Type is direct. Otherwise it must say suspected cause and show the evidence behind the confidence score."
-
-Developer: "Should the MVP use an LLM to generate recommendations?"
-
-Domain expert: "No. The MVP uses Deterministic Recommendations. The Azure Production Path may add LLM-Assisted Recommendations that rewrite and prioritize evidence-backed recommendations."
-
-Developer: "Can the Copilot parser assume every expected OTel field exists?"
-
-Domain expert: "No. Build from the Copilot Field Mapping and classify fields as documented, fixture-observed, optional when available, or content-capture-only."
-
-Developer: "What if a VS Code workspace has multiple repos?"
-
-Domain expert: "Model each repo as a Workspace Repo. Attach hotspots to a repo only when attribution is clear; otherwise keep them at workspace scope."
-
-Developer: "Can the dashboard compare usage across developers?"
-
-Domain expert: "Yes, by User Hash by default. Real names, emails, teams, or departments require explicit import input, configured mapping, or clearly emitted telemetry."
-
-Developer: "Can we store local repo paths like `/Users/alex/work/acme-secret`?"
-
-Domain expert: "Yes, when they come from explicit import or enrichment input or clearly emitted telemetry. Do not silently scrape unrelated local files, Git config, OS users, or shell environment for paths."
-
-Developer: "Should `package-lock.json` or generated clients become hotspots?"
-
-Domain expert: "Only with direct harness evidence. Otherwise classify them as lockfile or generated context so they explain token burn without creating misleading refactor recommendations."
