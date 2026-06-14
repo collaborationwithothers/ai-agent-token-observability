@@ -49,22 +49,22 @@ The superseded docs are historical or future-adapter reference material. They mu
 
 ## Current Codebase State
 
-The current source tree still contains local-first scaffolding:
+The active source tree is production-shaped.
 
-- Aspire AppHost.
-- Blazor Local Dashboard.
-- Dashboard API.
-- Direct file import worker.
-- Local storage/import services.
-- Copilot JSONL tests.
+- The root solution and production solution reference the Token Observability production skeleton.
+- The Aspire AppHost, Blazor Local Dashboard, local dashboard API, direct file import worker, local storage/import services, and Copilot JSONL tests have been removed from the active code path.
+- Superseded local-first documents remain as historical reference only.
 
-That code is planned to be deleted, replaced, retained, or quarantined according to [Production Codebase Transition](./docs/architecture/production-codebase-transition.md). Do not evolve local-only mode as a product feature.
+Do not reintroduce local-only mode as a product feature.
 
-## Production Skeleton Validation
+## Production Validation
 
-The production skeleton has its own solution entrypoint that excludes the local-only AppHost, Blazor Local Dashboard, and direct file import worker.
+The root solution is production-shaped. The explicit production solution remains as a stable validation entrypoint for production-only commands.
 
 ```bash
+dotnet restore AiAgentTokenObservability.slnx
+dotnet build AiAgentTokenObservability.slnx --no-restore
+dotnet test AiAgentTokenObservability.slnx --no-restore
 dotnet restore AiAgentTokenObservability.Production.slnx
 dotnet build AiAgentTokenObservability.Production.slnx --no-restore
 dotnet test tests/TokenObservability.Skeleton.Tests/TokenObservability.Skeleton.Tests.csproj --no-restore
@@ -74,18 +74,6 @@ npm --prefix web/token-observability-dashboard run build
 ```
 
 These commands validate the production project structure and runtime placeholders for the Azure Production MVP. Full product behavior is added by later implementation issues.
-
-## Current Transition Validation Commands
-
-The original solution still includes local-first transition scaffolding. Use these commands to keep the full repository buildable while production slices replace or quarantine that scaffolding:
-
-```bash
-dotnet restore AiAgentTokenObservability.slnx
-dotnet build AiAgentTokenObservability.slnx
-dotnet test AiAgentTokenObservability.slnx --no-restore
-```
-
-These commands validate the combined repository state. They are not production deployment commands and must not be treated as the production runtime boundary.
 
 ## Infrastructure Direction
 

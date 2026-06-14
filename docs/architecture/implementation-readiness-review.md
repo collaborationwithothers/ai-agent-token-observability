@@ -115,18 +115,17 @@ Recommended next step: create implementation issues for health endpoints, probes
 
 ### 4. Current Codebase Transition
 
-Status: the codebase transition boundary is defined. The remaining work is implementation slicing, not requirements discovery.
+Status: the codebase transition boundary is defined. Milestone 0 issues implement the transition in slices rather than reopening requirements discovery.
 
 Implementation issue creation needs:
 
-- Create production solution skeleton.
-- Remove `AppHost` from the production solution.
-- Replace Blazor Dashboard Web with React Product Dashboard.
-- Replace direct file import worker with Product Ingestion Endpoint and Product Jobs.
-- Quarantine or delete Copilot JSONL tests.
-- Add production tests before removing local-first tests from active CI.
+- Keep the production solution skeleton as the active build path.
+- Keep the React Product Dashboard separate from the superseded Blazor dashboard.
+- Keep Product Ingestion Endpoint and Product Jobs separate from superseded direct file import.
+- Keep local-first tests out of active production validation.
+- Add production tests for each new production contract before implementing behavior.
 
-Recommended next step: create implementation issues for the production skeleton and local-first code removal sequence.
+Recommended next step: continue the Milestone 0 guardrail issues, then move into Terraform and workflow guardrails.
 
 ## Stale Or Superseded Docs
 
