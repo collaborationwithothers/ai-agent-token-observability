@@ -1,12 +1,12 @@
-namespace Product.Skeleton.Tests;
+namespace TokenObservability.Skeleton.Tests;
 
 public sealed class ProductionSolutionSkeletonTests
 {
     private static readonly string[] ExpectedProductionProjects =
     [
-        "src/Product.Contracts/Product.Contracts.csproj",
-        "src/Product.Domain/Product.Domain.csproj",
-        "src/Product.Infrastructure/Product.Infrastructure.csproj"
+        "src/TokenObservability.Contracts/TokenObservability.Contracts.csproj",
+        "src/TokenObservability.Domain/TokenObservability.Domain.csproj",
+        "src/TokenObservability.Infrastructure/TokenObservability.Infrastructure.csproj"
     ];
 
     private static readonly string[] ForbiddenLocalFirstProjects =

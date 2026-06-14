@@ -91,7 +91,7 @@ Milestone 0 child issues:
 | Issue | Child issue | Outcome |
 | --- | --- | --- |
 | [#18](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/18) | Production solution skeleton | New production project structure builds without relying on local-only AppHost |
-| [#19](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/19) | Product runtime skeletons | Product API, Product Ingestion Endpoint, Product Jobs, and React Product Dashboard placeholders exist with health-oriented smoke tests |
+| [#19](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/19) | Token Observability runtime skeletons | Product API, Product Ingestion Endpoint, Product Jobs, and React Product Dashboard placeholders exist with health-oriented smoke tests |
 | [#20](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/20) | Local-first quarantine/removal | AppHost, Blazor Dashboard, direct file import, and Copilot JSONL tests are removed from the production path or explicitly quarantined |
 | [#21](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/21) | Terraform stage skeleton | Required Terraform stage directories validate with backend disabled |
 | [#22](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/22) | Workflow guardrail validator | Unsafe public-repository workflow fixtures fail validation |

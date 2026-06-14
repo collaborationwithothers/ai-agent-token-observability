@@ -47,5 +47,10 @@ terraform.rc
 bin/
 obj/
 
+# Frontend dependencies and build outputs
+node_modules/
+web/token-observability-dashboard/dist/
+web/token-observability-dashboard/tsconfig.tsbuildinfo
+
 # Local telemetry captures and scratch data
 .local/

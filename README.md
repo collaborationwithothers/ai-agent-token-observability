@@ -67,10 +67,13 @@ The production skeleton has its own solution entrypoint that excludes the local-
 ```bash
 dotnet restore AiAgentTokenObservability.Production.slnx
 dotnet build AiAgentTokenObservability.Production.slnx --no-restore
-dotnet test tests/Product.Skeleton.Tests/Product.Skeleton.Tests.csproj --no-restore
+dotnet test tests/TokenObservability.Skeleton.Tests/TokenObservability.Skeleton.Tests.csproj --no-restore
+dotnet test tests/TokenObservability.Runtime.Tests/TokenObservability.Runtime.Tests.csproj --no-restore
+npm --prefix web/token-observability-dashboard ci
+npm --prefix web/token-observability-dashboard run build
 ```
 
-These commands validate the production project structure for the Azure Production MVP. Runtime service behavior is added by later Milestone 0 issues.
+These commands validate the production project structure and runtime placeholders for the Azure Production MVP. Full product behavior is added by later implementation issues.
 
 ## Current Transition Validation Commands
 
