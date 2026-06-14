@@ -1,0 +1,140 @@
+name: Terraform Plan
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Deployment environment.
+        required: true
+        type: choice
+        options:
+          - dv
+          - qa
+          - pp
+          - pd
+      azure_region:
+        description: Azure region for this workspace.
+        required: true
+        type: choice
+        options:
+          - eastus
+          - eastus2
+          - westeurope
+      customer_organization_slug:
+        description: Customer organization slug. Use internal for first release.
+        required: true
+        type: string
+      terraform_stage:
+        description: Terraform stage to plan.
+        required: true
+        type: choice
+        options:
+          - foundation
+          - network_private_data_plane
+          - observability_foundation
+          - data_platform
+          - ai_services
+          - app_runtime
+          - managed_grafana
+          - edge
+      terraform_workspace:
+        description: Expected workspace, formatted as environment_region_customerSlug.
+        required: true
+        type: string
+      confirmation:
+        description: Type plan workspace, for example plan dv_eastus2_internal.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  plan:
+    name: Guarded Terraform plan
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Validate guardrails before privileged steps
+        env:
+          EXPECTED_REPOSITORY: collaborationwithothers/ai-agent-token-observability
+          AUTHORIZED_ACTORS: ${{ vars.TOKENOBS_ALLOWED_DEPLOYMENT_ACTORS }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          TERRAFORM_STAGE: ${{ inputs.terraform_stage }}
+          REQUESTED_TERRAFORM_WORKSPACE: ${{ inputs.terraform_workspace }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+
+          test "${GITHUB_REPOSITORY}" = "${EXPECTED_REPOSITORY}"
+          test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
+          test -n "${AUTHORIZED_ACTORS}"
+          case ",${AUTHORIZED_ACTORS}," in *",${GITHUB_ACTOR},"*) ;; *) exit 1 ;; esac
+          case "${GITHUB_REF_NAME}:${ENVIRONMENT}" in main:dv|main:qa|main:pp|main:pd) ;; *) exit 1 ;; esac
+          case "${ENVIRONMENT}" in dv|qa|pp|pd) ;; *) exit 1 ;; esac
+          case "${AZURE_REGION}" in eastus|eastus2|westeurope) ;; *) exit 1 ;; esac
+          case "${CUSTOMER_ORGANIZATION_SLUG}" in *[!a-z0-9-]*|""|-*|*-) exit 1 ;; esac
+          case "${TERRAFORM_STAGE}" in foundation|network_private_data_plane|observability_foundation|data_platform|ai_services|app_runtime|managed_grafana|edge) ;; *) exit 1 ;; esac
+
+          TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
+          test "${TF_WORKSPACE}" != "default"
+          test "${REQUESTED_TERRAFORM_WORKSPACE}" = "${TF_WORKSPACE}"
+          test "${CONFIRMATION}" = "plan ${TF_WORKSPACE}"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.7
+
+      - name: Terraform plan
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          TERRAFORM_STAGE: ${{ inputs.terraform_stage }}
+        run: |
+          set -euo pipefail
+
+          TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
+          STAGE_DIR="infrastructure/azure/stages/${TERRAFORM_STAGE}"
+          PLAN_FILE="${TERRAFORM_STAGE}-${TF_WORKSPACE}.tfplan"
+
+          test -d "${STAGE_DIR}"
+          cp "${STAGE_DIR}/backend.azurerm.tf.example" "${STAGE_DIR}/backend.generated.tf"
+
+          terraform -chdir="${STAGE_DIR}" init -input=false \
+            -backend-config="resource_group_name=${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}" \
+            -backend-config="storage_account_name=${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}" \
+            -backend-config="container_name=${{ vars.TF_STATE_CONTAINER_NAME }}" \
+            -backend-config="key=${TERRAFORM_STAGE}.tfstate" \
+            -backend-config="use_azuread_auth=true"
+
+          terraform -chdir="${STAGE_DIR}" workspace select "${TF_WORKSPACE}" || terraform -chdir="${STAGE_DIR}" workspace new "${TF_WORKSPACE}"
+          terraform -chdir="${STAGE_DIR}" validate
+          terraform -chdir="${STAGE_DIR}" plan -input=false -out="${PLAN_FILE}" \
+            -var="environment=${ENVIRONMENT}" \
+            -var="azure_region=${AZURE_REGION}" \
+            -var="customer_organization_slug=${CUSTOMER_ORGANIZATION_SLUG}" \
+            -var="terraform_workspace_name=${TF_WORKSPACE}" \
+            -var="resource_instance=core" \
+            -var="tags={environment=\"${ENVIRONMENT}\",region=\"${AZURE_REGION}\",product=\"token-observability\",owner=\"platform\",data_classification=\"internal\",managed_by=\"terraform\"}"
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ inputs.terraform_stage }}-${{ inputs.terraform_workspace }}
+          path: infrastructure/azure/stages/${{ inputs.terraform_stage }}/*.tfplan
+          if-no-files-found: error

@@ -1,0 +1,16 @@
+name: Unsafe Push Terraform Fixture
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - run: terraform plan -input=false
