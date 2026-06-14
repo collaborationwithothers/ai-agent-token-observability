@@ -655,9 +655,9 @@ The Azure Production MVP needs these tables first:
 
 Target-state tables such as `source_provider_connection`, full `repository` discovery, `repository_evidence`, and `data_lifecycle_request` can be introduced in slices, but their relationships are defined here so MVP schema decisions do not block SaaS tenancy later.
 
-## Migration From Current Implementation
+## Migration From Superseded Implementation
 
-The current codebase still contains local-first concepts such as direct file import, Copilot fixture parsing, and local workspace repository enrichment. Those are implementation artifacts of the superseded MVP.
+The superseded local-first implementation included direct file import, Copilot fixture parsing, and local workspace repository enrichment. Those are historical implementation artifacts of the superseded MVP and are not active production paths.
 
 Production implementation should introduce new tables rather than trying to mutate local-only imports into tenant-aware product ingestion records in place.
 

@@ -34,7 +34,7 @@ If I upload a file, make sure you index it even if it has been indexed previousl
 
 This repository is being reworked into an Azure Production MVP for AI coding-agent token observability.
 
-The previous local-first MVP is superseded. The existing .NET Aspire AppHost, Blazor Local Dashboard, direct file import worker, local storage/import model, and Copilot JSONL tests are transition scaffolding only.
+The previous local-first MVP is superseded. The .NET Aspire AppHost, Blazor Local Dashboard, direct file import worker, local storage/import model, and Copilot JSONL tests have been removed from the active code path.
 
 First production harness: Codex CLI.
 
@@ -75,10 +75,12 @@ Prerequisites:
 Use:
 
 - `dotnet restore AiAgentTokenObservability.slnx`
-- `dotnet build AiAgentTokenObservability.slnx`
+- `dotnet build AiAgentTokenObservability.slnx --no-restore`
 - `dotnet test AiAgentTokenObservability.slnx --no-restore`
+- `npm --prefix web/token-observability-dashboard ci`
+- `npm --prefix web/token-observability-dashboard run build`
 
-These commands validate the current transition scaffolding until the production solution skeleton replaces it. They are not production deployment commands.
+These commands validate the production-shaped active tree. They are not production deployment commands.
 
 ## Implementation Rules
 

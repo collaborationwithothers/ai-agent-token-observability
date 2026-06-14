@@ -32,9 +32,9 @@ Transition categories:
 | `retain` | Keep and evolve because it aligns with production contracts |
 | `quarantine` | Move out of the active production path as historical reference or future-adapter evidence |
 
-## Current Solution Inventory
+## Superseded Local-First Inventory
 
-The current solution contains these projects:
+Before the production transition, the root solution contained these local-first projects:
 
 | Project | Current role | Production disposition | Reason |
 | --- | --- | --- | --- |
@@ -146,19 +146,17 @@ Historical tests may remain only if:
 
 ## Implementation Acceptance Criteria
 
-- The production solution does not depend on `AiAgentTokenObservability.AppHost`.
+- The root solution and production solution do not depend on `AiAgentTokenObservability.AppHost`.
 - The production dashboard path is React, TypeScript, and Vite.
 - Product API, Product Ingestion Endpoint, and Product Jobs are separate production runtime boundaries.
 - Direct file import is absent from the production ingestion path.
 - Local-only mode is not documented as supported.
-- Copilot JSONL import tests are either removed or quarantined as future-adapter evidence.
+- Copilot JSONL import tests are either removed or quarantined as future-adapter evidence outside active production validation.
 - Production tests cover Codex-first ingestion and Product API contracts before local-first tests are removed from active CI.
 - The repository remains buildable after each transition slice.
 
 ## Verified Repository Facts
 
-- `AiAgentTokenObservability.slnx` currently lists `AppHost`, `Contracts`, `Dashboard.Api`, `Dashboard.Web`, `Ingestion.Worker`, `ServiceDefaults`, `Storage`, and one test project.
-- `src/AiAgentTokenObservability.AppHost/AiAgentTokenObservability.AppHost.csproj` uses the Aspire AppHost SDK.
-- `src/AiAgentTokenObservability.Dashboard.Web/AiAgentTokenObservability.Dashboard.Web.csproj` is the current Blazor dashboard project.
-- `src/AiAgentTokenObservability.Ingestion.Worker/ImportCommandOptions.cs` contains `DirectFileImport` configuration.
-- `tests/AiAgentTokenObservability.Tests/CopilotJsonlImportTests.cs` contains current Copilot JSONL import coverage.
+- `AiAgentTokenObservability.slnx` and `AiAgentTokenObservability.Production.slnx` list only `TokenObservability.*` production projects and tests.
+- The Aspire AppHost, Blazor Local Dashboard, local Dashboard API, direct file import worker, local storage/import services, and Copilot JSONL tests have been removed from the active source tree.
+- Superseded local-first docs remain as historical context only.
