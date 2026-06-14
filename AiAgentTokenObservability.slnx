@@ -7,12 +7,16 @@
     <Project Path="src/AiAgentTokenObservability.Ingestion.Worker/AiAgentTokenObservability.Ingestion.Worker.csproj" />
     <Project Path="src/AiAgentTokenObservability.ServiceDefaults/AiAgentTokenObservability.ServiceDefaults.csproj" />
     <Project Path="src/AiAgentTokenObservability.Storage/AiAgentTokenObservability.Storage.csproj" />
-    <Project Path="src/Product.Contracts/Product.Contracts.csproj" />
-    <Project Path="src/Product.Domain/Product.Domain.csproj" />
-    <Project Path="src/Product.Infrastructure/Product.Infrastructure.csproj" />
+    <Project Path="src/TokenObservability.Api/TokenObservability.Api.csproj" />
+    <Project Path="src/TokenObservability.Contracts/TokenObservability.Contracts.csproj" />
+    <Project Path="src/TokenObservability.Domain/TokenObservability.Domain.csproj" />
+    <Project Path="src/TokenObservability.Infrastructure/TokenObservability.Infrastructure.csproj" />
+    <Project Path="src/TokenObservability.Ingestion/TokenObservability.Ingestion.csproj" />
+    <Project Path="src/TokenObservability.Jobs/TokenObservability.Jobs.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/AiAgentTokenObservability.Tests/AiAgentTokenObservability.Tests.csproj" />
-    <Project Path="tests/Product.Skeleton.Tests/Product.Skeleton.Tests.csproj" />
+    <Project Path="tests/TokenObservability.Runtime.Tests/TokenObservability.Runtime.Tests.csproj" />
+    <Project Path="tests/TokenObservability.Skeleton.Tests/TokenObservability.Skeleton.Tests.csproj" />
   </Folder>
 </Solution>

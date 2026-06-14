@@ -1,4 +1,4 @@
-namespace Product.Infrastructure;
+namespace TokenObservability.Domain;
 
 public sealed class AssemblyMarker
 {

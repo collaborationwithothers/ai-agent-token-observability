@@ -53,21 +53,21 @@ Target source layout should be created intentionally during implementation. Sugg
 
 ```text
 src/
-  Product.Api/
-  Product.Ingestion/
-  Product.Jobs/
-  Product.Domain/
-  Product.Infrastructure/
-  Product.Contracts/
+  TokenObservability.Api/
+  TokenObservability.Ingestion/
+  TokenObservability.Jobs/
+  TokenObservability.Domain/
+  TokenObservability.Infrastructure/
+  TokenObservability.Contracts/
 web/
-  product-dashboard/
+  token-observability-dashboard/
 tests/
-  Product.Api.Tests/
-  Product.Ingestion.Tests/
-  Product.Jobs.Tests/
-  Product.Domain.Tests/
-  Product.Infrastructure.Tests/
-  Product.Dashboard.Tests/
+  TokenObservability.Api.Tests/
+  TokenObservability.Ingestion.Tests/
+  TokenObservability.Jobs.Tests/
+  TokenObservability.Domain.Tests/
+  TokenObservability.Infrastructure.Tests/
+  TokenObservability.Dashboard.Tests/
 ```
 
 Rules:
