@@ -1,5 +1,7 @@
 # Local-First MVP PRD
 
+Status: superseded by [Azure Production MVP PRD](./azure-production-mvp.md) and [ADR 0002](../adr/0002-replace-local-first-with-azure-production-saas.md)
+
 ## Problem Statement
 
 AI coding-agent usage creates token burn across prompts, tool calls, repository context, generated artifacts, specifications, and repeated agent behavior. Teams can often see that tokens were used, but they cannot reliably identify which files, folders, tools, specs, or harness behavior caused the burn, whether the evidence is direct or suspected, or what action would reduce it.

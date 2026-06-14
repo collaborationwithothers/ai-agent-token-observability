@@ -1,5 +1,9 @@
 # Manual Spec Kit Spec-Bloat Demo Runbook
 
+Status: historical demo runbook. This document is not part of the Azure Production MVP implementation contract.
+
+The active production implementation scope is defined by [Azure Production MVP PRD](../prd/azure-production-mvp.md), [Production Target State Spec](../specs/production-target-state.md), and [Production Implementation Roadmap](../planning/production-implementation-roadmap.md). This runbook remains background material for a future demonstration scenario only.
+
 ## Purpose
 
 Run the live presentation flow for the Spec Kit spec-bloat scenario.

@@ -1,5 +1,9 @@
 # Spec Kit Spec-Bloat Scenario
 
+Status: historical scenario. This document is not part of the Azure Production MVP implementation contract.
+
+The active production implementation scope is defined by [Azure Production MVP PRD](../prd/azure-production-mvp.md), [Production Target State Spec](../specs/production-target-state.md), and [Production Implementation Roadmap](../planning/production-implementation-roadmap.md). This scenario remains background material for a future demonstration of spec bloat and context hygiene.
+
 ## Purpose
 
 Describe the primary spec-bloat product scenario used to exercise Token Hotspot detection for specification-driven development artifacts.
