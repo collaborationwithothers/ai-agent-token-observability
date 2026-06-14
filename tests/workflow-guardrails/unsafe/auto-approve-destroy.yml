@@ -1,0 +1,21 @@
+name: Unsafe Auto Approve Destroy Fixture
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate guardrails before privileged steps
+        run: |
+          echo "${GITHUB_REPOSITORY}"
+          echo "${GITHUB_ACTOR}"
+          echo "${GITHUB_REF_NAME}"
+          echo "dv_eastus2_internal"
+          echo "confirmation"
+      - run: terraform destroy -auto-approve

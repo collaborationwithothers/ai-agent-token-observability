@@ -1,0 +1,15 @@
+name: Unsafe Missing Gates Fixture
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Terraform plan without guardrails
+        run: terraform plan -input=false
