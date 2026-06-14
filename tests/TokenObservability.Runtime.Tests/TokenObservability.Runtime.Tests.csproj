@@ -20,6 +20,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\TokenObservability.Api\TokenObservability.Api.csproj" />
+    <ProjectReference Include="..\..\src\TokenObservability.Domain\TokenObservability.Domain.csproj" />
+    <ProjectReference Include="..\..\src\TokenObservability.Infrastructure\TokenObservability.Infrastructure.csproj" />
     <ProjectReference Include="..\..\src\TokenObservability.Ingestion\TokenObservability.Ingestion.csproj" />
     <ProjectReference Include="..\..\src\TokenObservability.Jobs\TokenObservability.Jobs.csproj" />
   </ItemGroup>
