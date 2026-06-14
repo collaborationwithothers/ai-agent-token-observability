@@ -74,6 +74,8 @@ REQUIRED_PATTERNS = {
     "workflow_dispatch trigger": r"(?m)^\s*workflow_dispatch\s*:",
     "least privilege contents permission": r"(?m)^\s*contents\s*:\s*read\s*$",
     "OIDC id-token permission": r"(?m)^\s*id-token\s*:\s*write\s*$",
+    "managed runner group": r"(?m)^\s*group\s*:\s*consultwithcloud-azure\s*$",
+    "managed runner label": r"(?m)^\s*labels\s*:\s*\[\s*gh-linux\s*\]\s*$",
     "job-level workflow_dispatch gate": r"github\.event_name\s*==\s*'workflow_dispatch'",
     "job-level repository gate": r"github\.repository\s*==\s*'collaborationwithothers/ai-agent-token-observability'",
     "job-level expected repository input gate": r"inputs\.expected_repository\s*==\s*'collaborationwithothers/ai-agent-token-observability'",

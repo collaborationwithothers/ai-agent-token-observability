@@ -46,7 +46,9 @@ jobs:
         github.actor == 'haripraghash' &&
         github.ref == 'refs/heads/main'
       }}
-    runs-on: ubuntu-latest
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
     environment: ${{ inputs.environment }}
     steps:
       - name: Validate guardrails before privileged steps
