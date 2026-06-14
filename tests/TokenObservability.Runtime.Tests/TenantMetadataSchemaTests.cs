@@ -1,5 +1,6 @@
 using TokenObservability.Domain.Tenancy;
 using TokenObservability.Infrastructure.Persistence;
+using System.Text.RegularExpressions;
 
 namespace TokenObservability.Runtime.Tests;
 
@@ -137,6 +138,35 @@ public sealed class TenantMetadataSchemaTests
         Assert.DoesNotContain("local_os", migration, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("git_config", migration, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("local_file_system", migration, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void PostgreSqlCustomerOrganizationSlugConstraintMatchesTerraformSlugValidation()
+    {
+        var root = FindRepositoryRoot();
+        var migrationPath = Path.Combine(
+            root,
+            "src",
+            "TokenObservability.Infrastructure",
+            "Persistence",
+            "PostgreSql",
+            "Migrations",
+            "0001_tenant_metadata.sql");
+
+        var migration = File.ReadAllText(migrationPath);
+        var match = Regex.Match(migration, @"slug ~ '([^']+)'");
+
+        Assert.True(match.Success, "Customer organization slug regex must be defined in the migration.");
+
+        var slugRegex = new Regex(match.Groups[1].Value, RegexOptions.CultureInvariant);
+
+        Assert.Matches(slugRegex, "a");
+        Assert.Matches(slugRegex, "7");
+        Assert.Matches(slugRegex, "internal");
+        Assert.Matches(slugRegex, "team-7");
+        Assert.DoesNotMatch(slugRegex, "-team");
+        Assert.DoesNotMatch(slugRegex, "team-");
+        Assert.DoesNotMatch(slugRegex, "Team");
     }
 
     private static string FindRepositoryRoot()

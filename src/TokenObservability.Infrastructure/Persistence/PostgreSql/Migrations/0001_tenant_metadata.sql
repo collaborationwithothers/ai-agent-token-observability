@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS customer_organization (
     created_at_utc timestamptz NOT NULL,
     updated_at_utc timestamptz NOT NULL,
     CONSTRAINT uq_customer_organization_slug UNIQUE (slug),
-    CONSTRAINT ck_customer_organization_slug CHECK (slug = lower(slug) AND slug ~ '^[a-z0-9][a-z0-9-]*[a-z0-9]$'),
+    CONSTRAINT ck_customer_organization_slug CHECK (slug = lower(slug) AND slug ~ '^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$'),
     CONSTRAINT ck_customer_organization_isolation_tier CHECK (isolation_tier IN ('shared', 'dedicated_data', 'dedicated_cell')),
     CONSTRAINT ck_customer_organization_status CHECK (status IN ('active', 'suspended', 'offboarding', 'deleted')),
     CONSTRAINT ck_customer_organization_timestamps CHECK (updated_at_utc >= created_at_utc)
