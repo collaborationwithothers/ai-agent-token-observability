@@ -7,8 +7,12 @@
     <Project Path="src/AiAgentTokenObservability.Ingestion.Worker/AiAgentTokenObservability.Ingestion.Worker.csproj" />
     <Project Path="src/AiAgentTokenObservability.ServiceDefaults/AiAgentTokenObservability.ServiceDefaults.csproj" />
     <Project Path="src/AiAgentTokenObservability.Storage/AiAgentTokenObservability.Storage.csproj" />
+    <Project Path="src/Product.Contracts/Product.Contracts.csproj" />
+    <Project Path="src/Product.Domain/Product.Domain.csproj" />
+    <Project Path="src/Product.Infrastructure/Product.Infrastructure.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/AiAgentTokenObservability.Tests/AiAgentTokenObservability.Tests.csproj" />
+    <Project Path="tests/Product.Skeleton.Tests/Product.Skeleton.Tests.csproj" />
   </Folder>
 </Solution>
