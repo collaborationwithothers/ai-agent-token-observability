@@ -60,9 +60,21 @@ The current source tree still contains local-first scaffolding:
 
 That code is planned to be deleted, replaced, retained, or quarantined according to [Production Codebase Transition](./docs/architecture/production-codebase-transition.md). Do not evolve local-only mode as a product feature.
 
-## Current Validation Commands
+## Production Skeleton Validation
 
-Until the production solution skeleton replaces the local-first scaffolding, use the current .NET commands only to keep the existing tree buildable during transition:
+The production skeleton has its own solution entrypoint that excludes the local-only AppHost, Blazor Local Dashboard, and direct file import worker.
+
+```bash
+dotnet restore AiAgentTokenObservability.Production.slnx
+dotnet build AiAgentTokenObservability.Production.slnx --no-restore
+dotnet test tests/Product.Skeleton.Tests/Product.Skeleton.Tests.csproj --no-restore
+```
+
+These commands validate the production project structure for the Azure Production MVP. Runtime service behavior is added by later Milestone 0 issues.
+
+## Current Transition Validation Commands
+
+The original solution still includes local-first transition scaffolding. Use these commands to keep the full repository buildable while production slices replace or quarantine that scaffolding:
 
 ```bash
 dotnet restore AiAgentTokenObservability.slnx
@@ -70,7 +82,7 @@ dotnet build AiAgentTokenObservability.slnx
 dotnet test AiAgentTokenObservability.slnx --no-restore
 ```
 
-These commands validate the current repository state. They are not production deployment commands.
+These commands validate the combined repository state. They are not production deployment commands and must not be treated as the production runtime boundary.
 
 ## Infrastructure Direction
 
