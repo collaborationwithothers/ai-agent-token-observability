@@ -30,6 +30,7 @@ The default command validates deployment-capable workflows under:
 The validator fails deployment-capable workflows that:
 
 - Use triggers other than `workflow_dispatch`.
+- Lack a job-level `if` gate for `github.event_name`, `github.repository`, `inputs.expected_repository`, `github.actor`, and `github.ref`.
 - Lack least-privilege `contents: read` and `id-token: write` permissions.
 - Lack repository, actor, branch, environment, region, customer slug, workspace, confirmation, and protected-environment gates.
 - Run Azure login or Terraform before the guardrail validation step.

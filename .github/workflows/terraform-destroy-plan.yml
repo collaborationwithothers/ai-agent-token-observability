@@ -3,6 +3,10 @@ name: Terraform Deletion Plan
 on:
   workflow_dispatch:
     inputs:
+      expected_repository:
+        description: Must equal collaborationwithothers/ai-agent-token-observability.
+        required: true
+        type: string
       environment:
         description: Deployment environment.
         required: true
@@ -62,13 +66,21 @@ permissions:
 jobs:
   destroy-plan:
     name: Guarded Terraform deletion plan
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        github.repository == 'collaborationwithothers/ai-agent-token-observability' &&
+        inputs.expected_repository == 'collaborationwithothers/ai-agent-token-observability' &&
+        github.actor == 'haripraghash' &&
+        github.ref == 'refs/heads/main'
+      }}
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
     steps:
       - name: Validate guardrails before privileged steps
         env:
-          EXPECTED_REPOSITORY: collaborationwithothers/ai-agent-token-observability
-          AUTHORIZED_ACTORS: ${{ vars.TOKENOBS_ALLOWED_DEPLOYMENT_ACTORS }}
+          REQUIRED_REPOSITORY: collaborationwithothers/ai-agent-token-observability
+          EXPECTED_REPOSITORY: ${{ inputs.expected_repository }}
           ENVIRONMENT: ${{ inputs.environment }}
           AZURE_REGION: ${{ inputs.azure_region }}
           CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
@@ -80,10 +92,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          test "${GITHUB_REPOSITORY}" = "${EXPECTED_REPOSITORY}"
+          test "${GITHUB_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
+          test "${EXPECTED_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
           test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
-          test -n "${AUTHORIZED_ACTORS}"
-          case ",${AUTHORIZED_ACTORS}," in *",${GITHUB_ACTOR},"*) ;; *) exit 1 ;; esac
+          test "${GITHUB_ACTOR}" = "haripraghash"
+          test "${GITHUB_REF}" = "refs/heads/main"
           case "${GITHUB_REF_NAME}:${ENVIRONMENT}" in main:dv|main:qa|main:pp|main:pd) ;; *) exit 1 ;; esac
           case "${ENVIRONMENT}" in dv|qa|pp|pd) ;; *) exit 1 ;; esac
           case "${AZURE_REGION}" in eastus|eastus2|westeurope) ;; *) exit 1 ;; esac
