@@ -1,16 +1,14 @@
+using TokenObservability.Api;
 using TokenObservability.Infrastructure.Runtime;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.AddRuntimeProbeServices();
+builder.AddTokenObservabilityApiServices();
 
 var app = builder.Build();
 
 app.MapRuntimeProbeEndpoints();
-app.MapGet("/api/v1", () => Results.Ok(new
-{
-    service = "token-observability-api",
-    status = "placeholder"
-}));
+app.MapTokenObservabilityApiEndpoints();
 
 app.Run();
