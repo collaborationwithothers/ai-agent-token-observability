@@ -13,6 +13,7 @@ namespace TokenObservability.Ingestion;
 internal static class TokenObservabilityIngestionEndpointExtensions
 {
     private const string SupportedSchemaVersion = "2026-06-01";
+    private const string SupportedContentCaptureMode = "metadata-only";
     private const long MaximumPayloadBytes = 1024 * 1024;
 
     public static void AddTokenObservabilityIngestionServices(this WebApplicationBuilder builder)
@@ -92,6 +93,16 @@ internal static class TokenObservabilityIngestionEndpointExtensions
 
         if (bearerSecret is null)
         {
+            await RecordCredentialRejectionAsync(
+                httpContext,
+                tenantMetadataStore,
+                credential: null,
+                signalType,
+                route,
+                StatusCodes.Status401Unauthorized,
+                "invalid_credential",
+                correlationId);
+
             return CreateProblem(
                 httpContext,
                 "Missing or invalid scoped ingestion credential.",
@@ -107,9 +118,47 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 HarnessSetupProfileId: ReadHeader(httpContext, "X-AITO-Setup-Profile-Id"),
                 CorrelationId: correlationId));
 
-        if (!validation.IsValid || validation.Credential is null)
+        if (!validation.IsValid)
         {
+            var statusCode = ToCredentialStatusCode(validation.FailureReason);
+            var code = ToCredentialRejectionCode(validation.FailureReason, statusCode);
+            var auditEventId = await FindCredentialValidationAuditEventIdAsync(
+                tenantMetadataStore,
+                validation.Credential,
+                correlationId);
+
+            await RecordCredentialRejectionAsync(
+                httpContext,
+                tenantMetadataStore,
+                validation.Credential,
+                signalType,
+                route,
+                statusCode,
+                code,
+                correlationId,
+                auditEventId);
+
             return CreateCredentialProblem(httpContext, validation.FailureReason, correlationId);
+        }
+
+        if (validation.Credential is null)
+        {
+            await RecordCredentialRejectionAsync(
+                httpContext,
+                tenantMetadataStore,
+                credential: null,
+                signalType,
+                route,
+                StatusCodes.Status401Unauthorized,
+                "invalid_credential",
+                correlationId);
+
+            return CreateProblem(
+                httpContext,
+                "Scoped ingestion credential is not authorized for this request.",
+                StatusCodes.Status401Unauthorized,
+                "invalid_credential",
+                correlationId);
         }
 
         var credential = validation.Credential;
@@ -168,6 +217,24 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 correlationId);
         }
 
+        if (!HasValidPolicyContext(httpContext))
+        {
+            await RecordIngestionRejectionAsync(
+                tenantMetadataStore,
+                credential,
+                signalType,
+                route,
+                "policy_context_missing",
+                correlationId);
+
+            return CreateProblem(
+                httpContext,
+                "Content capture policy context is missing or unsupported.",
+                StatusCodes.Status403Forbidden,
+                "policy_context_missing",
+                correlationId);
+        }
+
         var maxPayloadBytes = options.MaximumPayloadBytes is > 0
             ? options.MaximumPayloadBytes
             : MaximumPayloadBytes;
@@ -220,19 +287,8 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         ScopedIngestionCredentialValidationFailureReason failureReason,
         string correlationId)
     {
-        var statusCode = failureReason switch
-        {
-            ScopedIngestionCredentialValidationFailureReason.WrongHarness or
-                ScopedIngestionCredentialValidationFailureReason.WrongHarnessProfile or
-                ScopedIngestionCredentialValidationFailureReason.InvalidTenant or
-                ScopedIngestionCredentialValidationFailureReason.MalformedHarnessContext => StatusCodes.Status403Forbidden,
-            _ => StatusCodes.Status401Unauthorized
-        };
-        var code = failureReason == ScopedIngestionCredentialValidationFailureReason.InvalidTenant
-            ? "invalid_tenant"
-            : statusCode == StatusCodes.Status403Forbidden
-            ? "credential_out_of_scope"
-            : "invalid_credential";
+        var statusCode = ToCredentialStatusCode(failureReason);
+        var code = ToCredentialRejectionCode(failureReason, statusCode);
 
         return CreateProblem(
             httpContext,
@@ -240,6 +296,29 @@ internal static class TokenObservabilityIngestionEndpointExtensions
             statusCode,
             code,
             correlationId);
+    }
+
+    private static int ToCredentialStatusCode(ScopedIngestionCredentialValidationFailureReason failureReason)
+    {
+        return failureReason switch
+        {
+            ScopedIngestionCredentialValidationFailureReason.WrongHarness or
+                ScopedIngestionCredentialValidationFailureReason.WrongHarnessProfile or
+                ScopedIngestionCredentialValidationFailureReason.InvalidTenant or
+                ScopedIngestionCredentialValidationFailureReason.MalformedHarnessContext => StatusCodes.Status403Forbidden,
+            _ => StatusCodes.Status401Unauthorized
+        };
+    }
+
+    private static string ToCredentialRejectionCode(
+        ScopedIngestionCredentialValidationFailureReason failureReason,
+        int statusCode)
+    {
+        return failureReason == ScopedIngestionCredentialValidationFailureReason.InvalidTenant
+            ? "invalid_tenant"
+            : statusCode == StatusCodes.Status403Forbidden
+            ? "credential_out_of_scope"
+            : "invalid_credential";
     }
 
     private static async Task<PayloadValidationResult> ValidatePayloadAsync(
@@ -307,7 +386,14 @@ internal static class TokenObservabilityIngestionEndpointExtensions
             !StringComparer.OrdinalIgnoreCase.Equals(customerOrganization.DataResidencyRegion, endpointRegion.Trim());
     }
 
-    private static Task RecordIngestionRejectionAsync(
+    private static bool HasValidPolicyContext(HttpContext httpContext)
+    {
+        return StringComparer.Ordinal.Equals(
+            ReadHeader(httpContext, "X-AITO-Content-Capture-Mode"),
+            SupportedContentCaptureMode);
+    }
+
+    private static async Task RecordIngestionRejectionAsync(
         InMemoryTenantMetadataStore tenantMetadataStore,
         ScopedIngestionCredential credential,
         string signalType,
@@ -315,7 +401,11 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         string reasonCode,
         string correlationId)
     {
-        return tenantMetadataStore.RecordGovernanceAuditEventAsync(
+        var evidenceMetadata = CreateIngestionRejectionEvidenceMetadata(
+            reasonCode,
+            route,
+            credential.HarnessSetupProfileId);
+        var auditEvent = await tenantMetadataStore.RecordGovernanceAuditEventAsync(
             credential.CustomerOrganizationId,
             new CreateGovernanceAuditEventRequest(
                 AuditEventId: $"ingestion-rejection-{Guid.NewGuid():N}",
@@ -326,15 +416,177 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 Decision: "denied",
                 DenialReason: ProductAuthorizationDenialReason.ScopeMismatch,
                 CorrelationId: correlationId,
-                EvidenceMetadata: new Dictionary<string, string>
-                {
-                    ["evidence_kind"] = "ingestion_decision",
-                    ["operation"] = "ingestion_rejection",
-                    ["result"] = reasonCode,
-                    ["request_route"] = route,
-                    ["scope_kind"] = ProductScopeKind.HarnessProfile.ToString(),
-                    ["scope_id"] = credential.HarnessSetupProfileId
-                }));
+                EvidenceMetadata: evidenceMetadata));
+
+        await tenantMetadataStore.RecordIngestionRejectionAsync(
+            new CreateIngestionRejectionRecordRequest(
+                CustomerOrganizationId: credential.CustomerOrganizationId,
+                HarnessSetupProfileId: credential.HarnessSetupProfileId,
+                ScopedIngestionCredentialId: credential.ScopedIngestionCredentialId,
+                DeclaredHarness: ToWireHarness(credential.AllowedHarness),
+                SignalType: signalType,
+                RequestRoute: route,
+                ReasonCode: reasonCode,
+                HttpStatus: ToHttpStatus(reasonCode),
+                CorrelationId: correlationId,
+                AuditEventId: auditEvent.AuditEventId,
+                EvidenceMetadata: evidenceMetadata));
+    }
+
+    private static async Task RecordCredentialRejectionAsync(
+        HttpContext httpContext,
+        InMemoryTenantMetadataStore tenantMetadataStore,
+        ScopedIngestionCredential? credential,
+        string signalType,
+        string route,
+        int httpStatus,
+        string reasonCode,
+        string correlationId,
+        string? auditEventId = null)
+    {
+        var customerOrganizationId = credential?.CustomerOrganizationId ??
+            await ResolveTenantCandidateAsync(httpContext, tenantMetadataStore);
+        var harnessSetupProfileId = credential?.HarnessSetupProfileId;
+        var declaredHarness = ReadKnownHarnessHeader(httpContext);
+        var evidenceMetadata = CreateIngestionRejectionEvidenceMetadata(
+            reasonCode,
+            route,
+            ToSafeScopeId(harnessSetupProfileId));
+        var resolvedAuditEventId = auditEventId;
+
+        if (resolvedAuditEventId is null && customerOrganizationId is { } tenantId)
+        {
+            var auditEvent = await tenantMetadataStore.RecordGovernanceAuditEventAsync(
+                tenantId,
+                new CreateGovernanceAuditEventRequest(
+                    AuditEventId: $"ingestion-rejection-{Guid.NewGuid():N}",
+                    ActorProductUserId: credential?.ProductUserId,
+                    EffectiveRole: null,
+                    Action: ProductAuthorizationAction.TelemetryIngest,
+                    TargetScope: new ProductScope(ProductScopeKind.HarnessProfile, ToSafeScopeId(harnessSetupProfileId)),
+                    Decision: "denied",
+                    DenialReason: ToCredentialDenialReason(reasonCode),
+                    CorrelationId: correlationId,
+                    EvidenceMetadata: evidenceMetadata));
+            resolvedAuditEventId = auditEvent.AuditEventId;
+        }
+
+        await tenantMetadataStore.RecordIngestionRejectionAsync(
+            new CreateIngestionRejectionRecordRequest(
+                CustomerOrganizationId: customerOrganizationId,
+                HarnessSetupProfileId: string.IsNullOrWhiteSpace(harnessSetupProfileId) ? null : harnessSetupProfileId,
+                ScopedIngestionCredentialId: credential?.ScopedIngestionCredentialId,
+                DeclaredHarness: declaredHarness,
+                SignalType: signalType,
+                RequestRoute: route,
+                ReasonCode: reasonCode,
+                HttpStatus: httpStatus,
+                CorrelationId: correlationId,
+                AuditEventId: resolvedAuditEventId,
+                EvidenceMetadata: evidenceMetadata));
+    }
+
+    private static ProductAuthorizationDenialReason ToCredentialDenialReason(string reasonCode)
+    {
+        return reasonCode == "invalid_tenant"
+            ? ProductAuthorizationDenialReason.InvalidTenant
+            : ProductAuthorizationDenialReason.ScopeMismatch;
+    }
+
+    private static async Task<string?> FindCredentialValidationAuditEventIdAsync(
+        InMemoryTenantMetadataStore tenantMetadataStore,
+        ScopedIngestionCredential? credential,
+        string correlationId)
+    {
+        if (credential is null)
+        {
+            return null;
+        }
+
+        var auditEvents = await tenantMetadataStore.ListGovernanceAuditEventsAsync(credential.CustomerOrganizationId);
+
+        return auditEvents
+            .Where(auditEvent =>
+                auditEvent.Action == ProductAuthorizationAction.TelemetryIngest &&
+                auditEvent.Decision == "denied" &&
+                StringComparer.Ordinal.Equals(auditEvent.CorrelationId, correlationId))
+            .OrderByDescending(auditEvent => auditEvent.CreatedAtUtc)
+            .Select(auditEvent => auditEvent.AuditEventId)
+            .FirstOrDefault();
+    }
+
+    private static Dictionary<string, string> CreateIngestionRejectionEvidenceMetadata(
+        string reasonCode,
+        string route,
+        string scopeId)
+    {
+        return new Dictionary<string, string>
+        {
+            ["evidence_kind"] = "ingestion_decision",
+            ["operation"] = "ingestion_rejection",
+            ["result"] = reasonCode,
+            ["request_route"] = route,
+            ["scope_kind"] = ProductScopeKind.HarnessProfile.ToString(),
+            ["scope_id"] = scopeId
+        };
+    }
+
+    private static async Task<CustomerOrganizationId?> ResolveTenantCandidateAsync(
+        HttpContext httpContext,
+        InMemoryTenantMetadataStore tenantMetadataStore)
+    {
+        var tenantSlug = ReadHeader(httpContext, "X-Customer-Organization-Slug");
+
+        if (string.IsNullOrWhiteSpace(tenantSlug))
+        {
+            return null;
+        }
+
+        var organization = await tenantMetadataStore.FindCustomerOrganizationBySlugAsync(tenantSlug);
+
+        return organization?.CustomerOrganizationId;
+    }
+
+    private static string? ReadKnownHarnessHeader(HttpContext httpContext)
+    {
+        var value = ReadHeader(httpContext, "X-AITO-Harness");
+        return StringComparer.Ordinal.Equals(value, "codex-cli") ? value : null;
+    }
+
+    private static string ToSafeScopeId(string? value)
+    {
+        return !string.IsNullOrWhiteSpace(value) && IsSafeMetadataValue(value)
+            ? value
+            : "unknown";
+    }
+
+    private static bool IsSafeMetadataValue(string value)
+    {
+        return value.Length is > 0 and <= 128 &&
+            value.All(static character =>
+                char.IsAsciiLetterOrDigit(character) ||
+                character is '-' or '_' or ':' or '.' or '/');
+    }
+
+    private static int ToHttpStatus(string reasonCode)
+    {
+        return reasonCode switch
+        {
+            "unsupported_schema" or "malformed_otlp" => StatusCodes.Status400BadRequest,
+            "tenant_context_mismatch" or "residency_mismatch" or "policy_context_missing" => StatusCodes.Status403Forbidden,
+            "payload_too_large" => StatusCodes.Status413PayloadTooLarge,
+            "unsupported_content_type" => StatusCodes.Status415UnsupportedMediaType,
+            _ => StatusCodes.Status400BadRequest
+        };
+    }
+
+    private static string ToWireHarness(CodingAgentHarness harness)
+    {
+        return harness switch
+        {
+            CodingAgentHarness.CodexCli => "codex-cli",
+            _ => throw new ArgumentOutOfRangeException(nameof(harness), harness, null)
+        };
     }
 
     private static string? ReadBearerSecret(string authorizationHeader)

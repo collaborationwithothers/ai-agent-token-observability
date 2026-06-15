@@ -63,6 +63,7 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
     private readonly Dictionary<ProductRoleMappingId, ProductRoleMapping> productRoleMappings = [];
     private readonly Dictionary<GovernanceAuditEventKey, GovernanceAuditEvent> governanceAuditEvents = [];
     private readonly Dictionary<ScopedIngestionCredentialId, ScopedIngestionCredential> scopedIngestionCredentials = [];
+    private readonly Dictionary<IngestionRejectionId, IngestionRejectionRecord> ingestionRejections = [];
     private readonly object gate = new();
 
     public Task<CustomerOrganization> CreateCustomerOrganizationAsync(CreateCustomerOrganizationRequest request)
@@ -529,6 +530,105 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
                     .Where(auditEvent => auditEvent.CustomerOrganizationId == customerOrganizationId)
                     .OrderBy(auditEvent => auditEvent.CreatedAtUtc)
                     .ThenBy(auditEvent => auditEvent.AuditEventId, StringComparer.Ordinal)
+                    .ToArray());
+        }
+    }
+
+    public Task<IngestionRejectionRecord> RecordIngestionRejectionAsync(
+        CreateIngestionRejectionRecordRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var harnessSetupProfileId = string.IsNullOrWhiteSpace(request.HarnessSetupProfileId)
+            ? null
+            : NormalizeHarnessSetupProfileId(request.HarnessSetupProfileId, nameof(request.HarnessSetupProfileId));
+        var declaredHarness = string.IsNullOrWhiteSpace(request.DeclaredHarness)
+            ? null
+            : NormalizeDeclaredHarness(request.DeclaredHarness, nameof(request.DeclaredHarness));
+        var signalType = NormalizeRequiredText(request.SignalType, nameof(request.SignalType));
+        var requestRoute = NormalizeRequiredText(request.RequestRoute, nameof(request.RequestRoute));
+        var reasonCode = NormalizeRequiredText(request.ReasonCode, nameof(request.ReasonCode));
+        var correlationId = NormalizeRequiredText(request.CorrelationId, nameof(request.CorrelationId));
+        var auditEventId = string.IsNullOrWhiteSpace(request.AuditEventId)
+            ? null
+            : request.AuditEventId.Trim();
+        var evidenceMetadata = NormalizeEvidenceMetadata(request.EvidenceMetadata);
+        var now = clock.UtcNow.ToUniversalTime();
+
+        ValidateIngestionRejectionShape(
+            request.CustomerOrganizationId,
+            request.ScopedIngestionCredentialId,
+            signalType,
+            requestRoute,
+            reasonCode,
+            request.HttpStatus,
+            evidenceMetadata);
+
+        lock (gate)
+        {
+            if (request.CustomerOrganizationId is { } customerOrganizationId)
+            {
+                RequireCustomerOrganizationExists(customerOrganizationId);
+            }
+
+            if (request.ScopedIngestionCredentialId is { } scopedIngestionCredentialId)
+            {
+                if (request.CustomerOrganizationId is not { } linkedCustomerOrganizationId)
+                {
+                    throw new InvalidOperationException("Scoped ingestion credential rejection links require a customer organization.");
+                }
+
+                if (!scopedIngestionCredentials.TryGetValue(scopedIngestionCredentialId, out var credential) ||
+                    credential.CustomerOrganizationId != linkedCustomerOrganizationId)
+                {
+                    throw new InvalidOperationException("Scoped ingestion credential does not belong to the rejection customer organization.");
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(auditEventId))
+            {
+                if (request.CustomerOrganizationId is not { } linkedCustomerOrganizationId)
+                {
+                    throw new InvalidOperationException("Audit-linked ingestion rejections require a customer organization.");
+                }
+
+                if (!governanceAuditEvents.ContainsKey(new GovernanceAuditEventKey(linkedCustomerOrganizationId, auditEventId)))
+                {
+                    throw new InvalidOperationException("Governance audit event does not belong to the rejection customer organization.");
+                }
+            }
+
+            var rejection = new IngestionRejectionRecord(
+                IngestionRejectionId.NewId(),
+                request.CustomerOrganizationId,
+                harnessSetupProfileId,
+                request.ScopedIngestionCredentialId,
+                declaredHarness,
+                signalType,
+                requestRoute,
+                reasonCode,
+                request.HttpStatus,
+                correlationId,
+                auditEventId,
+                evidenceMetadata,
+                now);
+
+            ingestionRejections.Add(rejection.IngestionRejectionId, rejection);
+
+            return Task.FromResult(rejection);
+        }
+    }
+
+    public Task<IReadOnlyList<IngestionRejectionRecord>> ListIngestionRejectionsAsync(
+        CustomerOrganizationId customerOrganizationId)
+    {
+        lock (gate)
+        {
+            return Task.FromResult<IReadOnlyList<IngestionRejectionRecord>>(
+                ingestionRejections.Values
+                    .Where(rejection => rejection.CustomerOrganizationId == customerOrganizationId)
+                    .OrderBy(rejection => rejection.ReceivedAtUtc)
+                    .ThenBy(rejection => rejection.IngestionRejectionId.ToString(), StringComparer.Ordinal)
                     .ToArray());
         }
     }
@@ -1214,6 +1314,51 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         }
     }
 
+    private static void ValidateIngestionRejectionShape(
+        CustomerOrganizationId? customerOrganizationId,
+        ScopedIngestionCredentialId? scopedIngestionCredentialId,
+        string signalType,
+        string requestRoute,
+        string reasonCode,
+        int httpStatus,
+        IReadOnlyDictionary<string, string> evidenceMetadata)
+    {
+        if (customerOrganizationId == CustomerOrganizationId.Empty)
+        {
+            throw new ArgumentException("Customer organization identifier must not be empty.", nameof(customerOrganizationId));
+        }
+
+        if (scopedIngestionCredentialId == ScopedIngestionCredentialId.Empty)
+        {
+            throw new ArgumentException("Scoped ingestion credential identifier must not be empty.", nameof(scopedIngestionCredentialId));
+        }
+
+        if (!IsSafeMachineToken(signalType))
+        {
+            throw new ArgumentException("Ingestion rejection signal type is not allowed.", nameof(signalType));
+        }
+
+        if (!IsSafeRoute(requestRoute))
+        {
+            throw new ArgumentException("Ingestion rejection request route is not allowed.", nameof(requestRoute));
+        }
+
+        if (!IsSafeMachineToken(reasonCode))
+        {
+            throw new ArgumentException("Ingestion rejection reason code is not allowed.", nameof(reasonCode));
+        }
+
+        if (httpStatus is < 400 or > 599)
+        {
+            throw new ArgumentException("Ingestion rejection HTTP status must be an error status.", nameof(httpStatus));
+        }
+
+        if (evidenceMetadata.Count == 0)
+        {
+            throw new ArgumentException("Ingestion rejection records require safe evidence metadata.", nameof(evidenceMetadata));
+        }
+    }
+
     private static IReadOnlyDictionary<string, string> NormalizeEvidenceMetadata(
         IReadOnlyDictionary<string, string>? evidenceMetadata)
     {
@@ -1285,6 +1430,34 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         {
             throw new ArgumentException("Governance audit evidence metadata value is not allowed.", parameterName);
         }
+    }
+
+    private static string NormalizeHarnessSetupProfileId(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+
+        if (!IsSafeResourceId(normalized) ||
+            SensitiveEvidenceValueFragments.Any(fragment =>
+                normalized.Contains(fragment, StringComparison.OrdinalIgnoreCase)) ||
+            normalized.Contains("prompt", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Contains("token", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Contains("secret", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Contains("password", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Contains("command", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Contains("tool", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("Ingestion rejection harness setup profile identifier is not allowed.", parameterName);
+        }
+
+        return normalized;
+    }
+
+    private static string NormalizeDeclaredHarness(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+        return normalized is "codex-cli"
+            ? normalized
+            : throw new ArgumentException("Ingestion rejection declared harness is not allowed.", parameterName);
     }
 
     private static bool IsSafeMachineToken(string value)
@@ -1481,6 +1654,15 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
             organization.Status != CustomerOrganizationStatus.Active)
         {
             throw new InvalidOperationException("Customer organization is not active.");
+        }
+    }
+
+    private void RequireCustomerOrganizationExists(CustomerOrganizationId customerOrganizationId)
+    {
+        if (customerOrganizationId == CustomerOrganizationId.Empty ||
+            !customerOrganizations.ContainsKey(customerOrganizationId))
+        {
+            throw new InvalidOperationException("Customer organization does not exist.");
         }
     }
 

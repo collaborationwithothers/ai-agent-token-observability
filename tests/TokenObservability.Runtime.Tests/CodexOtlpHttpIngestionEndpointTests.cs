@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -98,14 +99,89 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
     public async Task CodexOtlpEndpointRejectsMissingCredentialBeforeParsingPayload()
     {
         var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
-        await CreateTenantAsync(store);
+        var seed = await CreateTenantAsync(store);
         using var factory = CreateFactory(store);
         using var client = factory.CreateClient();
         using var request = CreateOtlpRequest("/v1/logs", secret: null, payload: [0xFF, 0xFF, 0xFF]);
+        request.Headers.Add("X-Customer-Organization-Slug", "contoso");
+        request.Headers.Add("X-Correlation-Id", "codex-ingest-missing-credential-001");
 
         using var response = await client.SendAsync(request);
 
         await AssertOtlpRejectionAsync(response, HttpStatusCode.Unauthorized, "invalid_credential");
+
+        var rejection = Assert.Single(await store.ListIngestionRejectionsAsync(seed.Organization.CustomerOrganizationId));
+        Assert.Equal(seed.Organization.CustomerOrganizationId, rejection.CustomerOrganizationId);
+        Assert.Null(rejection.ScopedIngestionCredentialId);
+        Assert.Null(rejection.HarnessSetupProfileId);
+        Assert.Equal("codex-cli", rejection.DeclaredHarness);
+        Assert.Equal("logs", rejection.SignalType);
+        Assert.Equal("invalid_credential", rejection.ReasonCode);
+        Assert.Equal(StatusCodes.Status401Unauthorized, rejection.HttpStatus);
+        Assert.Equal("codex-ingest-missing-credential-001", rejection.CorrelationId);
+        var auditEvent = Assert.Single(
+            await store.ListGovernanceAuditEventsAsync(seed.Organization.CustomerOrganizationId),
+            auditEvent => auditEvent.CorrelationId == "codex-ingest-missing-credential-001");
+        Assert.Equal(ProductAuthorizationAction.TelemetryIngest, auditEvent.Action);
+        Assert.Equal("ingestion_rejection", auditEvent.EvidenceMetadata["operation"]);
+        Assert.Equal("invalid_credential", auditEvent.EvidenceMetadata["result"]);
+        Assert.Equal("unknown", auditEvent.EvidenceMetadata["scope_id"]);
+        Assert.Equal(auditEvent.AuditEventId, rejection.AuditEventId);
+        AssertRejectionMetadataDoesNotContain(rejection, "FF");
+    }
+
+    [Fact]
+    public async Task CodexOtlpEndpointDoesNotPersistUnsafeCallerSuppliedHarnessContextOnCredentialRejection()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store);
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+        using var request = CreateOtlpRequest("/v1/logs", secret: null, payload: [0xFF]);
+        request.Headers.Remove("X-AITO-Harness");
+        request.Headers.Remove("X-AITO-Setup-Profile-Id");
+        request.Headers.Add("X-AITO-Harness", "codex-cli-secret=leaked");
+        request.Headers.Add("X-AITO-Setup-Profile-Id", "profile-secret=leaked");
+        request.Headers.Add("X-Customer-Organization-Slug", "contoso");
+
+        using var response = await client.SendAsync(request);
+
+        await AssertOtlpRejectionAsync(response, HttpStatusCode.Unauthorized, "invalid_credential");
+
+        var rejection = Assert.Single(await store.ListIngestionRejectionsAsync(seed.Organization.CustomerOrganizationId));
+        Assert.Null(rejection.DeclaredHarness);
+        Assert.Null(rejection.HarnessSetupProfileId);
+        Assert.Equal("unknown", rejection.EvidenceMetadata["scope_id"]);
+        Assert.DoesNotContain("secret=leaked", rejection.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task CodexOtlpEndpointDoesNotPersistSafeLookingSetupProfileOnCredentiallessRejection()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store);
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+        using var request = CreateOtlpRequest("/v1/logs", secret: null, payload: [0xFF]);
+        request.Headers.Remove("X-AITO-Setup-Profile-Id");
+        request.Headers.Add("X-AITO-Setup-Profile-Id", "profile-codex-cli-eastus2-safe-looking-value");
+        request.Headers.Add("X-Customer-Organization-Slug", "contoso");
+
+        using var response = await client.SendAsync(request);
+
+        await AssertOtlpRejectionAsync(response, HttpStatusCode.Unauthorized, "invalid_credential");
+
+        var rejection = Assert.Single(await store.ListIngestionRejectionsAsync(seed.Organization.CustomerOrganizationId));
+        Assert.Null(rejection.HarnessSetupProfileId);
+        Assert.Equal("codex-cli", rejection.DeclaredHarness);
+        Assert.Equal("unknown", rejection.EvidenceMetadata["scope_id"]);
+        Assert.DoesNotContain("profile-codex-cli-eastus2-safe-looking-value", rejection.ToString(), StringComparison.Ordinal);
+        var auditEvent = Assert.Single(await store.ListGovernanceAuditEventsAsync(seed.Organization.CustomerOrganizationId));
+        Assert.Equal("unknown", auditEvent.EvidenceMetadata["scope_id"]);
+        Assert.DoesNotContain(
+            "profile-codex-cli-eastus2-safe-looking-value",
+            auditEvent.ToString(),
+            StringComparison.Ordinal);
     }
 
     [Theory]
@@ -148,6 +224,15 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
         Assert.Equal("denied", auditEvent.Decision);
         Assert.Equal("scoped_ingestion_credential_failed_access", auditEvent.EvidenceMetadata["operation"]);
         Assert.Equal("wrong_harness", auditEvent.EvidenceMetadata["result"]);
+
+        var rejection = AssertSingleRejection(
+            await store.ListIngestionRejectionsAsync(seed.Organization.CustomerOrganizationId),
+            "codex-ingest-wrong-harness-001",
+            "credential_out_of_scope");
+        Assert.Equal("logs", rejection.SignalType);
+        Assert.Null(rejection.DeclaredHarness);
+        Assert.Equal(StatusCodes.Status403Forbidden, rejection.HttpStatus);
+        Assert.Equal(auditEvent.AuditEventId, rejection.AuditEventId);
     }
 
     [Fact]
@@ -298,6 +383,15 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
         Assert.Equal(ProductAuthorizationAction.TelemetryIngest, contosoAuditEvent.Action);
         Assert.Equal("ingestion_rejection", contosoAuditEvent.EvidenceMetadata["operation"]);
         Assert.Equal("tenant_context_mismatch", contosoAuditEvent.EvidenceMetadata["result"]);
+
+        var rejection = Assert.Single(await store.ListIngestionRejectionsAsync(seed.Organization.CustomerOrganizationId));
+        Assert.Equal(issued.Credential.ScopedIngestionCredentialId, rejection.ScopedIngestionCredentialId);
+        Assert.Equal("tenant_context_mismatch", rejection.ReasonCode);
+        Assert.Equal(StatusCodes.Status403Forbidden, rejection.HttpStatus);
+        Assert.Equal("codex-ingest-tenant-mismatch-001", rejection.CorrelationId);
+        Assert.Equal(contosoAuditEvent.AuditEventId, rejection.AuditEventId);
+        Assert.Equal("tenant_context_mismatch", rejection.EvidenceMetadata["result"]);
+        Assert.DoesNotContain(issued.Secret, rejection.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -321,6 +415,58 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
         Assert.Equal(ProductAuthorizationAction.TelemetryIngest, auditEvent.Action);
         Assert.Equal("ingestion_rejection", auditEvent.EvidenceMetadata["operation"]);
         Assert.Equal("residency_mismatch", auditEvent.EvidenceMetadata["result"]);
+
+        var rejection = AssertSingleRejection(
+            await store.ListIngestionRejectionsAsync(seed.Organization.CustomerOrganizationId),
+            "codex-ingest-residency-mismatch-001",
+            "residency_mismatch");
+        Assert.Equal(StatusCodes.Status403Forbidden, rejection.HttpStatus);
+        Assert.Equal(auditEvent.AuditEventId, rejection.AuditEventId);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("capture_candidate")]
+    [InlineData("redaction_required")]
+    public async Task CodexOtlpEndpointRejectsMissingOrUnsupportedPolicyContextWithAuditableMetadata(
+        string? contentCaptureMode)
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store);
+        var issued = await IssueCredentialAsync(store, seed);
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+        using var request = CreateOtlpRequest("/v1/logs", issued.Secret);
+        request.Headers.Remove("X-AITO-Content-Capture-Mode");
+        request.Headers.Add("X-Correlation-Id", "codex-ingest-policy-context-001");
+
+        if (contentCaptureMode is not null)
+        {
+            request.Headers.Add("X-AITO-Content-Capture-Mode", contentCaptureMode);
+        }
+
+        using var response = await client.SendAsync(request);
+
+        await AssertOtlpRejectionAsync(response, HttpStatusCode.Forbidden, "policy_context_missing", issued.Secret);
+
+        var auditEvent = Assert.Single(
+            await store.ListGovernanceAuditEventsAsync(seed.Organization.CustomerOrganizationId),
+            auditEvent => auditEvent.CorrelationId == "codex-ingest-policy-context-001");
+        Assert.Equal(ProductAuthorizationAction.TelemetryIngest, auditEvent.Action);
+        Assert.Equal("ingestion_rejection", auditEvent.EvidenceMetadata["operation"]);
+        Assert.Equal("policy_context_missing", auditEvent.EvidenceMetadata["result"]);
+
+        var rejection = AssertSingleRejection(
+            await store.ListIngestionRejectionsAsync(seed.Organization.CustomerOrganizationId),
+            "codex-ingest-policy-context-001",
+            "policy_context_missing");
+        Assert.Equal(StatusCodes.Status403Forbidden, rejection.HttpStatus);
+        Assert.Equal(auditEvent.AuditEventId, rejection.AuditEventId);
+        if (!string.IsNullOrWhiteSpace(contentCaptureMode))
+        {
+            AssertRejectionMetadataDoesNotContain(rejection, contentCaptureMode);
+        }
     }
 
     [Theory]
@@ -346,11 +492,17 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
         using var response = await client.SendAsync(request);
 
         await AssertOtlpRejectionAsync(response, HttpStatusCode.BadRequest, "unsupported_schema", issued.Secret);
-        Assert.Contains(
+        var auditEvent = Assert.Single(
             await store.ListGovernanceAuditEventsAsync(seed.Organization.CustomerOrganizationId),
             auditEvent => auditEvent.Action == ProductAuthorizationAction.TelemetryIngest &&
                 auditEvent.EvidenceMetadata["operation"] == "ingestion_rejection" &&
                 auditEvent.EvidenceMetadata["result"] == "unsupported_schema");
+
+        var rejection = Assert.Single(await store.ListIngestionRejectionsAsync(seed.Organization.CustomerOrganizationId));
+        Assert.Equal("unsupported_schema", rejection.ReasonCode);
+        Assert.Equal(StatusCodes.Status400BadRequest, rejection.HttpStatus);
+        Assert.Equal(auditEvent.AuditEventId, rejection.AuditEventId);
+        Assert.Equal("logs", rejection.SignalType);
     }
 
     [Theory]
@@ -377,6 +529,15 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
         Assert.DoesNotContain(auditEvent.EvidenceMetadata.Values, value => value.Contains("prompt", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(auditEvent.EvidenceMetadata.Values, value => value.Contains("command", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(auditEvent.EvidenceMetadata.Values, value => value.Contains("tool", StringComparison.OrdinalIgnoreCase));
+
+        var rejection = AssertSingleRejection(
+            await store.ListIngestionRejectionsAsync(seed.Organization.CustomerOrganizationId),
+            "codex-ingest-malformed-otlp-001",
+            "malformed_otlp",
+            path);
+        Assert.Equal(StatusCodes.Status400BadRequest, rejection.HttpStatus);
+        Assert.Equal(auditEvent.AuditEventId, rejection.AuditEventId);
+        AssertRejectionMetadataDoesNotContain(rejection, "0A80");
     }
 
     [Theory]
@@ -489,6 +650,11 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
             await store.ListGovernanceAuditEventsAsync(seed.Organization.CustomerOrganizationId),
             auditEvent => auditEvent.Action == ProductAuthorizationAction.TelemetryIngest &&
                 auditEvent.EvidenceMetadata["result"] == "unsupported_content_type");
+
+        var rejection = Assert.Single(await store.ListIngestionRejectionsAsync(seed.Organization.CustomerOrganizationId));
+        Assert.Equal("unsupported_content_type", rejection.ReasonCode);
+        Assert.Equal(StatusCodes.Status415UnsupportedMediaType, rejection.HttpStatus);
+        Assert.Equal("logs", rejection.SignalType);
     }
 
     [Fact]
@@ -521,6 +687,11 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
         using var response = await client.SendAsync(request);
 
         await AssertOtlpRejectionAsync(response, HttpStatusCode.RequestEntityTooLarge, "payload_too_large", issued.Secret);
+
+        var rejection = Assert.Single(await store.ListIngestionRejectionsAsync(seed.Organization.CustomerOrganizationId));
+        Assert.Equal("payload_too_large", rejection.ReasonCode);
+        Assert.Equal(StatusCodes.Status413PayloadTooLarge, rejection.HttpStatus);
+        Assert.Equal("logs", rejection.SignalType);
     }
 
     private static WebApplicationFactory<TokenObservabilityIngestionAssemblyMarker> CreateFactory(
@@ -552,6 +723,7 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
         request.Headers.Add("X-AITO-Harness", Harness);
         request.Headers.Add("X-AITO-Setup-Profile-Id", SetupProfileId);
         request.Headers.Add("X-AITO-Schema-Version", SchemaVersion);
+        request.Headers.Add("X-AITO-Content-Capture-Mode", "metadata-only");
 
         if (!string.IsNullOrWhiteSpace(secret))
         {
@@ -700,6 +872,40 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
         {
             Assert.DoesNotContain(forbiddenText, Convert.ToBase64String(responseBody), StringComparison.Ordinal);
         }
+    }
+
+    private static IngestionRejectionRecord AssertSingleRejection(
+        IReadOnlyList<IngestionRejectionRecord> rejections,
+        string correlationId,
+        string reasonCode,
+        string expectedRoute = "/v1/logs")
+    {
+        var rejection = Assert.Single(
+            rejections,
+            rejection => rejection.CorrelationId == correlationId);
+        Assert.Equal(reasonCode, rejection.ReasonCode);
+        Assert.Equal(correlationId, rejection.CorrelationId);
+        Assert.Equal(reasonCode, rejection.EvidenceMetadata["result"]);
+        Assert.Equal("ingestion_rejection", rejection.EvidenceMetadata["operation"]);
+        Assert.Equal(expectedRoute, rejection.RequestRoute);
+        return rejection;
+    }
+
+    private static void AssertRejectionMetadataDoesNotContain(
+        IngestionRejectionRecord rejection,
+        string forbiddenText)
+    {
+        Assert.DoesNotContain(forbiddenText, rejection.HarnessSetupProfileId ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(forbiddenText, rejection.DeclaredHarness ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(forbiddenText, rejection.SignalType, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(forbiddenText, rejection.RequestRoute, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(forbiddenText, rejection.ReasonCode, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(forbiddenText, rejection.CorrelationId, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(forbiddenText, rejection.AuditEventId ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            rejection.EvidenceMetadata,
+            item => item.Key.Contains(forbiddenText, StringComparison.OrdinalIgnoreCase) ||
+                item.Value.Contains(forbiddenText, StringComparison.OrdinalIgnoreCase));
     }
 
     private sealed record TenantSeed(CustomerOrganization Organization, IdentityTenant IdentityTenant);
