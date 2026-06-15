@@ -179,7 +179,7 @@ internal static class TokenObservabilityApiEndpointExtensions
             extensions: new Dictionary<string, object?>
             {
                 ["code"] = code,
-                ["correlationId"] = httpContext.TraceIdentifier
+                ["correlationId"] = TokenObservabilityCorrelationId.Resolve(httpContext)
             });
     }
 

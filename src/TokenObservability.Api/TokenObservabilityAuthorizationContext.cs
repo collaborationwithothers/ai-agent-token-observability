@@ -232,9 +232,7 @@ internal sealed class TokenObservabilityAuthorizationContextResolver(
 
     private static string GetCorrelationId(HttpContext httpContext)
     {
-        return TryReadSingleHeader(httpContext.Request.Headers, "X-Correlation-Id", out var correlationId, out _)
-            ? correlationId
-            : httpContext.TraceIdentifier;
+        return TokenObservabilityCorrelationId.Resolve(httpContext);
     }
 
     private sealed class ClientPrincipal
