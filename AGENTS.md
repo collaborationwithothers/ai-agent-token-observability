@@ -82,6 +82,14 @@ Use:
 
 These commands validate the production-shaped active tree. They are not production deployment commands.
 
+## Review Before PR
+
+After any implementation change and before opening, updating, or declaring a PR ready, run the Codex `Code Reviewer` subagent against the current branch diff.
+
+The reviewer must write findings to `Comments.md` only. `Comments.md` is transient review output and must not be committed.
+
+If the reviewer reports `CHANGES_REQUESTED`, either fix the findings and rerun validation, or explicitly document why a finding is not accepted before proceeding.
+
 ## Implementation Rules
 
 Preserve metadata-only capture by default. Content Capture Mode is disabled by default and must follow Content Capture Policy, pre-storage redaction, and the Redaction Failure Gate before any Captured Content Blob is stored. Do not persist prompt text, code content, command output, or tool results unless Content Capture Mode is explicitly enabled and redaction succeeds. Do not silently scrape Git config, OS users, shell environment, or unrelated local files for identity or path data.

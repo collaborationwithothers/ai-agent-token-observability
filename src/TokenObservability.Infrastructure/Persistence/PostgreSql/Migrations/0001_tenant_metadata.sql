@@ -49,9 +49,67 @@ CREATE TABLE IF NOT EXISTS product_user (
     CONSTRAINT fk_product_user_customer_organization FOREIGN KEY (customer_organization_id) REFERENCES customer_organization (customer_organization_id),
     CONSTRAINT fk_product_user_identity_tenant FOREIGN KEY (customer_organization_id, identity_tenant_id) REFERENCES identity_tenant (customer_organization_id, identity_tenant_id),
     CONSTRAINT uq_product_user_external_subject UNIQUE (customer_organization_id, identity_tenant_id, external_subject_id),
+    CONSTRAINT uq_product_user_customer_user_id UNIQUE (customer_organization_id, product_user_id),
     CONSTRAINT ck_product_user_status CHECK (status IN ('active', 'disabled', 'deleted')),
     CONSTRAINT ck_product_user_seen_timestamps CHECK (last_seen_at_utc IS NULL OR last_seen_at_utc >= first_seen_at_utc),
     CONSTRAINT ck_product_user_timestamps CHECK (updated_at_utc >= created_at_utc)
+);
+
+CREATE TABLE IF NOT EXISTS governance_audit_event (
+    audit_event_id text NOT NULL,
+    customer_organization_id uuid NOT NULL REFERENCES customer_organization (customer_organization_id),
+    actor_product_user_id uuid NULL,
+    effective_role text NULL,
+    action text NOT NULL,
+    target_resource_kind text NOT NULL,
+    target_resource_id text NOT NULL,
+    decision text NOT NULL,
+    denial_reason text NULL,
+    correlation_id text NOT NULL,
+    created_at_utc timestamptz NOT NULL,
+    CONSTRAINT pk_governance_audit_event PRIMARY KEY (customer_organization_id, audit_event_id),
+    CONSTRAINT fk_governance_audit_event_actor FOREIGN KEY (customer_organization_id, actor_product_user_id) REFERENCES product_user (customer_organization_id, product_user_id),
+    CONSTRAINT ck_governance_audit_event_effective_role CHECK (effective_role IS NULL OR effective_role IN ('PlatformAdmin', 'SecurityReviewer', 'EngineeringLead', 'Developer', 'ReadOnlyViewer')),
+    CONSTRAINT ck_governance_audit_event_decision CHECK (decision IN ('created', 'updated', 'disabled', 'denied')),
+    CONSTRAINT ck_governance_audit_event_denial_reason CHECK (denial_reason IS NULL OR denial_reason IN ('MissingRoleMapping', 'InsufficientRole', 'ScopeMismatch', 'InvalidTenant')),
+    CONSTRAINT ck_governance_audit_event_denial_shape CHECK (
+        (decision = 'denied' AND denial_reason IS NOT NULL)
+        OR (decision <> 'denied' AND denial_reason IS NULL)
+    )
+);
+
+CREATE TABLE IF NOT EXISTS product_role_mapping (
+    product_role_mapping_id uuid PRIMARY KEY,
+    customer_organization_id uuid NOT NULL,
+    identity_tenant_id uuid NOT NULL,
+    external_principal_type text NOT NULL,
+    external_principal_id text NOT NULL,
+    product_role text NOT NULL,
+    scope_kind text NOT NULL,
+    scope_id text NULL,
+    status text NOT NULL,
+    effective_from_utc timestamptz NOT NULL,
+    effective_to_utc timestamptz NULL,
+    created_by_product_user_id uuid NOT NULL,
+    changed_by_product_user_id uuid NOT NULL,
+    audit_event_id text NOT NULL,
+    created_at_utc timestamptz NOT NULL,
+    updated_at_utc timestamptz NOT NULL,
+    CONSTRAINT fk_product_role_mapping_customer_organization FOREIGN KEY (customer_organization_id) REFERENCES customer_organization (customer_organization_id),
+    CONSTRAINT fk_product_role_mapping_identity_tenant FOREIGN KEY (customer_organization_id, identity_tenant_id) REFERENCES identity_tenant (customer_organization_id, identity_tenant_id),
+    CONSTRAINT fk_product_role_mapping_created_by_product_user FOREIGN KEY (customer_organization_id, created_by_product_user_id) REFERENCES product_user (customer_organization_id, product_user_id),
+    CONSTRAINT fk_product_role_mapping_changed_by_product_user FOREIGN KEY (customer_organization_id, changed_by_product_user_id) REFERENCES product_user (customer_organization_id, product_user_id),
+    CONSTRAINT fk_product_role_mapping_audit_event FOREIGN KEY (customer_organization_id, audit_event_id) REFERENCES governance_audit_event (customer_organization_id, audit_event_id),
+    CONSTRAINT ck_product_role_mapping_external_principal_type CHECK (external_principal_type IN ('app_role', 'group_object_id', 'user_subject', 'service_principal')),
+    CONSTRAINT ck_product_role_mapping_product_role CHECK (product_role IN ('PlatformAdmin', 'SecurityReviewer', 'EngineeringLead', 'Developer', 'ReadOnlyViewer')),
+    CONSTRAINT ck_product_role_mapping_scope_kind CHECK (scope_kind IN ('organization', 'team', 'repository', 'harness_profile', 'self', 'content_review_queue', 'pricing', 'tenant_admin')),
+    CONSTRAINT ck_product_role_mapping_status CHECK (status IN ('active', 'disabled', 'expired')),
+    CONSTRAINT ck_product_role_mapping_effective_window CHECK (effective_to_utc IS NULL OR effective_to_utc > effective_from_utc),
+    CONSTRAINT ck_product_role_mapping_scope_id_required CHECK (
+        (scope_kind IN ('organization', 'self') AND scope_id IS NULL)
+        OR (scope_kind NOT IN ('organization', 'self') AND scope_id IS NOT NULL)
+    ),
+    CONSTRAINT ck_product_role_mapping_timestamps CHECK (updated_at_utc >= created_at_utc)
 );
 
 CREATE INDEX IF NOT EXISTS ix_customer_organization_status
@@ -62,3 +120,21 @@ CREATE INDEX IF NOT EXISTS ix_identity_tenant_customer_status
 
 CREATE INDEX IF NOT EXISTS ix_product_user_customer_status
     ON product_user (customer_organization_id, status);
+
+CREATE INDEX IF NOT EXISTS ix_product_role_mapping_customer_status
+    ON product_role_mapping (customer_organization_id, status);
+
+CREATE INDEX IF NOT EXISTS ix_governance_audit_event_customer_created
+    ON governance_audit_event (customer_organization_id, created_at_utc DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_product_role_mapping_active_principal_role_scope
+    ON product_role_mapping (
+        customer_organization_id,
+        identity_tenant_id,
+        external_principal_type,
+        external_principal_id,
+        product_role,
+        scope_kind,
+        COALESCE(scope_id, '')
+    )
+    WHERE status = 'active';
