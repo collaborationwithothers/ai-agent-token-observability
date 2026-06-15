@@ -1,16 +1,14 @@
 using TokenObservability.Infrastructure.Runtime;
+using TokenObservability.Ingestion;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.AddRuntimeProbeServices();
+builder.AddTokenObservabilityIngestionServices();
 
 var app = builder.Build();
 
 app.MapRuntimeProbeEndpoints();
-app.MapGet("/ingestion", () => Results.Ok(new
-{
-    service = "token-observability-ingestion",
-    status = "placeholder"
-}));
+app.MapTokenObservabilityIngestionEndpoints();
 
 app.Run();

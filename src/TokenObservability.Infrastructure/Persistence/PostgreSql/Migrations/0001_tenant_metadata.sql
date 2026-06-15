@@ -164,7 +164,7 @@ CREATE INDEX IF NOT EXISTS ix_scoped_ingestion_credential_customer_status
     ON scoped_ingestion_credential (customer_organization_id, status);
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_scoped_ingestion_credential_active_hash
-    ON scoped_ingestion_credential (customer_organization_id, credential_hash)
+    ON scoped_ingestion_credential (credential_hash)
     WHERE status = 'active';
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_product_role_mapping_active_principal_role_scope

@@ -124,6 +124,15 @@ public sealed class ScopedIngestionCredentialLifecycleService(
                 ScopedIngestionCredentialValidationFailureReason.Missing);
         }
 
+        var customerOrganization = await tenantMetadataStore.FindCustomerOrganizationAsync(credential.CustomerOrganizationId);
+
+        if (customerOrganization is null || customerOrganization.Status != CustomerOrganizationStatus.Active)
+        {
+            await RecordFailedAccessAsync(credential, "invalid_tenant", request.CorrelationId);
+            return ScopedIngestionCredentialValidationResult.Denied(
+                ScopedIngestionCredentialValidationFailureReason.InvalidTenant);
+        }
+
         if (!StringComparer.Ordinal.Equals(ToWireHarness(credential.AllowedHarness), declaredHarness))
         {
             await RecordFailedAccessAsync(credential, "wrong_harness", request.CorrelationId);
@@ -159,6 +168,124 @@ public sealed class ScopedIngestionCredentialLifecycleService(
         }
 
         return ScopedIngestionCredentialValidationResult.Allowed(credential);
+    }
+
+    public async Task<ScopedIngestionCredentialValidationResult> ValidateForIngestionAsync(
+        ValidateScopedIngestionCredentialForIngestionRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var normalizedSecret = NormalizeSecret(request.Secret);
+        if (normalizedSecret is null)
+        {
+            return ScopedIngestionCredentialValidationResult.Denied(
+                ScopedIngestionCredentialValidationFailureReason.Malformed);
+        }
+
+        var declaredHarness = NormalizeRequiredText(request.DeclaredHarness);
+        var harnessSetupProfileId = NormalizeRequiredText(request.HarnessSetupProfileId);
+        var expectedHash = HashSecret(normalizedSecret);
+        var credentials = await tenantMetadataStore.ListScopedIngestionCredentialsForValidationAsync();
+        var matchedCredentials = credentials
+            .Where(candidate => CredentialHashEquals(candidate.CredentialHash, expectedHash))
+            .ToArray();
+        var activeCredentials = matchedCredentials
+            .Where(candidate => candidate.Status == ScopedIngestionCredentialStatus.Active)
+            .ToArray();
+        var credential = FindCredentialForIngestionValidation(
+            matchedCredentials,
+            activeCredentials,
+            harnessSetupProfileId);
+
+        if (credential is null)
+        {
+            return ScopedIngestionCredentialValidationResult.Denied(
+                ScopedIngestionCredentialValidationFailureReason.Missing);
+        }
+
+        if (activeCredentials.Length > 1)
+        {
+            await RecordFailedAccessAsync(credential, "ambiguous_credential", request.CorrelationId);
+            return ScopedIngestionCredentialValidationResult.Denied(
+                ScopedIngestionCredentialValidationFailureReason.Ambiguous);
+        }
+
+        var customerOrganization = await tenantMetadataStore.FindCustomerOrganizationAsync(credential.CustomerOrganizationId);
+
+        if (customerOrganization is null || customerOrganization.Status != CustomerOrganizationStatus.Active)
+        {
+            await RecordFailedAccessAsync(credential, "invalid_tenant", request.CorrelationId);
+            return ScopedIngestionCredentialValidationResult.Denied(
+                ScopedIngestionCredentialValidationFailureReason.InvalidTenant);
+        }
+
+        if (credential.Status != ScopedIngestionCredentialStatus.Active)
+        {
+            var failureReason = credential.Status switch
+            {
+                ScopedIngestionCredentialStatus.Disabled => ScopedIngestionCredentialValidationFailureReason.Disabled,
+                ScopedIngestionCredentialStatus.Revoked => ScopedIngestionCredentialValidationFailureReason.Revoked,
+                ScopedIngestionCredentialStatus.Expired => ScopedIngestionCredentialValidationFailureReason.Expired,
+                _ => ScopedIngestionCredentialValidationFailureReason.Inactive
+            };
+            await RecordFailedAccessAsync(credential, ToReasonCode(failureReason), request.CorrelationId);
+            return ScopedIngestionCredentialValidationResult.Denied(failureReason);
+        }
+
+        if (credential.ExpiresAtUtc <= clock.UtcNow.ToUniversalTime())
+        {
+            await RecordFailedAccessAsync(credential, "expired", request.CorrelationId);
+            return ScopedIngestionCredentialValidationResult.Denied(
+                ScopedIngestionCredentialValidationFailureReason.Expired);
+        }
+
+        if (declaredHarness is null || harnessSetupProfileId is null)
+        {
+            await RecordFailedAccessAsync(credential, "malformed_harness_context", request.CorrelationId);
+            return ScopedIngestionCredentialValidationResult.Denied(
+                ScopedIngestionCredentialValidationFailureReason.MalformedHarnessContext);
+        }
+
+        if (!StringComparer.Ordinal.Equals(ToWireHarness(credential.AllowedHarness), declaredHarness))
+        {
+            await RecordFailedAccessAsync(credential, "wrong_harness", request.CorrelationId);
+            return ScopedIngestionCredentialValidationResult.Denied(
+                ScopedIngestionCredentialValidationFailureReason.WrongHarness);
+        }
+
+        if (!StringComparer.Ordinal.Equals(credential.HarnessSetupProfileId, harnessSetupProfileId))
+        {
+            await RecordFailedAccessAsync(credential, "wrong_harness_profile", request.CorrelationId);
+            return ScopedIngestionCredentialValidationResult.Denied(
+                ScopedIngestionCredentialValidationFailureReason.WrongHarnessProfile);
+        }
+
+        return ScopedIngestionCredentialValidationResult.Allowed(credential);
+    }
+
+    private static ScopedIngestionCredential? FindCredentialForIngestionValidation(
+        IReadOnlyList<ScopedIngestionCredential> matchedCredentials,
+        IReadOnlyList<ScopedIngestionCredential> activeCredentials,
+        string? harnessSetupProfileId)
+    {
+        if (activeCredentials.Count == 1)
+        {
+            return activeCredentials[0];
+        }
+
+        if (activeCredentials.Count > 1 && harnessSetupProfileId is not null)
+        {
+            var profileActiveCredentials = activeCredentials
+                .Where(candidate => StringComparer.Ordinal.Equals(candidate.HarnessSetupProfileId, harnessSetupProfileId))
+                .ToArray();
+
+            if (profileActiveCredentials.Length == 1)
+            {
+                return profileActiveCredentials[0];
+            }
+        }
+
+        return activeCredentials.FirstOrDefault() ?? matchedCredentials.FirstOrDefault();
     }
 
     private Task RecordFailedAccessAsync(
@@ -249,6 +376,9 @@ public sealed class ScopedIngestionCredentialLifecycleService(
             ScopedIngestionCredentialValidationFailureReason.Inactive => "inactive",
             ScopedIngestionCredentialValidationFailureReason.WrongHarness => "wrong_harness",
             ScopedIngestionCredentialValidationFailureReason.WrongHarnessProfile => "wrong_harness_profile",
+            ScopedIngestionCredentialValidationFailureReason.InvalidTenant => "invalid_tenant",
+            ScopedIngestionCredentialValidationFailureReason.MalformedHarnessContext => "malformed_harness_context",
+            ScopedIngestionCredentialValidationFailureReason.Ambiguous => "ambiguous_credential",
             ScopedIngestionCredentialValidationFailureReason.Malformed => "malformed",
             ScopedIngestionCredentialValidationFailureReason.Missing => "missing",
             _ => "denied"
@@ -276,6 +406,12 @@ public sealed record RotateScopedIngestionCredentialCommand(
 
 public sealed record ValidateScopedIngestionCredentialRequest(
     CustomerOrganizationId CustomerOrganizationId,
+    string Secret,
+    string DeclaredHarness,
+    string HarnessSetupProfileId,
+    string CorrelationId);
+
+public sealed record ValidateScopedIngestionCredentialForIngestionRequest(
     string Secret,
     string DeclaredHarness,
     string HarnessSetupProfileId,
@@ -321,5 +457,8 @@ public enum ScopedIngestionCredentialValidationFailureReason
     Expired,
     Inactive,
     WrongHarness,
-    WrongHarnessProfile
+    WrongHarnessProfile,
+    InvalidTenant,
+    MalformedHarnessContext,
+    Ambiguous
 }

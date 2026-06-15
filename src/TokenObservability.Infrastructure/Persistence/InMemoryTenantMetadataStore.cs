@@ -112,6 +112,17 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         }
     }
 
+    public Task<CustomerOrganization?> FindCustomerOrganizationAsync(CustomerOrganizationId customerOrganizationId)
+    {
+        lock (gate)
+        {
+            return Task.FromResult(
+                customerOrganizations.TryGetValue(customerOrganizationId, out var organization)
+                    ? organization
+                    : null);
+        }
+    }
+
     public Task<IdentityTenant> CreateIdentityTenantAsync(
         CustomerOrganizationId customerOrganizationId,
         CreateIdentityTenantRequest request)
@@ -550,6 +561,18 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         }
     }
 
+    public Task<IReadOnlyList<ScopedIngestionCredential>> ListScopedIngestionCredentialsForValidationAsync()
+    {
+        lock (gate)
+        {
+            return Task.FromResult<IReadOnlyList<ScopedIngestionCredential>>(
+                scopedIngestionCredentials.Values
+                    .OrderBy(credential => credential.CreatedAtUtc)
+                    .ThenBy(credential => credential.ScopedIngestionCredentialId.ToString(), StringComparer.Ordinal)
+                    .ToArray());
+        }
+    }
+
     public Task<ScopedIngestionCredential> CreateScopedIngestionCredentialAsync(
         CustomerOrganizationId customerOrganizationId,
         CreateScopedIngestionCredentialRequest request)
@@ -575,11 +598,10 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
             RequireProductUserForCustomerOrganization(customerOrganizationId, request.CreatedByProductUserId);
 
             if (scopedIngestionCredentials.Values.Any(credential =>
-                    credential.CustomerOrganizationId == customerOrganizationId &&
                     credential.Status == ScopedIngestionCredentialStatus.Active &&
                     StringComparer.Ordinal.Equals(credential.CredentialHash, credentialHash)))
             {
-                throw new InvalidOperationException("Active scoped ingestion credential hash already exists for the customer organization.");
+                throw new InvalidOperationException("Active scoped ingestion credential hash already exists.");
             }
 
             var credential = new ScopedIngestionCredential(
@@ -699,12 +721,11 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
             }
 
             if (scopedIngestionCredentials.Values.Any(existingCredential =>
-                    existingCredential.CustomerOrganizationId == customerOrganizationId &&
                     existingCredential.ScopedIngestionCredentialId != scopedIngestionCredentialId &&
                     existingCredential.Status == ScopedIngestionCredentialStatus.Active &&
                     StringComparer.Ordinal.Equals(existingCredential.CredentialHash, credentialHash)))
             {
-                throw new InvalidOperationException("Active scoped ingestion credential hash already exists for the customer organization.");
+                throw new InvalidOperationException("Active scoped ingestion credential hash already exists.");
             }
 
             var auditEventId = NormalizeRequiredText(request.AuditEventId, nameof(request.AuditEventId));
@@ -765,7 +786,7 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
                 customerOrganizationId,
                 actorProductUserId: null,
                 effectiveRole: null,
-                ProductAuthorizationAction.IngestionCredentialManage,
+                ProductAuthorizationAction.TelemetryIngest,
                 "scoped_ingestion_credential",
                 credential.ScopedIngestionCredentialId.ToString(),
                 "denied",
@@ -1246,9 +1267,11 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
     {
         var isAllowed = key switch
         {
-            "evidence_kind" => value is "admin_operation" or "authorization_decision",
+            "evidence_kind" => value is "admin_operation" or "authorization_decision" or "ingestion_decision",
             "operation" => IsSafeMachineToken(value),
-            "request_route" => value.StartsWith("/api/v1/", StringComparison.Ordinal) && IsSafeRoute(value),
+            "request_route" => (value.StartsWith("/api/v1/", StringComparison.Ordinal) ||
+                    value is "/v1/logs" or "/v1/traces" or "/v1/metrics") &&
+                IsSafeRoute(value),
             "result" => IsSafeMachineToken(value),
             "external_principal_type" => Enum.TryParse<ExternalPrincipalType>(value, ignoreCase: false, out _),
             "product_role" => Enum.TryParse<ProductRole>(value, ignoreCase: false, out _),
