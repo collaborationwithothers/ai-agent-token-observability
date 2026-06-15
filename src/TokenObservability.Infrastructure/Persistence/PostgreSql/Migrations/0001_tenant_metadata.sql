@@ -66,12 +66,14 @@ CREATE TABLE IF NOT EXISTS governance_audit_event (
     decision text NOT NULL,
     denial_reason text NULL,
     correlation_id text NOT NULL,
+    evidence_metadata_json jsonb NOT NULL,
     created_at_utc timestamptz NOT NULL,
     CONSTRAINT pk_governance_audit_event PRIMARY KEY (customer_organization_id, audit_event_id),
     CONSTRAINT fk_governance_audit_event_actor FOREIGN KEY (customer_organization_id, actor_product_user_id) REFERENCES product_user (customer_organization_id, product_user_id),
     CONSTRAINT ck_governance_audit_event_effective_role CHECK (effective_role IS NULL OR effective_role IN ('PlatformAdmin', 'SecurityReviewer', 'EngineeringLead', 'Developer', 'ReadOnlyViewer')),
     CONSTRAINT ck_governance_audit_event_decision CHECK (decision IN ('created', 'updated', 'disabled', 'denied')),
     CONSTRAINT ck_governance_audit_event_denial_reason CHECK (denial_reason IS NULL OR denial_reason IN ('MissingRoleMapping', 'InsufficientRole', 'ScopeMismatch', 'InvalidTenant')),
+    CONSTRAINT ck_governance_audit_event_evidence_metadata_json CHECK (jsonb_typeof(evidence_metadata_json) = 'object'),
     CONSTRAINT ck_governance_audit_event_denial_shape CHECK (
         (decision = 'denied' AND denial_reason IS NOT NULL)
         OR (decision <> 'denied' AND denial_reason IS NULL)

@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using TokenObservability.Domain.Authorization;
 using TokenObservability.Domain.Tenancy;
 
@@ -5,6 +6,53 @@ namespace TokenObservability.Infrastructure.Persistence;
 
 public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
 {
+    private static readonly string[] SensitiveEvidenceKeyFragments =
+    [
+        "raw_prompt",
+        "prompt_text",
+        "code_content",
+        "command_output",
+        "tool_result",
+        "secret",
+        "connection_string",
+        "password",
+        "api_key",
+        "access_token"
+    ];
+
+    private static readonly string[] SensitiveEvidenceValueFragments =
+    [
+        "bearer ",
+        "sk-",
+        "accountkey=",
+        "password=",
+        "secret=",
+        "api_key=",
+        "access_token=",
+        "connection string",
+        "connectionstring",
+        "private key",
+        "raw prompt",
+        "prompt text",
+        "code content",
+        "command output",
+        "tool result"
+    ];
+
+    private static readonly HashSet<string> AllowedEvidenceMetadataKeys = new(StringComparer.Ordinal)
+    {
+        "denial_reason",
+        "evidence_kind",
+        "external_principal_type",
+        "operation",
+        "product_role",
+        "request_route",
+        "requested_scope_id",
+        "requested_scope_kind",
+        "scope_id",
+        "scope_kind"
+    };
+
     private readonly Dictionary<CustomerOrganizationId, CustomerOrganization> customerOrganizations = [];
     private readonly Dictionary<string, CustomerOrganizationId> organizationSlugIndex = new(StringComparer.Ordinal);
     private readonly Dictionary<IdentityTenantId, IdentityTenant> identityTenants = [];
@@ -471,12 +519,59 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         }
     }
 
+    public Task<GovernanceAuditEvent> RecordGovernanceAuditEventAsync(
+        CustomerOrganizationId customerOrganizationId,
+        CreateGovernanceAuditEventRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(request.TargetScope);
+
+        var auditEventId = NormalizeRequiredText(request.AuditEventId, nameof(request.AuditEventId));
+        var correlationId = NormalizeRequiredText(request.CorrelationId, nameof(request.CorrelationId));
+        var decision = NormalizeDecision(request.Decision);
+        var evidenceMetadata = NormalizeEvidenceMetadata(request.EvidenceMetadata);
+        var targetResourceId = GetTargetResourceId(customerOrganizationId, request.TargetScope);
+        var now = clock.UtcNow.ToUniversalTime();
+
+        if (evidenceMetadata.Count == 0)
+        {
+            throw new ArgumentException("Governance audit events require evidence metadata.", nameof(request));
+        }
+
+        ValidateDenialShape(decision, request.DenialReason);
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(customerOrganizationId);
+
+            if (request.ActorProductUserId is not null)
+            {
+                RequireProductUserForCustomerOrganization(customerOrganizationId, request.ActorProductUserId.Value);
+            }
+
+            return Task.FromResult(CreateGovernanceAuditEventUnderLock(
+                auditEventId,
+                customerOrganizationId,
+                request.ActorProductUserId,
+                request.EffectiveRole,
+                request.Action,
+                request.TargetScope.Kind.ToString(),
+                targetResourceId,
+                decision,
+                request.DenialReason,
+                correlationId,
+                evidenceMetadata,
+                now));
+        }
+    }
+
     public Task<ProductAuthorizationDecision> AuthorizeProductActionAsync(
         CustomerOrganizationId customerOrganizationId,
         IdentityTenantId identityTenantId,
         AuthenticatedTokenClaims claims,
         ProductAuthorizationAction action,
-        ProductScope requestedScope)
+        ProductScope requestedScope,
+        string? correlationId = null)
     {
         ArgumentNullException.ThrowIfNull(claims);
         ArgumentNullException.ThrowIfNull(requestedScope);
@@ -498,7 +593,8 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
                     effectiveRole: null,
                     action,
                     requestedScope,
-                    ProductAuthorizationDenialReason.InvalidTenant);
+                    ProductAuthorizationDenialReason.InvalidTenant,
+                    correlationId);
 
                 return Task.FromResult(new ProductAuthorizationDecision(
                     IsAllowed: false,
@@ -521,7 +617,8 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
                     effectiveRole: null,
                     action,
                     requestedScope,
-                    ProductAuthorizationDenialReason.InvalidTenant);
+                    ProductAuthorizationDenialReason.InvalidTenant,
+                    correlationId);
 
                 return Task.FromResult(new ProductAuthorizationDecision(
                     IsAllowed: false,
@@ -602,7 +699,8 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
                 mappings.Count == 0 ? null : effectiveRole,
                 deniedAction,
                 deniedScope,
-                denialReason);
+                denialReason,
+                correlationId);
 
             return new ProductAuthorizationDecision(
                 IsAllowed: false,
@@ -648,6 +746,125 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         return value.Trim();
     }
 
+    private static string NormalizeDecision(string decision)
+    {
+        var normalizedDecision = NormalizeRequiredText(decision, nameof(decision)).ToLowerInvariant();
+        return normalizedDecision is "created" or "updated" or "disabled" or "denied"
+            ? normalizedDecision
+            : throw new ArgumentException("Governance audit event decision is not supported.", nameof(decision));
+    }
+
+    private static void ValidateDenialShape(string decision, ProductAuthorizationDenialReason? denialReason)
+    {
+        if (decision == "denied" && denialReason is null)
+        {
+            throw new ArgumentException("Denied audit events require a denial reason.", nameof(denialReason));
+        }
+
+        if (decision != "denied" && denialReason is not null)
+        {
+            throw new ArgumentException("Only denied audit events can include a denial reason.", nameof(denialReason));
+        }
+    }
+
+    private static IReadOnlyDictionary<string, string> NormalizeEvidenceMetadata(
+        IReadOnlyDictionary<string, string>? evidenceMetadata)
+    {
+        if (evidenceMetadata is null || evidenceMetadata.Count == 0)
+        {
+            return new ReadOnlyDictionary<string, string>(new Dictionary<string, string>(StringComparer.Ordinal));
+        }
+
+        var normalized = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var (key, value) in evidenceMetadata)
+        {
+            var normalizedKey = NormalizeRequiredText(key, nameof(evidenceMetadata));
+            var normalizedValue = NormalizeRequiredText(value, nameof(evidenceMetadata));
+
+            if (!AllowedEvidenceMetadataKeys.Contains(normalizedKey))
+            {
+                throw new ArgumentException("Governance audit evidence metadata key is not allowed.", nameof(evidenceMetadata));
+            }
+
+            if (SensitiveEvidenceKeyFragments.Any(fragment =>
+                    normalizedKey.Contains(fragment, StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new ArgumentException("Governance audit evidence metadata must not store captured content or secrets.", nameof(evidenceMetadata));
+            }
+
+            if (SensitiveEvidenceValueFragments.Any(fragment =>
+                    normalizedValue.Contains(fragment, StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new ArgumentException("Governance audit evidence metadata must not store captured content or secrets.", nameof(evidenceMetadata));
+            }
+
+            if (normalizedKey.Length > 128)
+            {
+                throw new ArgumentException("Governance audit evidence metadata keys must be 128 characters or fewer.", nameof(evidenceMetadata));
+            }
+
+            if (normalizedValue.Length > 512)
+            {
+                throw new ArgumentException("Governance audit evidence metadata values must be 512 characters or fewer.", nameof(evidenceMetadata));
+            }
+
+            ValidateAllowedEvidenceMetadataValue(normalizedKey, normalizedValue, nameof(evidenceMetadata));
+            normalized.Add(normalizedKey, normalizedValue);
+        }
+
+        return new ReadOnlyDictionary<string, string>(normalized);
+    }
+
+    private static void ValidateAllowedEvidenceMetadataValue(string key, string value, string parameterName)
+    {
+        var isAllowed = key switch
+        {
+            "evidence_kind" => value is "admin_operation" or "authorization_decision",
+            "operation" => IsSafeMachineToken(value),
+            "request_route" => value.StartsWith("/api/v1/", StringComparison.Ordinal) && IsSafeRoute(value),
+            "external_principal_type" => Enum.TryParse<ExternalPrincipalType>(value, ignoreCase: false, out _),
+            "product_role" => Enum.TryParse<ProductRole>(value, ignoreCase: false, out _),
+            "scope_kind" or "requested_scope_kind" => Enum.TryParse<ProductScopeKind>(value, ignoreCase: false, out _),
+            "scope_id" or "requested_scope_id" => IsSafeResourceId(value),
+            "denial_reason" => Enum.TryParse<ProductAuthorizationDenialReason>(value, ignoreCase: false, out _),
+            _ => false
+        };
+
+        if (!isAllowed)
+        {
+            throw new ArgumentException("Governance audit evidence metadata value is not allowed.", parameterName);
+        }
+    }
+
+    private static bool IsSafeMachineToken(string value)
+    {
+        return value.All(static character =>
+            char.IsAsciiLetterOrDigit(character) ||
+            character is '_' or '-' or '.' or ':');
+    }
+
+    private static bool IsSafeRoute(string value)
+    {
+        return value.All(static character =>
+            char.IsAsciiLetterOrDigit(character) ||
+            character is '/' or '-' or '_' or '{' or '}');
+    }
+
+    private static bool IsSafeResourceId(string value)
+    {
+        return value.All(static character =>
+            char.IsAsciiLetterOrDigit(character) ||
+            character is '-' or '_' or ':' or '.' or '/');
+    }
+
+    private static string GetTargetResourceId(CustomerOrganizationId customerOrganizationId, ProductScope requestedScope)
+    {
+        return string.IsNullOrWhiteSpace(requestedScope.ScopeId)
+            ? customerOrganizationId.ToString()
+            : requestedScope.ScopeId.Trim();
+    }
+
     private void RecordAuthorizationAuditEventUnderLock(
         CustomerOrganizationId customerOrganizationId,
         ProductUserId? actorProductUserId,
@@ -661,25 +878,30 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         var normalizedCorrelationId = string.IsNullOrWhiteSpace(correlationId)
             ? auditEventId
             : correlationId.Trim();
-        var targetResourceId = string.IsNullOrWhiteSpace(requestedScope.ScopeId)
-            ? customerOrganizationId.ToString()
-            : requestedScope.ScopeId.Trim();
+        var targetResourceId = GetTargetResourceId(customerOrganizationId, requestedScope);
         var now = clock.UtcNow.ToUniversalTime();
 
-        var auditEvent = new GovernanceAuditEvent(
+        var evidenceMetadata = NormalizeEvidenceMetadata(new Dictionary<string, string>
+        {
+            ["evidence_kind"] = "authorization_decision",
+            ["requested_scope_kind"] = requestedScope.Kind.ToString(),
+            ["requested_scope_id"] = targetResourceId,
+            ["denial_reason"] = denialReason.ToString()
+        });
+
+        CreateGovernanceAuditEventUnderLock(
             auditEventId,
             customerOrganizationId,
             actorProductUserId,
             effectiveRole,
             action,
-            TargetResourceKind: requestedScope.Kind.ToString(),
-            TargetResourceId: targetResourceId,
-            Decision: "denied",
-            DenialReason: denialReason,
-            CorrelationId: normalizedCorrelationId,
+            requestedScope.Kind.ToString(),
+            targetResourceId,
+            "denied",
+            denialReason,
+            normalizedCorrelationId,
+            evidenceMetadata,
             now);
-
-        governanceAuditEvents.Add(new GovernanceAuditEventKey(customerOrganizationId, auditEvent.AuditEventId), auditEvent);
     }
 
     private ProductRoleMapping CreateProductRoleMappingUnderLock(
@@ -730,23 +952,75 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
             createdAtUtc,
             updatedAtUtc);
 
-        var auditEvent = new GovernanceAuditEvent(
+        var evidenceMetadata = NormalizeEvidenceMetadata(new Dictionary<string, string>
+        {
+            ["evidence_kind"] = "admin_operation",
+            ["operation"] = "product_role_mapping_create",
+            ["external_principal_type"] = externalPrincipalType.ToString(),
+            ["product_role"] = productRole.ToString(),
+            ["scope_kind"] = scopeKind.ToString(),
+            ["scope_id"] = scopeId ?? customerOrganizationId.ToString()
+        });
+
+        CreateGovernanceAuditEventUnderLock(
             auditEventId,
             customerOrganizationId,
             changedByProductUserId,
             actorEffectiveRole,
             ProductAuthorizationAction.IdentityManage,
-            TargetResourceKind: "product_role_mapping",
-            TargetResourceId: mapping.ProductRoleMappingId.ToString(),
-            Decision: "created",
-            DenialReason: null,
-            CorrelationId: correlationId,
+            "product_role_mapping",
+            mapping.ProductRoleMappingId.ToString(),
+            "created",
+            null,
+            correlationId,
+            evidenceMetadata,
             createdAtUtc);
 
-        governanceAuditEvents.Add(new GovernanceAuditEventKey(customerOrganizationId, auditEvent.AuditEventId), auditEvent);
         productRoleMappings.Add(mapping.ProductRoleMappingId, mapping);
 
         return mapping;
+    }
+
+    private GovernanceAuditEvent CreateGovernanceAuditEventUnderLock(
+        string auditEventId,
+        CustomerOrganizationId customerOrganizationId,
+        ProductUserId? actorProductUserId,
+        ProductRole? effectiveRole,
+        ProductAuthorizationAction action,
+        string targetResourceKind,
+        string targetResourceId,
+        string decision,
+        ProductAuthorizationDenialReason? denialReason,
+        string correlationId,
+        IReadOnlyDictionary<string, string> evidenceMetadata,
+        DateTimeOffset createdAtUtc)
+    {
+        var normalizedAuditEventId = NormalizeRequiredText(auditEventId, nameof(auditEventId));
+        var key = new GovernanceAuditEventKey(customerOrganizationId, normalizedAuditEventId);
+
+        if (governanceAuditEvents.ContainsKey(key))
+        {
+            throw new InvalidOperationException("Governance audit event already exists for the customer organization.");
+        }
+
+        var auditEvent = new GovernanceAuditEvent(
+            normalizedAuditEventId,
+            customerOrganizationId,
+            actorProductUserId,
+            effectiveRole,
+            action,
+            NormalizeRequiredText(targetResourceKind, nameof(targetResourceKind)),
+            NormalizeRequiredText(targetResourceId, nameof(targetResourceId)),
+            NormalizeDecision(decision),
+            denialReason,
+            NormalizeRequiredText(correlationId, nameof(correlationId)),
+            NormalizeEvidenceMetadata(evidenceMetadata),
+            createdAtUtc);
+
+        ValidateDenialShape(auditEvent.Decision, auditEvent.DenialReason);
+        governanceAuditEvents.Add(key, auditEvent);
+
+        return auditEvent;
     }
 
     private void RequireCustomerOrganization(CustomerOrganizationId customerOrganizationId)
@@ -992,3 +1266,14 @@ internal sealed record SeedProductRoleMappingRequest(
     ProductRole ActorEffectiveRole,
     string CorrelationId,
     string AuditEventId);
+
+public sealed record CreateGovernanceAuditEventRequest(
+    string AuditEventId,
+    ProductUserId? ActorProductUserId,
+    ProductRole? EffectiveRole,
+    ProductAuthorizationAction Action,
+    ProductScope TargetScope,
+    string Decision,
+    ProductAuthorizationDenialReason? DenialReason,
+    string CorrelationId,
+    IReadOnlyDictionary<string, string> EvidenceMetadata);

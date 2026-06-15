@@ -310,7 +310,9 @@ Governance Audit Events are required for:
 - Pricing basis changes.
 - Export and deletion workflows.
 
-Audit records must include Customer Organization, actor, effective role, action, target resource, decision, timestamp, and correlation ID.
+Audit records must include Customer Organization, actor, effective role, action, target resource, decision, timestamp, correlation ID, and non-sensitive evidence metadata.
+
+Audit evidence metadata must not include raw prompt text, code content, command output, tool results, secrets, tokens, or connection strings.
 
 ## Failure Behavior
 

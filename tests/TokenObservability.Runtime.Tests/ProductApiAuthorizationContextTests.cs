@@ -286,6 +286,123 @@ public sealed class ProductApiAuthorizationContextTests
         Assert.Contains("authorization_enforcement", content);
     }
 
+    [Fact]
+    public async Task AuditEventsRouteReturnsTenantScopedEventsWithEvidenceMetadata()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var contoso = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var fabrikam = await CreateTenantAsync(store, "fabrikam", "fabrikam-tenant");
+        var contosoAdminClaims = CreateClaims(subject: "contoso-admin", groupObjectIds: ["contoso-admin-group"]);
+        var fabrikamAdminClaims = CreateClaims(
+            subject: "fabrikam-admin",
+            groupObjectIds: ["fabrikam-admin-group"],
+            externalTenantId: "fabrikam-tenant");
+        var contosoAdmin = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            contoso.Organization.CustomerOrganizationId,
+            contoso.IdentityTenant.IdentityTenantId,
+            contosoAdminClaims);
+        var fabrikamAdmin = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            fabrikam.Organization.CustomerOrganizationId,
+            fabrikam.IdentityTenant.IdentityTenantId,
+            fabrikamAdminClaims);
+        await SeedRoleMappingAsync(
+            store,
+            contoso,
+            contosoAdmin.ProductUserId,
+            "contoso-admin-group",
+            ProductRole.PlatformAdmin);
+        await SeedRoleMappingAsync(
+            store,
+            fabrikam,
+            fabrikamAdmin.ProductUserId,
+            "fabrikam-admin-group",
+            ProductRole.PlatformAdmin);
+        await store.RecordGovernanceAuditEventAsync(
+            contoso.Organization.CustomerOrganizationId,
+            new CreateGovernanceAuditEventRequest(
+                AuditEventId: "audit-contoso-created-001",
+                ActorProductUserId: contosoAdmin.ProductUserId,
+                EffectiveRole: ProductRole.PlatformAdmin,
+                Action: ProductAuthorizationAction.IdentityManage,
+                TargetScope: new ProductScope(ProductScopeKind.Organization, ScopeId: null),
+                Decision: "created",
+                DenialReason: null,
+                CorrelationId: "audit-contoso-correlation-001",
+                EvidenceMetadata: new Dictionary<string, string>
+                {
+                    ["evidence_kind"] = "admin_operation",
+                    ["request_route"] = "/api/v1/identity/role-mappings"
+                }));
+        await store.RecordGovernanceAuditEventAsync(
+            fabrikam.Organization.CustomerOrganizationId,
+            new CreateGovernanceAuditEventRequest(
+                AuditEventId: "audit-fabrikam-created-001",
+                ActorProductUserId: fabrikamAdmin.ProductUserId,
+                EffectiveRole: ProductRole.PlatformAdmin,
+                Action: ProductAuthorizationAction.IdentityManage,
+                TargetScope: new ProductScope(ProductScopeKind.Organization, ScopeId: null),
+                Decision: "created",
+                DenialReason: null,
+                CorrelationId: "audit-fabrikam-correlation-001",
+                EvidenceMetadata: new Dictionary<string, string>
+                {
+                    ["evidence_kind"] = "admin_operation",
+                    ["request_route"] = "/api/v1/identity/role-mappings"
+                }));
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+        using var request = CreateAuthorizedRequest(HttpMethod.Get, "/api/v1/audit-events", "contoso", contosoAdminClaims);
+
+        using var response = await client.SendAsync(request);
+
+        response.EnsureSuccessStatusCode();
+        using var body = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
+        var items = body.RootElement.GetProperty("items").EnumerateArray().ToArray();
+        var auditEvent = Assert.Single(items, item => item.GetProperty("auditEventId").GetString() == "audit-contoso-created-001");
+        Assert.DoesNotContain(items, item => item.GetProperty("auditEventId").GetString() == "audit-fabrikam-created-001");
+        Assert.Equal("created", auditEvent.GetProperty("decision").GetString());
+        Assert.Equal("admin_operation", auditEvent.GetProperty("evidenceMetadata").GetProperty("evidence_kind").GetString());
+        Assert.Equal("/api/v1/identity/role-mappings", auditEvent.GetProperty("evidenceMetadata").GetProperty("request_route").GetString());
+    }
+
+    [Fact]
+    public async Task AuditEventsRouteRejectsUnauthorizedCallerAndAuditsDenialWithoutCapturedContent()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var developerClaims = CreateClaims(subject: "developer-subject", groupObjectIds: ["developer-group"]);
+        var developer = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            developerClaims);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            developer.ProductUserId,
+            "developer-group",
+            ProductRole.Developer);
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+        using var request = CreateAuthorizedRequest(HttpMethod.Get, "/api/v1/audit-events", "contoso", developerClaims);
+        request.Headers.Add("X-Correlation-Id", "audit-read-denied-001");
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        await AssertProblemCodeAsync(response, "authorization_denied");
+
+        var auditEvents = await store.ListGovernanceAuditEventsAsync(seed.Organization.CustomerOrganizationId);
+        var deniedAuditEvent = Assert.Single(auditEvents, auditEvent => auditEvent.CorrelationId == "audit-read-denied-001");
+        Assert.Equal("denied", deniedAuditEvent.Decision);
+        Assert.Equal(ProductAuthorizationAction.AuditRead, deniedAuditEvent.Action);
+        Assert.Equal(ProductAuthorizationDenialReason.InsufficientRole, deniedAuditEvent.DenialReason);
+        Assert.Equal("Organization", deniedAuditEvent.EvidenceMetadata["requested_scope_kind"]);
+        Assert.DoesNotContain(deniedAuditEvent.EvidenceMetadata.Keys, key => key.Contains("prompt", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(deniedAuditEvent.EvidenceMetadata.Keys, key => key.Contains("code", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(deniedAuditEvent.EvidenceMetadata.Keys, key => key.Contains("command", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(deniedAuditEvent.EvidenceMetadata.Keys, key => key.Contains("tool", StringComparison.OrdinalIgnoreCase));
+    }
+
     private static WebApplicationFactory<TokenObservabilityApiAssemblyMarker> CreateFactory(
         InMemoryTenantMetadataStore store,
         bool configureReadiness = false)

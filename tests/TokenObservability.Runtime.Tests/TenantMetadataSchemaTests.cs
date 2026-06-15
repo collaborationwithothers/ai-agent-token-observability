@@ -129,9 +129,12 @@ public sealed class TenantMetadataSchemaTests
         Assert.Contains("CREATE TABLE IF NOT EXISTS customer_organization", migration);
         Assert.Contains("CREATE TABLE IF NOT EXISTS identity_tenant", migration);
         Assert.Contains("CREATE TABLE IF NOT EXISTS product_user", migration);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS governance_audit_event", migration);
         Assert.Contains("customer_organization_id uuid", migration);
         Assert.Contains("identity_tenant_id uuid", migration);
         Assert.Contains("product_user_id uuid", migration);
+        Assert.Contains("evidence_metadata_json jsonb NOT NULL", migration);
+        Assert.Contains("ck_governance_audit_event_evidence_metadata_json", migration);
         Assert.Contains("created_at_utc timestamptz NOT NULL", migration);
         Assert.Contains("updated_at_utc timestamptz NOT NULL", migration);
         Assert.Contains("UNIQUE (customer_organization_id, identity_tenant_id, external_subject_id)", migration);

@@ -57,6 +57,7 @@ public sealed class ProductRoleMappingTests
         Assert.Equal("created", auditEvent.Decision);
         Assert.Null(auditEvent.DenialReason);
         Assert.Equal("authz-create-001", auditEvent.CorrelationId);
+        Assert.Equal("admin_operation", auditEvent.EvidenceMetadata["evidence_kind"]);
     }
 
     [Fact]
@@ -103,6 +104,119 @@ public sealed class ProductRoleMappingTests
         Assert.Equal(developer.ProductUserId, auditEvent.ActorProductUserId);
         Assert.Equal(ProductRole.Developer, auditEvent.EffectiveRole);
         Assert.Equal(ProductAuthorizationAction.IdentityManage, auditEvent.Action);
+    }
+
+    [Fact]
+    public async Task GovernanceAuditWritePathRecordsSuccessfulAdministrativeOperationWithEvidenceMetadata()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "internal", "contoso-tenant");
+        var adminClaims = CreateClaims(subject: "admin-subject", groupObjectIds: ["entra-admin-group"]);
+        var admin = await SeedPlatformAdminAsync(store, seed, adminClaims);
+
+        var auditEvent = await store.RecordGovernanceAuditEventAsync(
+            seed.Organization.CustomerOrganizationId,
+            new CreateGovernanceAuditEventRequest(
+                AuditEventId: "audit-admin-operation-001",
+                ActorProductUserId: admin.ProductUserId,
+                EffectiveRole: ProductRole.PlatformAdmin,
+                Action: ProductAuthorizationAction.TenantUpdate,
+                TargetScope: new ProductScope(ProductScopeKind.Organization, ScopeId: null),
+                Decision: "updated",
+                DenialReason: null,
+                CorrelationId: "tenant-update-001",
+                EvidenceMetadata: new Dictionary<string, string>
+                {
+                    ["evidence_kind"] = "admin_operation",
+                    ["request_route"] = "/api/v1/customer-organization",
+                    ["operation"] = "tenant_settings_update"
+                }));
+
+        var found = await store.FindGovernanceAuditEventAsync(
+            seed.Organization.CustomerOrganizationId,
+            "audit-admin-operation-001");
+
+        Assert.Equal(auditEvent, found);
+        Assert.Equal(admin.ProductUserId, auditEvent.ActorProductUserId);
+        Assert.Equal(ProductAuthorizationAction.TenantUpdate, auditEvent.Action);
+        Assert.Equal("updated", auditEvent.Decision);
+        Assert.Equal("admin_operation", auditEvent.EvidenceMetadata["evidence_kind"]);
+        Assert.Equal("/api/v1/customer-organization", auditEvent.EvidenceMetadata["request_route"]);
+        Assert.Equal("tenant_settings_update", auditEvent.EvidenceMetadata["operation"]);
+        var dictionary = Assert.IsAssignableFrom<IDictionary<string, string>>(auditEvent.EvidenceMetadata);
+        Assert.Throws<NotSupportedException>(() => dictionary["operation"] = "tampered_operation");
+    }
+
+    [Fact]
+    public async Task GovernanceAuditWritePathRejectsCapturedContentEvidenceMetadata()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "internal", "contoso-tenant");
+        var adminClaims = CreateClaims(subject: "admin-subject", groupObjectIds: ["entra-admin-group"]);
+        var admin = await SeedPlatformAdminAsync(store, seed, adminClaims);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => store.RecordGovernanceAuditEventAsync(
+            seed.Organization.CustomerOrganizationId,
+            new CreateGovernanceAuditEventRequest(
+                AuditEventId: "audit-raw-prompt-001",
+                ActorProductUserId: admin.ProductUserId,
+                EffectiveRole: ProductRole.PlatformAdmin,
+                Action: ProductAuthorizationAction.ContentReviewDecide,
+                TargetScope: new ProductScope(ProductScopeKind.ContentReviewQueue, ScopeId: "queue-001"),
+                Decision: "updated",
+                DenialReason: null,
+                CorrelationId: "raw-prompt-rejected-001",
+                EvidenceMetadata: new Dictionary<string, string>
+                {
+                    ["raw_prompt_text"] = "Please inspect this secret code fragment."
+                })));
+    }
+
+    [Fact]
+    public async Task GovernanceAuditWritePathRejectsSensitiveEvidenceMetadataValues()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "internal", "contoso-tenant");
+        var adminClaims = CreateClaims(subject: "admin-subject", groupObjectIds: ["entra-admin-group"]);
+        var admin = await SeedPlatformAdminAsync(store, seed, adminClaims);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => store.RecordGovernanceAuditEventAsync(
+            seed.Organization.CustomerOrganizationId,
+            new CreateGovernanceAuditEventRequest(
+                AuditEventId: "audit-sensitive-value-001",
+                ActorProductUserId: admin.ProductUserId,
+                EffectiveRole: ProductRole.PlatformAdmin,
+                Action: ProductAuthorizationAction.TenantUpdate,
+                TargetScope: new ProductScope(ProductScopeKind.Organization, ScopeId: null),
+                Decision: "updated",
+                DenialReason: null,
+                CorrelationId: "sensitive-value-rejected-001",
+                EvidenceMetadata: new Dictionary<string, string>
+                {
+                    ["operation"] = "Bearer sk-test-token-that-must-not-be-stored"
+                })));
+    }
+
+    [Fact]
+    public async Task GovernanceAuditWritePathRejectsEmptyEvidenceMetadata()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "internal", "contoso-tenant");
+        var adminClaims = CreateClaims(subject: "admin-subject", groupObjectIds: ["entra-admin-group"]);
+        var admin = await SeedPlatformAdminAsync(store, seed, adminClaims);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => store.RecordGovernanceAuditEventAsync(
+            seed.Organization.CustomerOrganizationId,
+            new CreateGovernanceAuditEventRequest(
+                AuditEventId: "audit-empty-evidence-001",
+                ActorProductUserId: admin.ProductUserId,
+                EffectiveRole: ProductRole.PlatformAdmin,
+                Action: ProductAuthorizationAction.TenantUpdate,
+                TargetScope: new ProductScope(ProductScopeKind.Organization, ScopeId: null),
+                Decision: "updated",
+                DenialReason: null,
+                CorrelationId: "empty-evidence-rejected-001",
+                EvidenceMetadata: new Dictionary<string, string>())));
     }
 
     [Fact]

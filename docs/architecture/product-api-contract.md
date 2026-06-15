@@ -494,6 +494,8 @@ Supported filters:
 
 Required action: `audit.read`.
 
+Each returned item includes tenant, actor, action, target resource, decision, timestamp, correlation ID, and non-sensitive evidence metadata. The API must not return raw prompt text, code content, command output, tool results, secrets, tokens, or connection strings in audit evidence metadata.
+
 ## Pagination
 
 Collection routes use cursor pagination:

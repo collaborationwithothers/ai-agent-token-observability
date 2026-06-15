@@ -13,4 +13,5 @@ public sealed record GovernanceAuditEvent(
     string Decision,
     ProductAuthorizationDenialReason? DenialReason,
     string CorrelationId,
+    IReadOnlyDictionary<string, string> EvidenceMetadata,
     DateTimeOffset CreatedAtUtc);
