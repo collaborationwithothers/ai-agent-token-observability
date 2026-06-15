@@ -1313,6 +1313,7 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
             ["evidence_kind"] = "authorization_decision",
             ["requested_scope_kind"] = requestedScope.Kind.ToString(),
             ["requested_scope_id"] = targetResourceId,
+            ["result"] = "denied",
             ["denial_reason"] = denialReason.ToString()
         });
 
