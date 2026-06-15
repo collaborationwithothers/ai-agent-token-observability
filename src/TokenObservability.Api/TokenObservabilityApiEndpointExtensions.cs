@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Options;
 using TokenObservability.Domain.Authorization;
+using TokenObservability.Domain.Ingestion;
 using TokenObservability.Domain.Tenancy;
 using TokenObservability.Infrastructure.Persistence;
 
@@ -32,6 +33,7 @@ internal static class TokenObservabilityApiEndpointExtensions
         api.MapGet("/system/readiness", GetProtectedReadiness);
         api.MapGet("/me", GetCurrentUser);
         api.MapGet("/audit-events", GetAuditEvents);
+        api.MapGet("/ingestion-rejections", GetIngestionRejections);
     }
 
     private static IResult GetHealth()
@@ -170,6 +172,48 @@ internal static class TokenObservabilityApiEndpointExtensions
         });
     }
 
+    private static async Task<IResult> GetIngestionRejections(
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        InMemoryTenantMetadataStore tenantMetadataStore)
+    {
+        var resolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            ProductAuthorizationAction.AuditRead,
+            new ProductScope(ProductScopeKind.Organization, ScopeId: null));
+
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
+        }
+
+        var rejections = await tenantMetadataStore.ListIngestionRejectionsAsync(
+            resolution.Context.CustomerOrganization.CustomerOrganizationId);
+        var filteredRejections = ApplyIngestionRejectionFilters(httpContext, rejections).ToArray();
+
+        return Results.Ok(new
+        {
+            items = filteredRejections.Select(static rejection => new
+            {
+                ingestionRejectionId = rejection.IngestionRejectionId.ToString(),
+                customerOrganizationId = rejection.CustomerOrganizationId?.ToString(),
+                harnessSetupProfileId = rejection.HarnessSetupProfileId,
+                scopedIngestionCredentialId = rejection.ScopedIngestionCredentialId?.ToString(),
+                declaredHarness = rejection.DeclaredHarness,
+                signalType = rejection.SignalType,
+                requestRoute = rejection.RequestRoute,
+                reasonCode = rejection.ReasonCode,
+                httpStatus = rejection.HttpStatus,
+                correlationId = rejection.CorrelationId,
+                auditEventId = rejection.AuditEventId,
+                evidenceMetadata = rejection.EvidenceMetadata,
+                receivedAtUtc = rejection.ReceivedAtUtc
+            }),
+            nextCursor = (string?)null,
+            totalEstimate = filteredRejections.Length
+        });
+    }
+
     private static IResult CreateProblem(HttpContext httpContext, string title, int statusCode, string code)
     {
         return Results.Problem(
@@ -242,6 +286,45 @@ internal static class TokenObservabilityApiEndpointExtensions
         }
 
         return filteredEvents;
+    }
+
+    private static IEnumerable<IngestionRejectionRecord> ApplyIngestionRejectionFilters(
+        HttpContext httpContext,
+        IEnumerable<IngestionRejectionRecord> rejections)
+    {
+        var filteredRejections = rejections;
+
+        if (TryReadQuery(httpContext, "correlationId", out var correlationId))
+        {
+            filteredRejections = filteredRejections.Where(rejection =>
+                StringComparer.Ordinal.Equals(rejection.CorrelationId, correlationId));
+        }
+
+        if (TryReadQuery(httpContext, "reasonCode", out var reasonCode))
+        {
+            filteredRejections = filteredRejections.Where(rejection =>
+                StringComparer.Ordinal.Equals(rejection.ReasonCode, reasonCode));
+        }
+
+        if (TryReadQuery(httpContext, "signalType", out var signalType))
+        {
+            filteredRejections = filteredRejections.Where(rejection =>
+                StringComparer.Ordinal.Equals(rejection.SignalType, signalType));
+        }
+
+        if (TryReadQuery(httpContext, "from", out var from) &&
+            DateTimeOffset.TryParse(from, out var fromUtc))
+        {
+            filteredRejections = filteredRejections.Where(rejection => rejection.ReceivedAtUtc >= fromUtc.ToUniversalTime());
+        }
+
+        if (TryReadQuery(httpContext, "to", out var to) &&
+            DateTimeOffset.TryParse(to, out var toUtc))
+        {
+            filteredRejections = filteredRejections.Where(rejection => rejection.ReceivedAtUtc <= toUtc.ToUniversalTime());
+        }
+
+        return filteredRejections;
     }
 
     private static bool TryReadQuery(HttpContext httpContext, string key, out string value)

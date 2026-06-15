@@ -306,11 +306,15 @@ Records rejected requests without storing content-bearing payloads.
 | `customer_organization_id` | No | Tenant when derivable |
 | `harness_setup_profile_id` | No | Setup profile when derivable |
 | `scoped_ingestion_credential_id` | No | Credential when derivable |
-| `reason_code` | Yes | `invalid_credential`, `out_of_scope`, `unsupported_schema`, `payload_too_large`, `rate_limited`, `malformed_otlp`, `region_mismatch` |
+| `declared_harness` | No | Harness header value after safe normalization |
+| `signal_type` | Yes | OTLP signal route family |
+| `request_route` | Yes | Ingestion route that rejected the request |
+| `reason_code` | Yes | `invalid_credential`, `credential_out_of_scope`, `unsupported_schema`, `payload_too_large`, `rate_limited`, `malformed_otlp`, `residency_mismatch`, `tenant_context_mismatch`, `policy_context_missing` |
 | `http_status` | Yes | Returned status |
+| `correlation_id` | Yes | Product correlation ID returned with the rejection |
 | `received_at_utc` | Yes | Rejection timestamp |
-| `diagnostic_hash` | No | Hash of safe diagnostic metadata |
 | `audit_event_id` | No | Audit event when security-relevant |
+| `evidence_metadata_json` | Yes | Bounded, non-sensitive rejection metadata |
 
 ## Session Model
 

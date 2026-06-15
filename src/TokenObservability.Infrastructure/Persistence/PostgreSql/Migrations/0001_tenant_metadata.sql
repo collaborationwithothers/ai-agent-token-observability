@@ -137,12 +137,46 @@ CREATE TABLE IF NOT EXISTS scoped_ingestion_credential (
     CONSTRAINT fk_scoped_ingestion_credential_product_user FOREIGN KEY (customer_organization_id, product_user_id) REFERENCES product_user (customer_organization_id, product_user_id),
     CONSTRAINT fk_scoped_ingestion_credential_created_by_product_user FOREIGN KEY (customer_organization_id, created_by_product_user_id) REFERENCES product_user (customer_organization_id, product_user_id),
     CONSTRAINT fk_scoped_ingestion_credential_changed_by_product_user FOREIGN KEY (customer_organization_id, changed_by_product_user_id) REFERENCES product_user (customer_organization_id, product_user_id),
+    CONSTRAINT uq_scoped_ingestion_credential_customer_credential UNIQUE (customer_organization_id, scoped_ingestion_credential_id),
     CONSTRAINT ck_scoped_ingestion_credential_allowed_harness CHECK (allowed_harness IN ('codex_cli')),
     CONSTRAINT ck_scoped_ingestion_credential_allowed_scopes_json CHECK (jsonb_typeof(allowed_scopes_json) = 'array'),
     CONSTRAINT ck_scoped_ingestion_credential_audit_event_ids_json CHECK (jsonb_typeof(audit_event_ids_json) = 'array'),
     CONSTRAINT ck_scoped_ingestion_credential_status CHECK (status IN ('active', 'disabled', 'revoked', 'expired', 'pending_rotation')),
     CONSTRAINT ck_scoped_ingestion_credential_expiry_window CHECK (expires_at_utc > created_at_utc),
     CONSTRAINT ck_scoped_ingestion_credential_timestamps CHECK (updated_at_utc >= created_at_utc)
+);
+
+CREATE TABLE IF NOT EXISTS ingestion_rejection (
+    ingestion_rejection_id uuid PRIMARY KEY,
+    customer_organization_id uuid NULL,
+    harness_setup_profile_id text NULL,
+    scoped_ingestion_credential_id uuid NULL,
+    declared_harness text NULL,
+    signal_type text NOT NULL,
+    request_route text NOT NULL,
+    reason_code text NOT NULL,
+    http_status integer NOT NULL,
+    correlation_id text NOT NULL,
+    audit_event_id text NULL,
+    evidence_metadata_json jsonb NOT NULL,
+    received_at_utc timestamptz NOT NULL,
+    CONSTRAINT fk_ingestion_rejection_customer_organization FOREIGN KEY (customer_organization_id) REFERENCES customer_organization (customer_organization_id),
+    CONSTRAINT fk_ingestion_rejection_scoped_credential FOREIGN KEY (customer_organization_id, scoped_ingestion_credential_id) REFERENCES scoped_ingestion_credential (customer_organization_id, scoped_ingestion_credential_id),
+    CONSTRAINT fk_ingestion_rejection_audit_event FOREIGN KEY (customer_organization_id, audit_event_id) REFERENCES governance_audit_event (customer_organization_id, audit_event_id),
+    CONSTRAINT ck_ingestion_rejection_http_status CHECK (http_status BETWEEN 400 AND 599),
+    CONSTRAINT ck_ingestion_rejection_evidence_metadata_json CHECK (jsonb_typeof(evidence_metadata_json) = 'object'),
+    CONSTRAINT ck_ingestion_rejection_harness_setup_profile_id CHECK (
+        harness_setup_profile_id IS NULL
+        OR (
+            harness_setup_profile_id ~ '^[A-Za-z0-9._:/-]+$'
+            AND harness_setup_profile_id !~* '(bearer |sk-|accountkey=|password=|secret=|api_key=|access_token=|connection string|connectionstring|private key|raw prompt|prompt text|code content|command output|tool result|prompt|token|password|command|tool)'
+        )
+    ),
+    CONSTRAINT ck_ingestion_rejection_declared_harness CHECK (declared_harness IS NULL OR declared_harness IN ('codex-cli')),
+    CONSTRAINT ck_ingestion_rejection_link_tenant_shape CHECK (
+        (customer_organization_id IS NOT NULL OR scoped_ingestion_credential_id IS NULL)
+        AND (customer_organization_id IS NOT NULL OR audit_event_id IS NULL)
+    )
 );
 
 CREATE INDEX IF NOT EXISTS ix_customer_organization_status
@@ -166,6 +200,13 @@ CREATE INDEX IF NOT EXISTS ix_scoped_ingestion_credential_customer_status
 CREATE UNIQUE INDEX IF NOT EXISTS ux_scoped_ingestion_credential_active_hash
     ON scoped_ingestion_credential (credential_hash)
     WHERE status = 'active';
+
+CREATE INDEX IF NOT EXISTS ix_ingestion_rejection_customer_received
+    ON ingestion_rejection (customer_organization_id, received_at_utc DESC)
+    WHERE customer_organization_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS ix_ingestion_rejection_reason_received
+    ON ingestion_rejection (reason_code, received_at_utc DESC);
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_product_role_mapping_active_principal_role_scope
     ON product_role_mapping (

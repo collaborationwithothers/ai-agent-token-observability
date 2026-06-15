@@ -1,13 +1,16 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using TokenObservability.Api;
 using TokenObservability.Domain.Authorization;
+using TokenObservability.Domain.Ingestion;
 using TokenObservability.Domain.Tenancy;
+using TokenObservability.Infrastructure.Ingestion;
 using TokenObservability.Infrastructure.Persistence;
 
 namespace TokenObservability.Runtime.Tests;
@@ -403,6 +406,237 @@ public sealed class ProductApiAuthorizationContextTests
         Assert.DoesNotContain(deniedAuditEvent.EvidenceMetadata.Keys, key => key.Contains("tool", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public async Task IngestionRejectionsRouteReturnsOnlyTenantScopedSafeMetadata()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var contoso = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var fabrikam = await CreateTenantAsync(store, "fabrikam", "fabrikam-tenant");
+        var contosoAdminClaims = CreateClaims(subject: "contoso-admin", groupObjectIds: ["contoso-admin-group"]);
+        var fabrikamAdminClaims = CreateClaims(
+            subject: "fabrikam-admin",
+            groupObjectIds: ["fabrikam-admin-group"],
+            externalTenantId: "fabrikam-tenant");
+        var contosoAdmin = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            contoso.Organization.CustomerOrganizationId,
+            contoso.IdentityTenant.IdentityTenantId,
+            contosoAdminClaims);
+        var fabrikamAdmin = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            fabrikam.Organization.CustomerOrganizationId,
+            fabrikam.IdentityTenant.IdentityTenantId,
+            fabrikamAdminClaims);
+        await SeedRoleMappingAsync(
+            store,
+            contoso,
+            contosoAdmin.ProductUserId,
+            "contoso-admin-group",
+            ProductRole.PlatformAdmin);
+        await SeedRoleMappingAsync(
+            store,
+            fabrikam,
+            fabrikamAdmin.ProductUserId,
+            "fabrikam-admin-group",
+            ProductRole.PlatformAdmin);
+        var contosoAuditEvent = await RecordRejectionAuditEventAsync(
+            store,
+            contoso,
+            "audit-contoso-rejection-001",
+            "contoso-rejection-001",
+            "malformed_otlp",
+            "profile-contoso-codex");
+        var fabrikamAuditEvent = await RecordRejectionAuditEventAsync(
+            store,
+            fabrikam,
+            "audit-fabrikam-rejection-001",
+            "fabrikam-rejection-001",
+            "payload_too_large",
+            "profile-fabrikam-codex");
+        await store.RecordIngestionRejectionAsync(new CreateIngestionRejectionRecordRequest(
+            CustomerOrganizationId: contoso.Organization.CustomerOrganizationId,
+            HarnessSetupProfileId: "profile-contoso-codex",
+            ScopedIngestionCredentialId: null,
+            DeclaredHarness: "codex-cli",
+            SignalType: "logs",
+            RequestRoute: "/v1/logs",
+            ReasonCode: "malformed_otlp",
+            HttpStatus: StatusCodes.Status400BadRequest,
+            CorrelationId: "contoso-rejection-001",
+            AuditEventId: contosoAuditEvent.AuditEventId,
+            EvidenceMetadata: new Dictionary<string, string>
+            {
+                ["evidence_kind"] = "ingestion_decision",
+                ["operation"] = "ingestion_rejection",
+                ["result"] = "malformed_otlp",
+                ["request_route"] = "/v1/logs",
+                ["scope_kind"] = ProductScopeKind.HarnessProfile.ToString(),
+                ["scope_id"] = "profile-contoso-codex"
+            }));
+        await store.RecordIngestionRejectionAsync(new CreateIngestionRejectionRecordRequest(
+            CustomerOrganizationId: fabrikam.Organization.CustomerOrganizationId,
+            HarnessSetupProfileId: "profile-fabrikam-codex",
+            ScopedIngestionCredentialId: null,
+            DeclaredHarness: "codex-cli",
+            SignalType: "logs",
+            RequestRoute: "/v1/logs",
+            ReasonCode: "payload_too_large",
+            HttpStatus: StatusCodes.Status413PayloadTooLarge,
+            CorrelationId: "fabrikam-rejection-001",
+            AuditEventId: fabrikamAuditEvent.AuditEventId,
+            EvidenceMetadata: new Dictionary<string, string>
+            {
+                ["evidence_kind"] = "ingestion_decision",
+                ["operation"] = "ingestion_rejection",
+                ["result"] = "payload_too_large",
+                ["request_route"] = "/v1/logs",
+                ["scope_kind"] = ProductScopeKind.HarnessProfile.ToString(),
+                ["scope_id"] = "profile-fabrikam-codex"
+            }));
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+        using var request = CreateAuthorizedRequest(HttpMethod.Get, "/api/v1/ingestion-rejections", "contoso", contosoAdminClaims);
+
+        using var response = await client.SendAsync(request);
+
+        response.EnsureSuccessStatusCode();
+        using var body = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
+        var items = body.RootElement.GetProperty("items").EnumerateArray().ToArray();
+        var rejection = Assert.Single(items);
+        Assert.Equal("contoso-rejection-001", rejection.GetProperty("correlationId").GetString());
+        Assert.Equal("malformed_otlp", rejection.GetProperty("reasonCode").GetString());
+        Assert.Equal("profile-contoso-codex", rejection.GetProperty("harnessSetupProfileId").GetString());
+        Assert.DoesNotContain("fabrikam", rejection.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("secret", rejection.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("prompt", rejection.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("command", rejection.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("tool", rejection.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task IngestionRejectionsRouteRejectsUnauthorizedCaller()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var developerClaims = CreateClaims(subject: "developer-subject", groupObjectIds: ["developer-group"]);
+        var developer = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            developerClaims);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            developer.ProductUserId,
+            "developer-group",
+            ProductRole.Developer);
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+        using var request = CreateAuthorizedRequest(HttpMethod.Get, "/api/v1/ingestion-rejections", "contoso", developerClaims);
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        await AssertProblemCodeAsync(response, "authorization_denied");
+    }
+
+    [Fact]
+    public async Task IngestionRejectionStoreRejectsCrossTenantCredentialLink()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var contoso = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var fabrikam = await CreateTenantAsync(store, "fabrikam", "fabrikam-tenant");
+        var fabrikamCredential = await IssueCredentialAsync(store, fabrikam, "profile-fabrikam-codex");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.RecordIngestionRejectionAsync(
+            new CreateIngestionRejectionRecordRequest(
+                CustomerOrganizationId: contoso.Organization.CustomerOrganizationId,
+                HarnessSetupProfileId: "profile-fabrikam-codex",
+                ScopedIngestionCredentialId: fabrikamCredential.Credential.ScopedIngestionCredentialId,
+                DeclaredHarness: "codex-cli",
+                SignalType: "logs",
+                RequestRoute: "/v1/logs",
+                ReasonCode: "malformed_otlp",
+                HttpStatus: StatusCodes.Status400BadRequest,
+                CorrelationId: "cross-tenant-credential-rejection-001",
+                AuditEventId: null,
+                EvidenceMetadata: CreateRejectionEvidence("malformed_otlp", "profile-fabrikam-codex"))));
+    }
+
+    [Fact]
+    public async Task IngestionRejectionStoreRejectsCrossTenantAuditLink()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var contoso = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var fabrikam = await CreateTenantAsync(store, "fabrikam", "fabrikam-tenant");
+        var fabrikamAuditEvent = await RecordRejectionAuditEventAsync(
+            store,
+            fabrikam,
+            "audit-fabrikam-cross-tenant-rejection-001",
+            "cross-tenant-audit-rejection-001",
+            "malformed_otlp",
+            "profile-fabrikam-codex");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.RecordIngestionRejectionAsync(
+            new CreateIngestionRejectionRecordRequest(
+                CustomerOrganizationId: contoso.Organization.CustomerOrganizationId,
+                HarnessSetupProfileId: "profile-fabrikam-codex",
+                ScopedIngestionCredentialId: null,
+                DeclaredHarness: "codex-cli",
+                SignalType: "logs",
+                RequestRoute: "/v1/logs",
+                ReasonCode: "malformed_otlp",
+                HttpStatus: StatusCodes.Status400BadRequest,
+                CorrelationId: "cross-tenant-audit-rejection-001",
+                AuditEventId: fabrikamAuditEvent.AuditEventId,
+                EvidenceMetadata: CreateRejectionEvidence("malformed_otlp", "profile-fabrikam-codex"))));
+    }
+
+    [Theory]
+    [InlineData("prompt-text")]
+    [InlineData("token-abc123")]
+    [InlineData("profile with spaces")]
+    public async Task IngestionRejectionStoreRejectsUnsafeHarnessSetupProfileId(string harnessSetupProfileId)
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var contoso = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+
+        await Assert.ThrowsAsync<ArgumentException>(() => store.RecordIngestionRejectionAsync(
+            new CreateIngestionRejectionRecordRequest(
+                CustomerOrganizationId: contoso.Organization.CustomerOrganizationId,
+                HarnessSetupProfileId: harnessSetupProfileId,
+                ScopedIngestionCredentialId: null,
+                DeclaredHarness: "codex-cli",
+                SignalType: "logs",
+                RequestRoute: "/v1/logs",
+                ReasonCode: "malformed_otlp",
+                HttpStatus: StatusCodes.Status400BadRequest,
+                CorrelationId: "unsafe-profile-rejection-001",
+                AuditEventId: null,
+                EvidenceMetadata: CreateRejectionEvidence("malformed_otlp", "unknown"))));
+    }
+
+    [Theory]
+    [InlineData("claude-code")]
+    [InlineData("codex-cli-secret")]
+    [InlineData("codex cli")]
+    public async Task IngestionRejectionStoreRejectsUnsafeDeclaredHarness(string declaredHarness)
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var contoso = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+
+        await Assert.ThrowsAsync<ArgumentException>(() => store.RecordIngestionRejectionAsync(
+            new CreateIngestionRejectionRecordRequest(
+                CustomerOrganizationId: contoso.Organization.CustomerOrganizationId,
+                HarnessSetupProfileId: null,
+                ScopedIngestionCredentialId: null,
+                DeclaredHarness: declaredHarness,
+                SignalType: "logs",
+                RequestRoute: "/v1/logs",
+                ReasonCode: "malformed_otlp",
+                HttpStatus: StatusCodes.Status400BadRequest,
+                CorrelationId: "unsafe-harness-rejection-001",
+                AuditEventId: null,
+                EvidenceMetadata: CreateRejectionEvidence("malformed_otlp", "unknown"))));
+    }
+
     private static WebApplicationFactory<TokenObservabilityApiAssemblyMarker> CreateFactory(
         InMemoryTenantMetadataStore store,
         bool configureReadiness = false)
@@ -562,6 +796,78 @@ public sealed class ProductApiAuthorizationContextTests
                 ActorEffectiveRole: ProductRole.PlatformAdmin,
                 CorrelationId: $"seed-{Guid.NewGuid():N}",
                 AuditEventId: $"audit-seed-{Guid.NewGuid():N}"));
+    }
+
+    private static async Task<IssuedScopedIngestionCredential> IssueCredentialAsync(
+        InMemoryTenantMetadataStore store,
+        TenantSeed seed,
+        string harnessSetupProfileId)
+    {
+        var lifecycle = new ScopedIngestionCredentialLifecycleService(store, new StaticTenantMetadataClock(Now));
+        var admin = await store.CreateProductUserAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            new CreateProductUserRequest(
+                ExternalSubjectId: $"admin-{Guid.NewGuid():N}",
+                DisplayLabel: "admin",
+                Email: "admin@example.test"));
+        var developer = await store.CreateProductUserAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            new CreateProductUserRequest(
+                ExternalSubjectId: $"developer-{Guid.NewGuid():N}",
+                DisplayLabel: "developer",
+                Email: "developer@example.test"));
+
+        return await lifecycle.CreateAsync(
+            seed.Organization.CustomerOrganizationId,
+            new IssueScopedIngestionCredentialRequest(
+                HarnessSetupProfileId: harnessSetupProfileId,
+                ProductUserId: developer.ProductUserId,
+                AllowedHarness: CodingAgentHarness.CodexCli,
+                AllowedScopes: [new ProductScope(ProductScopeKind.Organization, ScopeId: null)],
+                ExpiresAtUtc: Now.AddDays(30),
+                CreatedByProductUserId: admin.ProductUserId,
+                ActorEffectiveRole: ProductRole.PlatformAdmin,
+                CorrelationId: $"credential-create-{Guid.NewGuid():N}",
+                AuditEventId: $"audit-credential-create-{Guid.NewGuid():N}"));
+    }
+
+    private static Task<GovernanceAuditEvent> RecordRejectionAuditEventAsync(
+        InMemoryTenantMetadataStore store,
+        TenantSeed seed,
+        string auditEventId,
+        string correlationId,
+        string reasonCode,
+        string harnessSetupProfileId)
+    {
+        return store.RecordGovernanceAuditEventAsync(
+            seed.Organization.CustomerOrganizationId,
+            new CreateGovernanceAuditEventRequest(
+                AuditEventId: auditEventId,
+                ActorProductUserId: null,
+                EffectiveRole: null,
+                Action: ProductAuthorizationAction.TelemetryIngest,
+                TargetScope: new ProductScope(ProductScopeKind.HarnessProfile, harnessSetupProfileId),
+                Decision: "denied",
+                DenialReason: ProductAuthorizationDenialReason.ScopeMismatch,
+                CorrelationId: correlationId,
+                EvidenceMetadata: CreateRejectionEvidence(reasonCode, harnessSetupProfileId)));
+    }
+
+    private static IReadOnlyDictionary<string, string> CreateRejectionEvidence(
+        string reasonCode,
+        string harnessSetupProfileId)
+    {
+        return new Dictionary<string, string>
+        {
+            ["evidence_kind"] = "ingestion_decision",
+            ["operation"] = "ingestion_rejection",
+            ["result"] = reasonCode,
+            ["request_route"] = "/v1/logs",
+            ["scope_kind"] = ProductScopeKind.HarnessProfile.ToString(),
+            ["scope_id"] = harnessSetupProfileId
+        };
     }
 
     private static async Task AssertProblemCodeAsync(HttpResponseMessage response, string expectedCode)

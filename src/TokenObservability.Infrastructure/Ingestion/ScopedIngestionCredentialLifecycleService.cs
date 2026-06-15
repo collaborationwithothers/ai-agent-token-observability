@@ -207,7 +207,8 @@ public sealed class ScopedIngestionCredentialLifecycleService(
         {
             await RecordFailedAccessAsync(credential, "ambiguous_credential", request.CorrelationId);
             return ScopedIngestionCredentialValidationResult.Denied(
-                ScopedIngestionCredentialValidationFailureReason.Ambiguous);
+                ScopedIngestionCredentialValidationFailureReason.Ambiguous,
+                credential);
         }
 
         var customerOrganization = await tenantMetadataStore.FindCustomerOrganizationAsync(credential.CustomerOrganizationId);
@@ -216,7 +217,8 @@ public sealed class ScopedIngestionCredentialLifecycleService(
         {
             await RecordFailedAccessAsync(credential, "invalid_tenant", request.CorrelationId);
             return ScopedIngestionCredentialValidationResult.Denied(
-                ScopedIngestionCredentialValidationFailureReason.InvalidTenant);
+                ScopedIngestionCredentialValidationFailureReason.InvalidTenant,
+                credential);
         }
 
         if (credential.Status != ScopedIngestionCredentialStatus.Active)
@@ -229,35 +231,39 @@ public sealed class ScopedIngestionCredentialLifecycleService(
                 _ => ScopedIngestionCredentialValidationFailureReason.Inactive
             };
             await RecordFailedAccessAsync(credential, ToReasonCode(failureReason), request.CorrelationId);
-            return ScopedIngestionCredentialValidationResult.Denied(failureReason);
+            return ScopedIngestionCredentialValidationResult.Denied(failureReason, credential);
         }
 
         if (credential.ExpiresAtUtc <= clock.UtcNow.ToUniversalTime())
         {
             await RecordFailedAccessAsync(credential, "expired", request.CorrelationId);
             return ScopedIngestionCredentialValidationResult.Denied(
-                ScopedIngestionCredentialValidationFailureReason.Expired);
+                ScopedIngestionCredentialValidationFailureReason.Expired,
+                credential);
         }
 
         if (declaredHarness is null || harnessSetupProfileId is null)
         {
             await RecordFailedAccessAsync(credential, "malformed_harness_context", request.CorrelationId);
             return ScopedIngestionCredentialValidationResult.Denied(
-                ScopedIngestionCredentialValidationFailureReason.MalformedHarnessContext);
+                ScopedIngestionCredentialValidationFailureReason.MalformedHarnessContext,
+                credential);
         }
 
         if (!StringComparer.Ordinal.Equals(ToWireHarness(credential.AllowedHarness), declaredHarness))
         {
             await RecordFailedAccessAsync(credential, "wrong_harness", request.CorrelationId);
             return ScopedIngestionCredentialValidationResult.Denied(
-                ScopedIngestionCredentialValidationFailureReason.WrongHarness);
+                ScopedIngestionCredentialValidationFailureReason.WrongHarness,
+                credential);
         }
 
         if (!StringComparer.Ordinal.Equals(credential.HarnessSetupProfileId, harnessSetupProfileId))
         {
             await RecordFailedAccessAsync(credential, "wrong_harness_profile", request.CorrelationId);
             return ScopedIngestionCredentialValidationResult.Denied(
-                ScopedIngestionCredentialValidationFailureReason.WrongHarnessProfile);
+                ScopedIngestionCredentialValidationFailureReason.WrongHarnessProfile,
+                credential);
         }
 
         return ScopedIngestionCredentialValidationResult.Allowed(credential);
@@ -437,13 +443,14 @@ public sealed record ScopedIngestionCredentialValidationResult(
     }
 
     public static ScopedIngestionCredentialValidationResult Denied(
-        ScopedIngestionCredentialValidationFailureReason failureReason)
+        ScopedIngestionCredentialValidationFailureReason failureReason,
+        ScopedIngestionCredential? credential = null)
     {
         return new ScopedIngestionCredentialValidationResult(
             IsValid: false,
             failureReason,
-            Credential: null,
-            ProductUserId: null);
+            credential,
+            credential?.ProductUserId);
     }
 }
 

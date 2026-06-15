@@ -43,7 +43,7 @@ It does not define the OTLP ingestion contract. Codex telemetry ingestion is def
 | Recommendations | `/api/v1/recommendations` | Recommendation detail and regeneration |
 | Pricing | `/api/v1/pricing` | Harness Pricing Basis and pricing review |
 | Budgets | `/api/v1/budgets` | Non-Punitive Budget Alert policies |
-| Audit | `/api/v1/audit-events` | Governance Audit Event queries |
+| Audit | `/api/v1/audit-events`, `/api/v1/ingestion-rejections` | Governance Audit Event and ingestion rejection queries |
 
 ## Request Context
 
@@ -495,6 +495,22 @@ Supported filters:
 Required action: `audit.read`.
 
 Each returned item includes tenant, actor, action, target resource, decision, timestamp, correlation ID, and non-sensitive evidence metadata. The API must not return raw prompt text, code content, command output, tool results, secrets, tokens, or connection strings in audit evidence metadata.
+
+### `GET /api/v1/ingestion-rejections`
+
+Queries tenant-scoped ingestion rejection records.
+
+Supported filters:
+
+- `from`
+- `to`
+- `reasonCode`
+- `signalType`
+- `correlationId`
+
+Required action: `audit.read`.
+
+Each returned item includes tenant, harness setup profile, scoped credential identifier when derivable, declared harness, signal type, request route, reason code, HTTP status, timestamp, correlation ID, audit event ID when present, and non-sensitive evidence metadata. The API must not return raw prompt text, code content, command output, tool results, secrets, tokens, connection strings, or raw OTLP payload bodies.
 
 ## Pagination
 
