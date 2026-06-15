@@ -90,6 +90,22 @@ The reviewer must write findings to `Comments.md` only. `Comments.md` is transie
 
 If the reviewer reports `CHANGES_REQUESTED`, either fix the findings and rerun validation, or explicitly document why a finding is not accepted before proceeding.
 
+### Review Efficiency
+
+Before running Code Reviewer:
+
+- Confirm the target worktree and branch with `git worktree list --porcelain` and `git status --short --branch`.
+- Review `git diff --stat HEAD` and include untracked implementation files in the review prompt.
+- Build an issue acceptance matrix covering each acceptance criterion, the implementation file, test evidence, and docs or schema evidence.
+- Run focused validation for the changed surface before the first reviewer pass.
+
+When Code Reviewer reports `CHANGES_REQUESTED`:
+
+- Track each finding as accepted, rejected with reason, fixed files, added tests, and validation command.
+- Rerun validation before requesting re-review.
+- In the re-review prompt, include the prior findings ledger and ask the reviewer to verify the fixes plus regressions in touched files.
+- Use a full-diff re-review only after all prior findings are closed or when the fix changes architecture, security, privacy, or tenant-boundary behavior.
+
 ## Implementation Rules
 
 Preserve metadata-only capture by default. Content Capture Mode is disabled by default and must follow Content Capture Policy, pre-storage redaction, and the Redaction Failure Gate before any Captured Content Blob is stored. Do not persist prompt text, code content, command output, or tool results unless Content Capture Mode is explicitly enabled and redaction succeeds. Do not silently scrape Git config, OS users, shell environment, or unrelated local files for identity or path data.
