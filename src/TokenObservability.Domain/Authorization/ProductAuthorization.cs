@@ -47,6 +47,7 @@ public enum ProductAuthorizationAction
     IdentityManage,
     HarnessProfileManage,
     IngestionCredentialManage,
+    TelemetryIngest,
     SessionReadOwn,
     SessionReadScoped,
     SessionInvestigate,

@@ -303,7 +303,53 @@ public sealed class ScopedIngestionCredentialMetadataTests
         Assert.Contains(auditEvents, auditEvent =>
             auditEvent.CorrelationId == "credential-failed-access-001" &&
             auditEvent.Decision == "denied" &&
-            auditEvent.Action == ProductAuthorizationAction.IngestionCredentialManage);
+            auditEvent.Action == ProductAuthorizationAction.TelemetryIngest);
+    }
+
+    [Fact]
+    public async Task ActiveScopedIngestionCredentialHashMustBeGloballyUnique()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var contoso = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var fabrikam = await CreateTenantAsync(store, "fabrikam", "fabrikam-tenant");
+        var contosoAdmin = await CreateProductUserAsync(store, contoso, "contoso-admin");
+        var contosoDeveloper = await CreateProductUserAsync(store, contoso, "contoso-developer");
+        var fabrikamAdmin = await CreateProductUserAsync(store, fabrikam, "fabrikam-admin");
+        var fabrikamDeveloper = await CreateProductUserAsync(store, fabrikam, "fabrikam-developer");
+        var duplicateHash = "sha256:globally-duplicate-credential";
+
+        await store.CreateScopedIngestionCredentialAsync(
+            contoso.Organization.CustomerOrganizationId,
+            new CreateScopedIngestionCredentialRequest(
+                HarnessSetupProfileId: "profile-contoso-codex",
+                ProductUserId: contosoDeveloper.ProductUserId,
+                CredentialHash: duplicateHash,
+                CredentialPrefix: "aito_live_global_one",
+                AllowedHarness: CodingAgentHarness.CodexCli,
+                AllowedScopes: [new ProductScope(ProductScopeKind.Organization, ScopeId: null)],
+                ExpiresAtUtc: Now.AddDays(30),
+                CreatedByProductUserId: contosoAdmin.ProductUserId,
+                ActorEffectiveRole: ProductRole.PlatformAdmin,
+                CorrelationId: "credential-global-hash-001",
+                AuditEventId: "audit-credential-global-hash-001"));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            store.CreateScopedIngestionCredentialAsync(
+                fabrikam.Organization.CustomerOrganizationId,
+                new CreateScopedIngestionCredentialRequest(
+                    HarnessSetupProfileId: "profile-fabrikam-codex",
+                    ProductUserId: fabrikamDeveloper.ProductUserId,
+                    CredentialHash: duplicateHash,
+                    CredentialPrefix: "aito_live_global_two",
+                    AllowedHarness: CodingAgentHarness.CodexCli,
+                    AllowedScopes: [new ProductScope(ProductScopeKind.Organization, ScopeId: null)],
+                    ExpiresAtUtc: Now.AddDays(30),
+                    CreatedByProductUserId: fabrikamAdmin.ProductUserId,
+                    ActorEffectiveRole: ProductRole.PlatformAdmin,
+                    CorrelationId: "credential-global-hash-002",
+                    AuditEventId: "audit-credential-global-hash-002")));
+
+        Assert.Equal("Active scoped ingestion credential hash already exists.", exception.Message);
     }
 
     [Fact]
@@ -334,6 +380,8 @@ public sealed class ScopedIngestionCredentialMetadataTests
         Assert.Contains("ck_scoped_ingestion_credential_status CHECK (status IN ('active', 'disabled', 'revoked', 'expired', 'pending_rotation'))", migration);
         Assert.Contains("ck_scoped_ingestion_credential_allowed_harness CHECK (allowed_harness IN ('codex_cli'))", migration);
         Assert.Contains("ix_scoped_ingestion_credential_customer_status", migration);
+        Assert.Contains("CREATE UNIQUE INDEX IF NOT EXISTS ux_scoped_ingestion_credential_active_hash", migration);
+        Assert.Contains("ON scoped_ingestion_credential (credential_hash)", migration);
         Assert.DoesNotContain("credential_secret", migration, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("secret_value", migration, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("plain", migration, StringComparison.OrdinalIgnoreCase);
