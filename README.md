@@ -35,6 +35,7 @@ Read these before creating implementation issues or changing behavior:
 - [Production Target State Spec](./docs/specs/production-target-state.md)
 - [Azure Production Architecture](./docs/architecture/azure-production-architecture.md)
 - [Codex Production Ingestion Contract](./docs/architecture/codex-production-ingestion-contract.md)
+- [Codex Manual Telemetry Setup](./docs/operations/codex-manual-telemetry-setup.md)
 - [Production Codebase Transition](./docs/architecture/production-codebase-transition.md)
 - [Implementation Readiness Review](./docs/architecture/implementation-readiness-review.md)
 - [Production Implementation Roadmap](./docs/planning/production-implementation-roadmap.md)
