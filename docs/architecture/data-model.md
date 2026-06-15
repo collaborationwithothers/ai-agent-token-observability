@@ -583,8 +583,10 @@ Represents a Governance Audit Event.
 | `decision` | Yes | `allowed`, `denied`, `created`, `updated`, `deleted`, `generated`, `rejected` |
 | `effective_role` | No | Role used |
 | `correlation_id` | Yes | Request or job correlation |
-| `metadata_json` | No | Non-sensitive audit metadata |
+| `evidence_metadata_json` | Yes | Non-sensitive evidence metadata for the decision |
 | `created_at_utc` | Yes | Audit timestamp |
+
+Audit evidence metadata must not store raw prompt text, code content, command output, tool results, secrets, tokens, or connection strings.
 
 ### `data_lifecycle_request`
 

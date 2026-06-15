@@ -1,5 +1,7 @@
 using Microsoft.Extensions.Options;
 using TokenObservability.Domain.Authorization;
+using TokenObservability.Domain.Tenancy;
+using TokenObservability.Infrastructure.Persistence;
 
 namespace TokenObservability.Api;
 
@@ -29,6 +31,7 @@ internal static class TokenObservabilityApiEndpointExtensions
         api.MapGet("/system/health", GetHealth);
         api.MapGet("/system/readiness", GetProtectedReadiness);
         api.MapGet("/me", GetCurrentUser);
+        api.MapGet("/audit-events", GetAuditEvents);
     }
 
     private static IResult GetHealth()
@@ -126,6 +129,47 @@ internal static class TokenObservabilityApiEndpointExtensions
         });
     }
 
+    private static async Task<IResult> GetAuditEvents(
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        InMemoryTenantMetadataStore tenantMetadataStore)
+    {
+        var resolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            ProductAuthorizationAction.AuditRead,
+            new ProductScope(ProductScopeKind.Organization, ScopeId: null));
+
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
+        }
+
+        var events = await tenantMetadataStore.ListGovernanceAuditEventsAsync(
+            resolution.Context.CustomerOrganization.CustomerOrganizationId);
+        var filteredEvents = ApplyAuditEventFilters(httpContext, events).ToArray();
+
+        return Results.Ok(new
+        {
+            items = filteredEvents.Select(static auditEvent => new
+            {
+                auditEventId = auditEvent.AuditEventId,
+                customerOrganizationId = auditEvent.CustomerOrganizationId.ToString(),
+                actorProductUserId = auditEvent.ActorProductUserId?.ToString(),
+                effectiveRole = auditEvent.EffectiveRole?.ToString(),
+                action = ToContractAction(auditEvent.Action),
+                targetResourceKind = auditEvent.TargetResourceKind,
+                targetResourceId = auditEvent.TargetResourceId,
+                decision = auditEvent.Decision,
+                denialReason = auditEvent.DenialReason?.ToString(),
+                correlationId = auditEvent.CorrelationId,
+                evidenceMetadata = auditEvent.EvidenceMetadata,
+                createdAtUtc = auditEvent.CreatedAtUtc
+            }),
+            nextCursor = (string?)null,
+            totalEstimate = filteredEvents.Length
+        });
+    }
+
     private static IResult CreateProblem(HttpContext httpContext, string title, int statusCode, string code)
     {
         return Results.Problem(
@@ -147,6 +191,68 @@ internal static class TokenObservabilityApiEndpointExtensions
             false => "not_ready",
             null => "not_configured"
         });
+    }
+
+    private static IEnumerable<GovernanceAuditEvent> ApplyAuditEventFilters(
+        HttpContext httpContext,
+        IEnumerable<GovernanceAuditEvent> auditEvents)
+    {
+        var filteredEvents = auditEvents;
+
+        if (TryReadQuery(httpContext, "correlationId", out var correlationId))
+        {
+            filteredEvents = filteredEvents.Where(auditEvent =>
+                StringComparer.Ordinal.Equals(auditEvent.CorrelationId, correlationId));
+        }
+
+        if (TryReadQuery(httpContext, "actorUserId", out var actorUserId))
+        {
+            filteredEvents = filteredEvents.Where(auditEvent =>
+                StringComparer.Ordinal.Equals(auditEvent.ActorProductUserId?.ToString(), actorUserId));
+        }
+
+        if (TryReadQuery(httpContext, "scopeType", out var scopeType))
+        {
+            filteredEvents = filteredEvents.Where(auditEvent =>
+                StringComparer.Ordinal.Equals(auditEvent.TargetResourceKind, scopeType));
+        }
+
+        if (TryReadQuery(httpContext, "scopeId", out var scopeId))
+        {
+            filteredEvents = filteredEvents.Where(auditEvent =>
+                StringComparer.Ordinal.Equals(auditEvent.TargetResourceId, scopeId));
+        }
+
+        if (TryReadQuery(httpContext, "eventType", out var eventType))
+        {
+            filteredEvents = filteredEvents.Where(auditEvent =>
+                StringComparer.Ordinal.Equals(ToContractAction(auditEvent.Action), eventType));
+        }
+
+        if (TryReadQuery(httpContext, "from", out var from) &&
+            DateTimeOffset.TryParse(from, out var fromUtc))
+        {
+            filteredEvents = filteredEvents.Where(auditEvent => auditEvent.CreatedAtUtc >= fromUtc.ToUniversalTime());
+        }
+
+        if (TryReadQuery(httpContext, "to", out var to) &&
+            DateTimeOffset.TryParse(to, out var toUtc))
+        {
+            filteredEvents = filteredEvents.Where(auditEvent => auditEvent.CreatedAtUtc <= toUtc.ToUniversalTime());
+        }
+
+        return filteredEvents;
+    }
+
+    private static bool TryReadQuery(HttpContext httpContext, string key, out string value)
+    {
+        value = httpContext.Request.Query[key].ToString().Trim();
+        return !string.IsNullOrWhiteSpace(value);
+    }
+
+    private static string ToContractAction(ProductAuthorizationAction action)
+    {
+        return action.ToString();
     }
 
     private sealed record ReadinessDependency(string Name, string Status);

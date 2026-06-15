@@ -77,7 +77,8 @@ internal sealed class TokenObservabilityAuthorizationContextResolver(
             identityTenant.IdentityTenantId,
             claims,
             action,
-            requestedScope);
+            requestedScope,
+            GetCorrelationId(httpContext));
 
         if (!decision.IsAllowed || decision.ProductUser is null)
         {
