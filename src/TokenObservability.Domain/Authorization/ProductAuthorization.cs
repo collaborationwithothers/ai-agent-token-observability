@@ -40,6 +40,7 @@ public enum ProductRoleMappingStatus
 
 public enum ProductAuthorizationAction
 {
+    CurrentUserRead,
     TenantRead,
     TenantUpdate,
     OverviewRead,

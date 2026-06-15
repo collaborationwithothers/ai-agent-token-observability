@@ -54,7 +54,8 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         lock (gate)
         {
             return Task.FromResult(
-                organizationSlugIndex.TryGetValue(normalizedSlug, out var organizationId)
+                organizationSlugIndex.TryGetValue(normalizedSlug, out var organizationId) &&
+                    customerOrganizations[organizationId].Status == CustomerOrganizationStatus.Active
                     ? customerOrganizations[organizationId]
                     : null);
         }
@@ -170,6 +171,73 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
                 productUserExternalSubjectIndex.TryGetValue(lookupKey, out var productUserId)
                     ? productUsers[productUserId]
                     : null);
+        }
+    }
+
+    public Task<IdentityTenant?> FindIdentityTenantForClaimsAsync(
+        CustomerOrganizationId customerOrganizationId,
+        AuthenticatedTokenClaims claims)
+    {
+        ArgumentNullException.ThrowIfNull(claims);
+
+        var issuer = NormalizeRequiredText(claims.Issuer, nameof(claims.Issuer));
+        var externalTenantId = NormalizeRequiredText(claims.ExternalTenantId, nameof(claims.ExternalTenantId));
+        var audience = NormalizeRequiredText(claims.Audience, nameof(claims.Audience));
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(customerOrganizationId);
+
+            return Task.FromResult(identityTenants.Values.SingleOrDefault(identityTenant =>
+                identityTenant.CustomerOrganizationId == customerOrganizationId &&
+                identityTenant.Status == IdentityTenantStatus.Active &&
+                StringComparer.Ordinal.Equals(identityTenant.Issuer, issuer) &&
+                StringComparer.Ordinal.Equals(identityTenant.ExternalTenantId, externalTenantId) &&
+                identityTenant.AllowedAudiences.Contains(audience, StringComparer.Ordinal)));
+        }
+    }
+
+    internal Task<CustomerOrganization> SetCustomerOrganizationStatusAsync(
+        CustomerOrganizationId customerOrganizationId,
+        CustomerOrganizationStatus status)
+    {
+        lock (gate)
+        {
+            if (!customerOrganizations.TryGetValue(customerOrganizationId, out var organization))
+            {
+                throw new InvalidOperationException("Customer organization does not exist.");
+            }
+
+            var updatedOrganization = organization with
+            {
+                Status = status,
+                UpdatedAtUtc = clock.UtcNow.ToUniversalTime()
+            };
+
+            customerOrganizations[customerOrganizationId] = updatedOrganization;
+
+            return Task.FromResult(updatedOrganization);
+        }
+    }
+
+    internal Task<ProductUser> SetProductUserStatusAsync(ProductUserId productUserId, ProductUserStatus status)
+    {
+        lock (gate)
+        {
+            if (!productUsers.TryGetValue(productUserId, out var productUser))
+            {
+                throw new InvalidOperationException("Product user does not exist.");
+            }
+
+            var updatedProductUser = productUser with
+            {
+                Status = status,
+                UpdatedAtUtc = clock.UtcNow.ToUniversalTime()
+            };
+
+            productUsers[productUserId] = updatedProductUser;
+
+            return Task.FromResult(updatedProductUser);
         }
     }
 
@@ -440,7 +508,29 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
                     MatchedMappings: []));
             }
 
-            var productUser = ResolveProductUserFromAuthenticatedClaimsUnderLock(customerOrganizationId, identityTenantId, claims);
+            ProductUser productUser;
+            try
+            {
+                productUser = ResolveProductUserFromAuthenticatedClaimsUnderLock(customerOrganizationId, identityTenantId, claims);
+            }
+            catch (InvalidOperationException)
+            {
+                RecordAuthorizationAuditEventUnderLock(
+                    customerOrganizationId,
+                    actorProductUserId: null,
+                    effectiveRole: null,
+                    action,
+                    requestedScope,
+                    ProductAuthorizationDenialReason.InvalidTenant);
+
+                return Task.FromResult(new ProductAuthorizationDecision(
+                    IsAllowed: false,
+                    ProductAuthorizationDenialReason.InvalidTenant,
+                    ProductUser: null,
+                    EffectiveRoles: [],
+                    MatchedMappings: []));
+            }
+
             var now = clock.UtcNow.ToUniversalTime();
             var matchedMappings = productRoleMappings.Values
                 .Where(mapping =>
@@ -520,6 +610,31 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
                 productUser,
                 mappings.Select(mapping => mapping.ProductRole).Distinct().ToArray(),
                 mappings.ToArray());
+        }
+    }
+
+    public Task RecordAuthorizationDenialAsync(
+        CustomerOrganizationId customerOrganizationId,
+        ProductAuthorizationAction action,
+        ProductScope requestedScope,
+        ProductAuthorizationDenialReason denialReason,
+        string correlationId)
+    {
+        ArgumentNullException.ThrowIfNull(requestedScope);
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(customerOrganizationId);
+            RecordAuthorizationAuditEventUnderLock(
+                customerOrganizationId,
+                actorProductUserId: null,
+                effectiveRole: null,
+                action,
+                requestedScope,
+                denialReason,
+                correlationId);
+
+            return Task.CompletedTask;
         }
     }
 
@@ -637,9 +752,10 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
     private void RequireCustomerOrganization(CustomerOrganizationId customerOrganizationId)
     {
         if (customerOrganizationId == CustomerOrganizationId.Empty ||
-            !customerOrganizations.ContainsKey(customerOrganizationId))
+            !customerOrganizations.TryGetValue(customerOrganizationId, out var organization) ||
+            organization.Status != CustomerOrganizationStatus.Active)
         {
-            throw new InvalidOperationException("Customer organization does not exist.");
+            throw new InvalidOperationException("Customer organization is not active.");
         }
     }
 
@@ -692,6 +808,11 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         if (productUserExternalSubjectIndex.TryGetValue(lookupKey, out var existingProductUserId))
         {
             var existingUser = productUsers[existingProductUserId];
+            if (existingUser.Status != ProductUserStatus.Active)
+            {
+                throw new InvalidOperationException("Product user is not active.");
+            }
+
             var updatedUser = existingUser with
             {
                 DisplayLabel = displayLabel,
@@ -807,6 +928,7 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
     {
         return role switch
         {
+            _ when action == ProductAuthorizationAction.CurrentUserRead => true,
             ProductRole.PlatformAdmin => action is
                 ProductAuthorizationAction.TenantRead or
                 ProductAuthorizationAction.TenantUpdate or
