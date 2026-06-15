@@ -64,6 +64,10 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
     private readonly Dictionary<GovernanceAuditEventKey, GovernanceAuditEvent> governanceAuditEvents = [];
     private readonly Dictionary<ScopedIngestionCredentialId, ScopedIngestionCredential> scopedIngestionCredentials = [];
     private readonly Dictionary<IngestionRejectionId, IngestionRejectionRecord> ingestionRejections = [];
+    private readonly Dictionary<string, TelemetryEnvelopeRecord> telemetryEnvelopes = [];
+    private readonly Dictionary<string, string> telemetryEnvelopeDedupeIndex = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, AgentSessionRecord> agentSessions = [];
+    private readonly Dictionary<AgentSessionLookupKey, string> agentSessionLookupIndex = [];
     private readonly object gate = new();
 
     public Task<CustomerOrganization> CreateCustomerOrganizationAsync(CreateCustomerOrganizationRequest request)
@@ -629,6 +633,142 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
                     .Where(rejection => rejection.CustomerOrganizationId == customerOrganizationId)
                     .OrderBy(rejection => rejection.ReceivedAtUtc)
                     .ThenBy(rejection => rejection.IngestionRejectionId.ToString(), StringComparer.Ordinal)
+                    .ToArray());
+        }
+    }
+
+    public Task<TelemetryEnvelopeRecord> RecordTelemetryEnvelopeAsync(
+        CreateTelemetryEnvelopeRecordRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var harnessSetupProfileId = NormalizeHarnessSetupProfileId(request.HarnessSetupProfileId, nameof(request.HarnessSetupProfileId));
+        var harness = NormalizeWireHarness(request.Harness, nameof(request.Harness));
+        var schemaVersion = NormalizeDateVersion(request.SchemaVersion, nameof(request.SchemaVersion));
+        var signalType = NormalizeSignalType(request.SignalType, nameof(request.SignalType));
+        var sourceEventName = NormalizeSourceEventName(request.SourceEventName, nameof(request.SourceEventName));
+        var sourceEventId = NormalizeOptionalMachineToken(request.SourceEventId, nameof(request.SourceEventId));
+        var modelName = NormalizeOptionalModelName(request.ModelName, nameof(request.ModelName));
+        var harnessVersion = NormalizeOptionalSafeLabel(request.HarnessVersion, nameof(request.HarnessVersion));
+        var sandboxSetting = NormalizeOptionalSafeLabel(request.SandboxSetting, nameof(request.SandboxSetting));
+        var approvalSetting = NormalizeOptionalSafeLabel(request.ApprovalSetting, nameof(request.ApprovalSetting));
+        var repositoryEvidenceState = NormalizeEvidenceState(request.RepositoryEvidenceState, nameof(request.RepositoryEvidenceState));
+        var contentPolicyDecision = NormalizeContentDecision(request.ContentPolicyDecision, nameof(request.ContentPolicyDecision));
+        var contentCaptureState = NormalizeContentCaptureState(request.ContentCaptureState, nameof(request.ContentCaptureState));
+        var redactionState = NormalizeRedactionState(request.RedactionState, nameof(request.RedactionState));
+        var routingDecision = NormalizeRoutingDecision(request.RoutingDecision);
+        var evidenceState = NormalizeEvidenceState(request.EvidenceState, nameof(request.EvidenceState));
+        var metricState = NormalizeMetricState(request.MetricState, nameof(request.MetricState));
+        var sourceEvidenceKind = NormalizeSourceEvidenceKind(request.SourceEvidenceKind, nameof(request.SourceEvidenceKind));
+        var correlationId = NormalizeRequiredText(request.CorrelationId, nameof(request.CorrelationId));
+        var dedupeKeyHash = NormalizeHash(request.DedupeKeyHash, nameof(request.DedupeKeyHash));
+        var ingestionVersionMetadata = NormalizeIngestionVersionMetadata(request.IngestionVersionMetadata);
+        var conversationIdHash = NormalizeOptionalHash(request.ConversationIdHash, nameof(request.ConversationIdHash));
+        var turnIdHash = NormalizeOptionalHash(request.TurnIdHash, nameof(request.TurnIdHash));
+        var traceIdHash = NormalizeOptionalHash(request.TraceIdHash, nameof(request.TraceIdHash));
+        var spanIdHash = NormalizeOptionalHash(request.SpanIdHash, nameof(request.SpanIdHash));
+        var now = clock.UtcNow.ToUniversalTime();
+
+        if (request.CustomerOrganizationId == CustomerOrganizationId.Empty)
+        {
+            throw new ArgumentException("Customer organization identifier must not be empty.", nameof(request));
+        }
+
+        if (request.ScopedIngestionCredentialId == ScopedIngestionCredentialId.Empty)
+        {
+            throw new ArgumentException("Scoped ingestion credential identifier must not be empty.", nameof(request));
+        }
+
+        if (request.ProductUserId == ProductUserId.Empty)
+        {
+            throw new ArgumentException("Product user identifier must not be empty.", nameof(request));
+        }
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+            RequireProductUserForCustomerOrganization(request.CustomerOrganizationId, request.ProductUserId);
+
+            var credential = RequireScopedIngestionCredentialForCustomerOrganization(
+                request.CustomerOrganizationId,
+                request.ScopedIngestionCredentialId);
+
+            if (!StringComparer.Ordinal.Equals(credential.HarnessSetupProfileId, harnessSetupProfileId) ||
+                credential.ProductUserId != request.ProductUserId)
+            {
+                throw new InvalidOperationException("Accepted telemetry must match credential-derived setup profile and user.");
+            }
+
+            if (telemetryEnvelopeDedupeIndex.TryGetValue(dedupeKeyHash, out var existingEnvelopeId))
+            {
+                return Task.FromResult(telemetryEnvelopes[existingEnvelopeId]);
+            }
+
+            var telemetryEnvelopeId = $"telemetry-envelope-{Guid.NewGuid():N}";
+            var envelope = new TelemetryEnvelopeRecord(
+                telemetryEnvelopeId,
+                request.CustomerOrganizationId,
+                harnessSetupProfileId,
+                request.ScopedIngestionCredentialId,
+                request.ProductUserId,
+                harness,
+                schemaVersion,
+                signalType,
+                sourceEventName,
+                request.SourceEventTimestampUtc?.ToUniversalTime(),
+                now,
+                conversationIdHash,
+                turnIdHash,
+                sourceEventId,
+                traceIdHash,
+                spanIdHash,
+                modelName,
+                harnessVersion,
+                sandboxSetting,
+                approvalSetting,
+                contentPolicyDecision,
+                contentCaptureState,
+                redactionState,
+                routingDecision,
+                evidenceState,
+                metricState,
+                sourceEvidenceKind,
+                correlationId,
+                dedupeKeyHash,
+                ingestionVersionMetadata);
+
+            telemetryEnvelopes.Add(telemetryEnvelopeId, envelope);
+            telemetryEnvelopeDedupeIndex.Add(dedupeKeyHash, telemetryEnvelopeId);
+            UpsertAgentSessionUnderLock(envelope, repositoryEvidenceState);
+
+            return Task.FromResult(envelope);
+        }
+    }
+
+    public Task<IReadOnlyList<TelemetryEnvelopeRecord>> ListTelemetryEnvelopesAsync(
+        CustomerOrganizationId customerOrganizationId)
+    {
+        lock (gate)
+        {
+            return Task.FromResult<IReadOnlyList<TelemetryEnvelopeRecord>>(
+                telemetryEnvelopes.Values
+                    .Where(envelope => envelope.CustomerOrganizationId == customerOrganizationId)
+                    .OrderBy(envelope => envelope.ReceivedAtUtc)
+                    .ThenBy(envelope => envelope.TelemetryEnvelopeId, StringComparer.Ordinal)
+                    .ToArray());
+        }
+    }
+
+    public Task<IReadOnlyList<AgentSessionRecord>> ListAgentSessionsAsync(
+        CustomerOrganizationId customerOrganizationId)
+    {
+        lock (gate)
+        {
+            return Task.FromResult<IReadOnlyList<AgentSessionRecord>>(
+                agentSessions.Values
+                    .Where(session => session.CustomerOrganizationId == customerOrganizationId)
+                    .OrderBy(session => session.StartedAtUtc ?? session.CreatedAtUtc)
+                    .ThenBy(session => session.AgentSessionId, StringComparer.Ordinal)
                     .ToArray());
         }
     }
@@ -1293,6 +1433,288 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         return value.Trim();
     }
 
+    private void UpsertAgentSessionUnderLock(
+        TelemetryEnvelopeRecord envelope,
+        string repositoryEvidenceState)
+    {
+        var lookupKey = new AgentSessionLookupKey(
+            envelope.CustomerOrganizationId,
+            envelope.HarnessSetupProfileId,
+            envelope.ProductUserId,
+            GetProviderSessionKey(envelope));
+
+        if (!agentSessionLookupIndex.TryGetValue(lookupKey, out var existingSessionId))
+        {
+            var sessionId = $"agent-session-{Guid.NewGuid():N}";
+            var eventTime = envelope.SourceEventTimestampUtc ?? envelope.ReceivedAtUtc;
+            var session = new AgentSessionRecord(
+                sessionId,
+                envelope.CustomerOrganizationId,
+                envelope.ProductUserId,
+                envelope.HarnessSetupProfileId,
+                envelope.Harness,
+                envelope.ConversationIdHash,
+                eventTime,
+                eventTime,
+                "active",
+                Environment: null,
+                envelope.SandboxSetting,
+                envelope.ApprovalSetting,
+                repositoryEvidenceState,
+                envelope.ContentCaptureState,
+                "not_started",
+                envelope.ModelName is null ? [] : [envelope.ModelName],
+                [envelope.TelemetryEnvelopeId],
+                envelope.ReceivedAtUtc,
+                envelope.ReceivedAtUtc);
+
+            agentSessions.Add(sessionId, session);
+            agentSessionLookupIndex.Add(lookupKey, sessionId);
+            return;
+        }
+
+        var existing = agentSessions[existingSessionId];
+        var eventTimestamp = envelope.SourceEventTimestampUtc ?? envelope.ReceivedAtUtc;
+        var startedAtUtc = existing.StartedAtUtc is null || eventTimestamp < existing.StartedAtUtc
+            ? eventTimestamp
+            : existing.StartedAtUtc;
+        var endedAtUtc = existing.EndedAtUtc is null || eventTimestamp > existing.EndedAtUtc
+            ? eventTimestamp
+            : existing.EndedAtUtc;
+        var modelNames = envelope.ModelName is null || existing.ModelNames.Contains(envelope.ModelName, StringComparer.Ordinal)
+            ? existing.ModelNames
+            : existing.ModelNames.Concat([envelope.ModelName]).ToArray();
+        var sourceTelemetryEnvelopeIds = existing.SourceTelemetryEnvelopeIds.Contains(envelope.TelemetryEnvelopeId, StringComparer.Ordinal)
+            ? existing.SourceTelemetryEnvelopeIds
+            : existing.SourceTelemetryEnvelopeIds.Concat([envelope.TelemetryEnvelopeId]).ToArray();
+
+        agentSessions[existingSessionId] = existing with
+        {
+            StartedAtUtc = startedAtUtc,
+            EndedAtUtc = endedAtUtc,
+            SandboxSetting = envelope.SandboxSetting ?? existing.SandboxSetting,
+            ApprovalSetting = envelope.ApprovalSetting ?? existing.ApprovalSetting,
+            RepositoryEvidenceState = MergeEvidenceState(existing.RepositoryEvidenceState, repositoryEvidenceState),
+            ContentCaptureSummary = MergeContentCaptureSummary(existing.ContentCaptureSummary, envelope.ContentCaptureState),
+            ModelNames = modelNames,
+            SourceTelemetryEnvelopeIds = sourceTelemetryEnvelopeIds,
+            UpdatedAtUtc = envelope.ReceivedAtUtc
+        };
+    }
+
+    private static string GetProviderSessionKey(TelemetryEnvelopeRecord envelope)
+    {
+        return envelope.ConversationIdHash ?? "partial-session";
+    }
+
+    private static string MergeEvidenceState(string existing, string incoming)
+    {
+        return StringComparer.Ordinal.Equals(existing, incoming) ? existing : "mixed";
+    }
+
+    private static string MergeContentCaptureSummary(string existing, string incoming)
+    {
+        return StringComparer.Ordinal.Equals(existing, incoming) ? existing : "mixed";
+    }
+
+    private static string NormalizeWireHarness(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+        return normalized is "codex-cli"
+            ? normalized
+            : throw new ArgumentException("Harness is not supported.", parameterName);
+    }
+
+    private static string NormalizeSignalType(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+        return normalized is "log" or "trace" or "metric"
+            ? normalized
+            : throw new ArgumentException("Telemetry signal type is not supported.", parameterName);
+    }
+
+    private static string NormalizeDateVersion(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+        return normalized.Length == 10 &&
+            normalized[4] == '-' &&
+            normalized[7] == '-' &&
+            DateOnly.TryParseExact(normalized, "yyyy-MM-dd", out _)
+            ? normalized
+            : throw new ArgumentException("Schema version must use YYYY-MM-DD format.", parameterName);
+    }
+
+    private static string NormalizeSourceEventName(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+        return normalized.Length <= 128 && IsSafeMachineToken(normalized)
+            ? normalized
+            : throw new ArgumentException("Source event name is not allowed.", parameterName);
+    }
+
+    private static string? NormalizeOptionalMachineToken(string? value, string parameterName)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var normalized = value.Trim();
+        return normalized.Length <= 128 && IsSafeMachineToken(normalized)
+            ? normalized
+            : throw new ArgumentException("Optional machine token is not allowed.", parameterName);
+    }
+
+    private static string? NormalizeOptionalSafeLabel(string? value, string parameterName)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var normalized = value.Trim();
+        return normalized.Length <= 128 &&
+            IsSafeResourceId(normalized) &&
+            !ContainsSensitiveFragment(normalized)
+            ? normalized
+            : throw new ArgumentException("Optional metadata label is not allowed.", parameterName);
+    }
+
+    private static string? NormalizeOptionalModelName(string? value, string parameterName)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var normalized = value.Trim();
+        return normalized.Length <= 128 &&
+            normalized.All(static character =>
+                char.IsAsciiLetterOrDigit(character) ||
+                character is '-' or '_' or '.' or ':' or '/')
+            ? normalized
+            : throw new ArgumentException("Model name is not allowed.", parameterName);
+    }
+
+    private static string NormalizeEvidenceState(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+        return normalized is "observed" or "derived" or "estimated" or "unavailable" or "not_applicable" or "mixed" or "correlated" or "inferred"
+            ? normalized
+            : throw new ArgumentException("Evidence state is not supported.", parameterName);
+    }
+
+    private static string NormalizeMetricState(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+        return normalized is "observed" or "derived" or "estimated" or "unavailable" or "not_applicable" or "mixed"
+            ? normalized
+            : throw new ArgumentException("Metric state is not supported.", parameterName);
+    }
+
+    private static string NormalizeContentDecision(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+        return normalized is "metadata_only" or "capture_candidate" or "blocked" or "redaction_required"
+            ? normalized
+            : throw new ArgumentException("Content policy decision is not supported.", parameterName);
+    }
+
+    private static string NormalizeContentCaptureState(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+        return normalized is "none" or "metadata_only" or "captured" or "review_required" or "redaction_failed" or "mixed"
+            ? normalized
+            : throw new ArgumentException("Content capture state is not supported.", parameterName);
+    }
+
+    private static string NormalizeRedactionState(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+        return normalized is "not_required" or "passed" or "failed" or "review_required"
+            ? normalized
+            : throw new ArgumentException("Redaction state is not supported.", parameterName);
+    }
+
+    private static string NormalizeSourceEvidenceKind(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+        return normalized is "harness_emitted" or "product_derived" or "scanner" or "manual_review"
+            ? normalized
+            : throw new ArgumentException("Source evidence kind is not supported.", parameterName);
+    }
+
+    private static IReadOnlyDictionary<string, string> NormalizeRoutingDecision(
+        IReadOnlyDictionary<string, string> values)
+    {
+        return NormalizeSafeDictionary(
+            values,
+            allowedKeys: ["result", "metadata_store", "diagnostic_store", "metrics_store", "content_capture"]);
+    }
+
+    private static IReadOnlyDictionary<string, string> NormalizeIngestionVersionMetadata(
+        IReadOnlyDictionary<string, string> values)
+    {
+        return NormalizeSafeDictionary(
+            values,
+            allowedKeys: ["schema_version", "harness_version", "contract_version"]);
+    }
+
+    private static IReadOnlyDictionary<string, string> NormalizeSafeDictionary(
+        IReadOnlyDictionary<string, string> values,
+        IReadOnlyCollection<string> allowedKeys)
+    {
+        if (values.Count == 0)
+        {
+            throw new ArgumentException("Accepted telemetry metadata dictionaries must not be empty.", nameof(values));
+        }
+
+        var normalized = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var (key, value) in values)
+        {
+            var normalizedKey = NormalizeRequiredText(key, nameof(values));
+            var normalizedValue = NormalizeRequiredText(value, nameof(values));
+
+            if (!allowedKeys.Contains(normalizedKey) ||
+                normalizedKey.Length > 128 ||
+                normalizedValue.Length > 512 ||
+                ContainsSensitiveFragment(normalizedKey) ||
+                ContainsSensitiveFragment(normalizedValue))
+            {
+                throw new ArgumentException("Accepted telemetry metadata contains unsupported or sensitive values.", nameof(values));
+            }
+
+            normalized.Add(normalizedKey, normalizedValue);
+        }
+
+        return new ReadOnlyDictionary<string, string>(normalized);
+    }
+
+    private static bool ContainsSensitiveFragment(string value)
+    {
+        return SensitiveEvidenceValueFragments.Any(fragment =>
+                value.Contains(fragment, StringComparison.OrdinalIgnoreCase)) ||
+            SensitiveEvidenceKeyFragments.Any(fragment =>
+                value.Contains(fragment, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string NormalizeHash(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+        return normalized.Length == 64 &&
+            normalized.All(static character =>
+                char.IsAsciiHexDigit(character) &&
+                !char.IsUpper(character))
+            ? normalized
+            : throw new ArgumentException("Hash values must be lowercase sha256 hex.", parameterName);
+    }
+
+    private static string? NormalizeOptionalHash(string? value, string parameterName)
+    {
+        return string.IsNullOrWhiteSpace(value) ? null : NormalizeHash(value, parameterName);
+    }
+
     private static string NormalizeDecision(string decision)
     {
         var normalizedDecision = NormalizeRequiredText(decision, nameof(decision)).ToLowerInvariant();
@@ -1884,6 +2306,12 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
     private readonly record struct GovernanceAuditEventKey(
         CustomerOrganizationId CustomerOrganizationId,
         string AuditEventId);
+
+    private readonly record struct AgentSessionLookupKey(
+        CustomerOrganizationId CustomerOrganizationId,
+        string HarnessSetupProfileId,
+        ProductUserId ProductUserId,
+        string ProviderSessionKey);
 }
 
 internal sealed record SeedProductRoleMappingRequest(

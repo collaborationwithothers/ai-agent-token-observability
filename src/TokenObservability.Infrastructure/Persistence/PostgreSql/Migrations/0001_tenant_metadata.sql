@@ -179,6 +179,98 @@ CREATE TABLE IF NOT EXISTS ingestion_rejection (
     )
 );
 
+CREATE TABLE IF NOT EXISTS telemetry_envelope (
+    telemetry_envelope_id text PRIMARY KEY,
+    customer_organization_id uuid NOT NULL,
+    harness_setup_profile_id text NOT NULL,
+    scoped_ingestion_credential_id uuid NOT NULL,
+    product_user_id uuid NOT NULL,
+    harness text NOT NULL,
+    schema_version text NOT NULL,
+    signal_type text NOT NULL,
+    source_event_name text NOT NULL,
+    source_event_timestamp_utc timestamptz NULL,
+    received_at_utc timestamptz NOT NULL,
+    conversation_id_hash text NULL,
+    turn_id_hash text NULL,
+    source_event_id text NULL,
+    trace_id_hash text NULL,
+    span_id_hash text NULL,
+    model_name text NULL,
+    harness_version text NULL,
+    sandbox_setting text NULL,
+    approval_setting text NULL,
+    content_policy_decision text NOT NULL,
+    content_capture_state text NOT NULL,
+    redaction_state text NOT NULL,
+    routing_decision_json jsonb NOT NULL,
+    evidence_state text NOT NULL,
+    metric_state text NOT NULL,
+    source_evidence_kind text NOT NULL,
+    correlation_id text NOT NULL,
+    dedupe_key_hash text NOT NULL,
+    ingestion_version_metadata_json jsonb NOT NULL,
+    CONSTRAINT fk_telemetry_envelope_customer_organization FOREIGN KEY (customer_organization_id) REFERENCES customer_organization (customer_organization_id),
+    CONSTRAINT fk_telemetry_envelope_scoped_credential FOREIGN KEY (customer_organization_id, scoped_ingestion_credential_id) REFERENCES scoped_ingestion_credential (customer_organization_id, scoped_ingestion_credential_id),
+    CONSTRAINT fk_telemetry_envelope_product_user FOREIGN KEY (customer_organization_id, product_user_id) REFERENCES product_user (customer_organization_id, product_user_id),
+    CONSTRAINT uq_telemetry_envelope_customer_envelope_id UNIQUE (customer_organization_id, telemetry_envelope_id),
+    CONSTRAINT uq_telemetry_envelope_customer_dedupe UNIQUE (customer_organization_id, dedupe_key_hash),
+    CONSTRAINT ck_telemetry_envelope_harness CHECK (harness IN ('codex-cli')),
+    CONSTRAINT ck_telemetry_envelope_schema_version CHECK (schema_version ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'),
+    CONSTRAINT ck_telemetry_envelope_signal_type CHECK (signal_type IN ('log', 'trace', 'metric')),
+    CONSTRAINT ck_telemetry_envelope_content_policy_decision CHECK (content_policy_decision IN ('metadata_only', 'capture_candidate', 'blocked', 'redaction_required')),
+    CONSTRAINT ck_telemetry_envelope_content_capture_state CHECK (content_capture_state IN ('none', 'metadata_only', 'captured', 'review_required', 'redaction_failed', 'mixed')),
+    CONSTRAINT ck_telemetry_envelope_redaction_state CHECK (redaction_state IN ('not_required', 'passed', 'failed', 'review_required')),
+    CONSTRAINT ck_telemetry_envelope_evidence_state CHECK (evidence_state IN ('observed', 'derived', 'estimated', 'unavailable', 'not_applicable', 'mixed')),
+    CONSTRAINT ck_telemetry_envelope_metric_state CHECK (metric_state IN ('observed', 'derived', 'estimated', 'unavailable', 'not_applicable', 'mixed')),
+    CONSTRAINT ck_telemetry_envelope_source_evidence_kind CHECK (source_evidence_kind IN ('harness_emitted', 'product_derived', 'scanner', 'manual_review')),
+    CONSTRAINT ck_telemetry_envelope_hashes CHECK (
+        (conversation_id_hash IS NULL OR conversation_id_hash ~ '^[a-f0-9]{64}$')
+        AND (turn_id_hash IS NULL OR turn_id_hash ~ '^[a-f0-9]{64}$')
+        AND (trace_id_hash IS NULL OR trace_id_hash ~ '^[a-f0-9]{64}$')
+        AND (span_id_hash IS NULL OR span_id_hash ~ '^[a-f0-9]{64}$')
+        AND dedupe_key_hash ~ '^[a-f0-9]{64}$'
+    ),
+    CONSTRAINT ck_telemetry_envelope_routing_decision_json CHECK (jsonb_typeof(routing_decision_json) = 'object'),
+    CONSTRAINT ck_telemetry_envelope_ingestion_version_metadata_json CHECK (jsonb_typeof(ingestion_version_metadata_json) = 'object')
+);
+
+CREATE TABLE IF NOT EXISTS agent_session (
+    agent_session_id text PRIMARY KEY,
+    customer_organization_id uuid NOT NULL,
+    product_user_id uuid NOT NULL,
+    harness_setup_profile_id text NOT NULL,
+    harness text NOT NULL,
+    provider_session_id_hash text NULL,
+    started_at_utc timestamptz NULL,
+    ended_at_utc timestamptz NULL,
+    session_status text NOT NULL,
+    environment text NULL,
+    sandbox_setting text NULL,
+    approval_setting text NULL,
+    repository_evidence_state text NOT NULL,
+    content_capture_summary text NOT NULL,
+    recommendation_status text NOT NULL,
+    model_names_json jsonb NOT NULL,
+    source_telemetry_envelope_ids_json jsonb NOT NULL,
+    created_at_utc timestamptz NOT NULL,
+    updated_at_utc timestamptz NOT NULL,
+    CONSTRAINT fk_agent_session_customer_organization FOREIGN KEY (customer_organization_id) REFERENCES customer_organization (customer_organization_id),
+    CONSTRAINT fk_agent_session_product_user FOREIGN KEY (customer_organization_id, product_user_id) REFERENCES product_user (customer_organization_id, product_user_id),
+    CONSTRAINT ck_agent_session_harness CHECK (harness IN ('codex-cli')),
+    CONSTRAINT ck_agent_session_provider_hash CHECK (provider_session_id_hash IS NULL OR provider_session_id_hash ~ '^[a-f0-9]{64}$'),
+    CONSTRAINT ck_agent_session_status CHECK (session_status IN ('active', 'completed', 'failed', 'partial', 'expired')),
+    CONSTRAINT ck_agent_session_repository_evidence_state CHECK (repository_evidence_state IN ('observed', 'correlated', 'inferred', 'unavailable', 'mixed')),
+    CONSTRAINT ck_agent_session_content_capture_summary CHECK (content_capture_summary IN ('none', 'metadata_only', 'captured', 'review_required', 'redaction_failed', 'mixed')),
+    CONSTRAINT ck_agent_session_recommendation_status CHECK (recommendation_status IN ('not_started', 'queued', 'generated', 'failed', 'disabled')),
+    CONSTRAINT ck_agent_session_model_names_json CHECK (jsonb_typeof(model_names_json) = 'array'),
+    CONSTRAINT ck_agent_session_source_envelopes_json CHECK (jsonb_typeof(source_telemetry_envelope_ids_json) = 'array'),
+    CONSTRAINT ck_agent_session_timestamps CHECK (
+        updated_at_utc >= created_at_utc
+        AND (started_at_utc IS NULL OR ended_at_utc IS NULL OR ended_at_utc >= started_at_utc)
+    )
+);
+
 CREATE INDEX IF NOT EXISTS ix_customer_organization_status
     ON customer_organization (status);
 
@@ -207,6 +299,19 @@ CREATE INDEX IF NOT EXISTS ix_ingestion_rejection_customer_received
 
 CREATE INDEX IF NOT EXISTS ix_ingestion_rejection_reason_received
     ON ingestion_rejection (reason_code, received_at_utc DESC);
+
+CREATE INDEX IF NOT EXISTS ix_telemetry_envelope_customer_received
+    ON telemetry_envelope (customer_organization_id, received_at_utc DESC);
+
+CREATE INDEX IF NOT EXISTS ix_telemetry_envelope_session_correlation
+    ON telemetry_envelope (customer_organization_id, harness_setup_profile_id, product_user_id, conversation_id_hash, source_event_timestamp_utc);
+
+CREATE INDEX IF NOT EXISTS ix_agent_session_customer_updated
+    ON agent_session (customer_organization_id, updated_at_utc DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_agent_session_customer_provider_session
+    ON agent_session (customer_organization_id, harness_setup_profile_id, product_user_id, provider_session_id_hash)
+    WHERE provider_session_id_hash IS NOT NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_product_role_mapping_active_principal_role_scope
     ON product_role_mapping (
