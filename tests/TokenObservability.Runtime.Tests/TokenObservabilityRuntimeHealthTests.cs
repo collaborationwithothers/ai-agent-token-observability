@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
@@ -133,12 +134,12 @@ public sealed class TokenObservabilityRuntimeHealthTests
         using var missingAuthResponse = await client.GetAsync("/api/v1/me");
 
         using var request = new HttpRequestMessage(HttpMethod.Get, "/api/v1/me");
-        request.Headers.Authorization = new("Bearer", "placeholder");
+        request.Headers.Add("X-MS-CLIENT-PRINCIPAL", EncodePrincipal());
         using var missingTenantResponse = await client.SendAsync(request);
 
         using var invalidAuthRequest = new HttpRequestMessage(HttpMethod.Get, "/api/v1/me");
         invalidAuthRequest.Headers.Authorization = new("Bearer", "placeholder");
-        invalidAuthRequest.Headers.Add("X-Customer-Organization-Id", "org-1");
+        invalidAuthRequest.Headers.Add("X-Customer-Organization-Slug", "org-1");
         using var invalidAuthResponse = await client.SendAsync(invalidAuthRequest);
 
         Assert.Equal(HttpStatusCode.Unauthorized, missingAuthResponse.StatusCode);
@@ -190,5 +191,22 @@ public sealed class TokenObservabilityRuntimeHealthTests
         using var body = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
 
         Assert.Equal(expectedCode, body.RootElement.GetProperty("code").GetString());
+    }
+
+    private static string EncodePrincipal()
+    {
+        var principal = new
+        {
+            claims = new[]
+            {
+                new { typ = "iss", val = "https://sts.windows.net/contoso-tenant/" },
+                new { typ = "tid", val = "contoso-tenant" },
+                new { typ = "aud", val = "api://token-observability" },
+                new { typ = "sub", val = "admin-subject" },
+                new { typ = "name", val = "admin-subject" }
+            }
+        };
+
+        return Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(principal)));
     }
 }

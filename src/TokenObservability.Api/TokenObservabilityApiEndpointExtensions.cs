@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using TokenObservability.Domain.Authorization;
 
 namespace TokenObservability.Api;
 
@@ -8,6 +9,7 @@ internal static class TokenObservabilityApiEndpointExtensions
     {
         builder.Services.Configure<TokenObservabilityApiReadinessOptions>(
             builder.Configuration.GetSection("ProductApi:Readiness"));
+        builder.Services.AddTokenObservabilityAuthorizationContext();
     }
 
     public static void MapTokenObservabilityApiEndpoints(this WebApplication app)
@@ -59,56 +61,69 @@ internal static class TokenObservabilityApiEndpointExtensions
         }, statusCode: ready ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable);
     }
 
-    private static IResult GetProtectedReadiness(HttpContext httpContext)
+    private static async Task<IResult> GetProtectedReadiness(
+        HttpContext httpContext,
+        IOptions<TokenObservabilityApiReadinessOptions> options,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver)
     {
-        if (!HasBearerAuthorization(httpContext))
+        var resolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            ProductAuthorizationAction.AuditRead,
+            new ProductScope(ProductScopeKind.Organization, ScopeId: null));
+
+        if (!resolution.IsAllowed)
         {
-            return CreateProblem(
-                httpContext,
-                "Authentication required",
-                StatusCodes.Status401Unauthorized,
-                "authentication_required");
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
         }
 
-        return CreateProblem(
-            httpContext,
-            "Authentication required",
-            StatusCodes.Status401Unauthorized,
-            "authentication_required");
+        return GetReadiness(options);
     }
 
-    private static IResult GetCurrentUser(HttpContext httpContext)
+    private static async Task<IResult> GetCurrentUser(
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver)
     {
-        if (!HasBearerAuthorization(httpContext))
-        {
-            return CreateProblem(
-                httpContext,
-                "Authentication required",
-                StatusCodes.Status401Unauthorized,
-                "authentication_required");
-        }
-
-        if (!httpContext.Request.Headers.ContainsKey("X-Customer-Organization-Id"))
-        {
-            return CreateProblem(
-                httpContext,
-                "Customer organization context is required",
-                StatusCodes.Status403Forbidden,
-                "tenant_context_required");
-        }
-
-        return CreateProblem(
+        var resolution = await authorizationContextResolver.ResolveAsync(
             httpContext,
-            "Authentication required",
-            StatusCodes.Status401Unauthorized,
-            "authentication_required");
-    }
+            ProductAuthorizationAction.CurrentUserRead,
+            new ProductScope(ProductScopeKind.Organization, ScopeId: null));
 
-    private static bool HasBearerAuthorization(HttpContext httpContext)
-    {
-        var authorization = httpContext.Request.Headers.Authorization.ToString();
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
+        }
 
-        return authorization.StartsWith("Bearer ", StringComparison.Ordinal);
+        var context = resolution.Context;
+
+        return Results.Ok(new
+        {
+            customerOrganization = new
+            {
+                id = context.CustomerOrganization.CustomerOrganizationId.ToString(),
+                slug = context.CustomerOrganization.Slug,
+                displayName = context.CustomerOrganization.DisplayName,
+                dataResidencyRegion = context.CustomerOrganization.DataResidencyRegion
+            },
+            identityTenant = new
+            {
+                id = context.IdentityTenant.IdentityTenantId.ToString(),
+                provider = context.IdentityTenant.Provider.ToString(),
+                externalTenantId = context.IdentityTenant.ExternalTenantId
+            },
+            productUser = new
+            {
+                id = context.ProductUser.ProductUserId.ToString(),
+                displayLabel = context.ProductUser.DisplayLabel,
+                email = context.ProductUser.Email
+            },
+            roles = context.EffectiveRoles.Select(static role => role.ToString()).ToArray(),
+            scopes = context.MatchedMappings.Select(static mapping => new
+            {
+                kind = mapping.ScopeKind.ToString(),
+                scopeId = mapping.ScopeId
+            }).Distinct().ToArray(),
+            correlationId = context.CorrelationId
+        });
     }
 
     private static IResult CreateProblem(HttpContext httpContext, string title, int statusCode, string code)
