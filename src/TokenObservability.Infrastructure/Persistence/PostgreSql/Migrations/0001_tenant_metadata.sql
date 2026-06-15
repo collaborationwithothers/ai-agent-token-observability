@@ -114,6 +114,37 @@ CREATE TABLE IF NOT EXISTS product_role_mapping (
     CONSTRAINT ck_product_role_mapping_timestamps CHECK (updated_at_utc >= created_at_utc)
 );
 
+CREATE TABLE IF NOT EXISTS scoped_ingestion_credential (
+    scoped_ingestion_credential_id uuid PRIMARY KEY,
+    customer_organization_id uuid NOT NULL,
+    harness_setup_profile_id text NOT NULL,
+    product_user_id uuid NOT NULL,
+    credential_hash text NOT NULL,
+    credential_prefix text NULL,
+    allowed_harness text NOT NULL,
+    allowed_scopes_json jsonb NOT NULL,
+    status text NOT NULL,
+    expires_at_utc timestamptz NOT NULL,
+    last_used_at_utc timestamptz NULL,
+    rotated_at_utc timestamptz NULL,
+    revoked_at_utc timestamptz NULL,
+    created_by_product_user_id uuid NOT NULL,
+    changed_by_product_user_id uuid NOT NULL,
+    audit_event_ids_json jsonb NOT NULL,
+    created_at_utc timestamptz NOT NULL,
+    updated_at_utc timestamptz NOT NULL,
+    CONSTRAINT fk_scoped_ingestion_credential_customer_organization FOREIGN KEY (customer_organization_id) REFERENCES customer_organization (customer_organization_id),
+    CONSTRAINT fk_scoped_ingestion_credential_product_user FOREIGN KEY (customer_organization_id, product_user_id) REFERENCES product_user (customer_organization_id, product_user_id),
+    CONSTRAINT fk_scoped_ingestion_credential_created_by_product_user FOREIGN KEY (customer_organization_id, created_by_product_user_id) REFERENCES product_user (customer_organization_id, product_user_id),
+    CONSTRAINT fk_scoped_ingestion_credential_changed_by_product_user FOREIGN KEY (customer_organization_id, changed_by_product_user_id) REFERENCES product_user (customer_organization_id, product_user_id),
+    CONSTRAINT ck_scoped_ingestion_credential_allowed_harness CHECK (allowed_harness IN ('codex_cli')),
+    CONSTRAINT ck_scoped_ingestion_credential_allowed_scopes_json CHECK (jsonb_typeof(allowed_scopes_json) = 'array'),
+    CONSTRAINT ck_scoped_ingestion_credential_audit_event_ids_json CHECK (jsonb_typeof(audit_event_ids_json) = 'array'),
+    CONSTRAINT ck_scoped_ingestion_credential_status CHECK (status IN ('active', 'disabled', 'revoked', 'expired', 'pending_rotation')),
+    CONSTRAINT ck_scoped_ingestion_credential_expiry_window CHECK (expires_at_utc > created_at_utc),
+    CONSTRAINT ck_scoped_ingestion_credential_timestamps CHECK (updated_at_utc >= created_at_utc)
+);
+
 CREATE INDEX IF NOT EXISTS ix_customer_organization_status
     ON customer_organization (status);
 
@@ -128,6 +159,13 @@ CREATE INDEX IF NOT EXISTS ix_product_role_mapping_customer_status
 
 CREATE INDEX IF NOT EXISTS ix_governance_audit_event_customer_created
     ON governance_audit_event (customer_organization_id, created_at_utc DESC);
+
+CREATE INDEX IF NOT EXISTS ix_scoped_ingestion_credential_customer_status
+    ON scoped_ingestion_credential (customer_organization_id, status);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_scoped_ingestion_credential_active_hash
+    ON scoped_ingestion_credential (customer_organization_id, credential_hash)
+    WHERE status = 'active';
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_product_role_mapping_active_principal_role_scope
     ON product_role_mapping (
