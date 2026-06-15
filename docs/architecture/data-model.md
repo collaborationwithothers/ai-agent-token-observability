@@ -254,12 +254,15 @@ Stores credential metadata. Secret material is not stored in plaintext.
 | `credential_hash` | Yes | Hash or verifier for presented credential |
 | `credential_prefix` | No | Non-secret lookup prefix |
 | `allowed_harness` | Yes | `codex_cli` for MVP |
-| `allowed_repository_id` | No | Optional repository scope |
-| `allowed_team_id` | No | Optional team scope |
-| `status` | Yes | `active`, `expired`, `revoked`, `rotated` |
+| `allowed_scopes_json` | Yes | Allowed team, repository, harness profile, or organization scopes |
+| `status` | Yes | `active`, `disabled`, `revoked`, `expired`, `pending_rotation` |
 | `expires_at_utc` | Yes | Expiry |
 | `last_used_at_utc` | No | Last accepted request |
-| `audit_event_id` | Yes | Creation or latest lifecycle audit |
+| `rotated_at_utc` | No | Latest rotation timestamp |
+| `revoked_at_utc` | No | Revocation timestamp |
+| `audit_event_ids_json` | Yes | Creation and lifecycle audit references |
+
+Credential secret material is never stored in this table. The product stores only credential metadata such as hash or verifier, non-secret lookup prefix, allowed scope, status, timestamps, and audit references.
 
 ## Ingestion And Telemetry
 

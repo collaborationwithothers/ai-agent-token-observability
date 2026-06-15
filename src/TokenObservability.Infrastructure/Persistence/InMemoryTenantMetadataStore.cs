@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using TokenObservability.Domain.Authorization;
+using TokenObservability.Domain.Ingestion;
 using TokenObservability.Domain.Tenancy;
 
 namespace TokenObservability.Infrastructure.Persistence;
@@ -47,6 +48,7 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         "operation",
         "product_role",
         "request_route",
+        "result",
         "requested_scope_id",
         "requested_scope_kind",
         "scope_id",
@@ -60,6 +62,7 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
     private readonly Dictionary<ProductUserLookupKey, ProductUserId> productUserExternalSubjectIndex = [];
     private readonly Dictionary<ProductRoleMappingId, ProductRoleMapping> productRoleMappings = [];
     private readonly Dictionary<GovernanceAuditEventKey, GovernanceAuditEvent> governanceAuditEvents = [];
+    private readonly Dictionary<ScopedIngestionCredentialId, ScopedIngestionCredential> scopedIngestionCredentials = [];
     private readonly object gate = new();
 
     public Task<CustomerOrganization> CreateCustomerOrganizationAsync(CreateCustomerOrganizationRequest request)
@@ -519,6 +522,262 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         }
     }
 
+    public Task<ScopedIngestionCredential?> FindScopedIngestionCredentialAsync(
+        CustomerOrganizationId customerOrganizationId,
+        ScopedIngestionCredentialId scopedIngestionCredentialId)
+    {
+        lock (gate)
+        {
+            return Task.FromResult(
+                scopedIngestionCredentials.TryGetValue(scopedIngestionCredentialId, out var credential) &&
+                    credential.CustomerOrganizationId == customerOrganizationId
+                    ? credential
+                    : null);
+        }
+    }
+
+    public Task<IReadOnlyList<ScopedIngestionCredential>> ListScopedIngestionCredentialsAsync(
+        CustomerOrganizationId customerOrganizationId)
+    {
+        lock (gate)
+        {
+            return Task.FromResult<IReadOnlyList<ScopedIngestionCredential>>(
+                scopedIngestionCredentials.Values
+                    .Where(credential => credential.CustomerOrganizationId == customerOrganizationId)
+                    .OrderBy(credential => credential.CreatedAtUtc)
+                    .ThenBy(credential => credential.ScopedIngestionCredentialId.ToString(), StringComparer.Ordinal)
+                    .ToArray());
+        }
+    }
+
+    public Task<ScopedIngestionCredential> CreateScopedIngestionCredentialAsync(
+        CustomerOrganizationId customerOrganizationId,
+        CreateScopedIngestionCredentialRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var harnessSetupProfileId = NormalizeRequiredText(request.HarnessSetupProfileId, nameof(request.HarnessSetupProfileId));
+        var credentialPrefix = string.IsNullOrWhiteSpace(request.CredentialPrefix) ? null : request.CredentialPrefix.Trim();
+        var credentialHash = NormalizeCredentialHash(request.CredentialHash, credentialPrefix, nameof(request.CredentialHash));
+        var allowedScopes = NormalizeCredentialScopes(request.AllowedScopes);
+        var expiresAtUtc = request.ExpiresAtUtc.ToUniversalTime();
+        var now = clock.UtcNow.ToUniversalTime();
+
+        if (expiresAtUtc <= now)
+        {
+            throw new ArgumentException("Scoped ingestion credential expiry must be in the future.", nameof(request));
+        }
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(customerOrganizationId);
+            RequireProductUserForCustomerOrganization(customerOrganizationId, request.ProductUserId);
+            RequireProductUserForCustomerOrganization(customerOrganizationId, request.CreatedByProductUserId);
+
+            if (scopedIngestionCredentials.Values.Any(credential =>
+                    credential.CustomerOrganizationId == customerOrganizationId &&
+                    credential.Status == ScopedIngestionCredentialStatus.Active &&
+                    StringComparer.Ordinal.Equals(credential.CredentialHash, credentialHash)))
+            {
+                throw new InvalidOperationException("Active scoped ingestion credential hash already exists for the customer organization.");
+            }
+
+            var credential = new ScopedIngestionCredential(
+                ScopedIngestionCredentialId.NewId(),
+                customerOrganizationId,
+                harnessSetupProfileId,
+                request.ProductUserId,
+                credentialHash,
+                credentialPrefix,
+                request.AllowedHarness,
+                allowedScopes,
+                ScopedIngestionCredentialStatus.Active,
+                expiresAtUtc,
+                LastUsedAtUtc: null,
+                RotatedAtUtc: null,
+                RevokedAtUtc: null,
+                request.CreatedByProductUserId,
+                request.CreatedByProductUserId,
+                new ReadOnlyCollection<string>([NormalizeRequiredText(request.AuditEventId, nameof(request.AuditEventId))]),
+                now,
+                now);
+
+            RecordScopedIngestionCredentialAuditEventUnderLock(
+                credential,
+                request.CreatedByProductUserId,
+                request.ActorEffectiveRole,
+                "scoped_ingestion_credential_create",
+                "created",
+                denialReason: null,
+                request.CorrelationId,
+                request.AuditEventId,
+                now);
+            scopedIngestionCredentials.Add(credential.ScopedIngestionCredentialId, credential);
+
+            return Task.FromResult(credential);
+        }
+    }
+
+    public Task<ScopedIngestionCredential> MarkScopedIngestionCredentialPendingRotationAsync(
+        CustomerOrganizationId customerOrganizationId,
+        ScopedIngestionCredentialId scopedIngestionCredentialId,
+        ScopedIngestionCredentialLifecycleRequest request)
+    {
+        return UpdateScopedIngestionCredentialLifecycleAsync(
+            customerOrganizationId,
+            scopedIngestionCredentialId,
+            request,
+            ScopedIngestionCredentialStatus.PendingRotation,
+            "scoped_ingestion_credential_pending_rotation");
+    }
+
+    public Task<ScopedIngestionCredential> DisableScopedIngestionCredentialAsync(
+        CustomerOrganizationId customerOrganizationId,
+        ScopedIngestionCredentialId scopedIngestionCredentialId,
+        ScopedIngestionCredentialLifecycleRequest request)
+    {
+        return UpdateScopedIngestionCredentialLifecycleAsync(
+            customerOrganizationId,
+            scopedIngestionCredentialId,
+            request,
+            ScopedIngestionCredentialStatus.Disabled,
+            "scoped_ingestion_credential_disable");
+    }
+
+    public Task<ScopedIngestionCredential> RevokeScopedIngestionCredentialAsync(
+        CustomerOrganizationId customerOrganizationId,
+        ScopedIngestionCredentialId scopedIngestionCredentialId,
+        ScopedIngestionCredentialLifecycleRequest request)
+    {
+        return UpdateScopedIngestionCredentialLifecycleAsync(
+            customerOrganizationId,
+            scopedIngestionCredentialId,
+            request,
+            ScopedIngestionCredentialStatus.Revoked,
+            "scoped_ingestion_credential_revoke",
+            revokedAtUtc: clock.UtcNow.ToUniversalTime());
+    }
+
+    public Task<ScopedIngestionCredential> MarkScopedIngestionCredentialExpiredAsync(
+        CustomerOrganizationId customerOrganizationId,
+        ScopedIngestionCredentialId scopedIngestionCredentialId,
+        ScopedIngestionCredentialLifecycleRequest request)
+    {
+        return UpdateScopedIngestionCredentialLifecycleAsync(
+            customerOrganizationId,
+            scopedIngestionCredentialId,
+            request,
+            ScopedIngestionCredentialStatus.Expired,
+            "scoped_ingestion_credential_expire");
+    }
+
+    public Task<ScopedIngestionCredential> RotateScopedIngestionCredentialAsync(
+        CustomerOrganizationId customerOrganizationId,
+        ScopedIngestionCredentialId scopedIngestionCredentialId,
+        RotateScopedIngestionCredentialRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var credentialPrefix = string.IsNullOrWhiteSpace(request.CredentialPrefix) ? null : request.CredentialPrefix.Trim();
+        var credentialHash = NormalizeCredentialHash(request.CredentialHash, credentialPrefix, nameof(request.CredentialHash));
+        var expiresAtUtc = request.ExpiresAtUtc.ToUniversalTime();
+        var now = clock.UtcNow.ToUniversalTime();
+
+        if (expiresAtUtc <= now)
+        {
+            throw new ArgumentException("Rotated scoped ingestion credential expiry must be in the future.", nameof(request));
+        }
+
+        lock (gate)
+        {
+            var credential = RequireScopedIngestionCredentialForCustomerOrganization(customerOrganizationId, scopedIngestionCredentialId);
+            RequireProductUserForCustomerOrganization(customerOrganizationId, request.ChangedByProductUserId);
+
+            if (credential.Status is not (ScopedIngestionCredentialStatus.Active or ScopedIngestionCredentialStatus.PendingRotation))
+            {
+                throw new InvalidOperationException("Only active or pending-rotation scoped ingestion credentials can be rotated.");
+            }
+
+            if (scopedIngestionCredentials.Values.Any(existingCredential =>
+                    existingCredential.CustomerOrganizationId == customerOrganizationId &&
+                    existingCredential.ScopedIngestionCredentialId != scopedIngestionCredentialId &&
+                    existingCredential.Status == ScopedIngestionCredentialStatus.Active &&
+                    StringComparer.Ordinal.Equals(existingCredential.CredentialHash, credentialHash)))
+            {
+                throw new InvalidOperationException("Active scoped ingestion credential hash already exists for the customer organization.");
+            }
+
+            var auditEventId = NormalizeRequiredText(request.AuditEventId, nameof(request.AuditEventId));
+            var updatedCredential = credential with
+            {
+                CredentialHash = credentialHash,
+                CredentialPrefix = credentialPrefix,
+                Status = ScopedIngestionCredentialStatus.Active,
+                ExpiresAtUtc = expiresAtUtc,
+                RotatedAtUtc = now,
+                ChangedByProductUserId = request.ChangedByProductUserId,
+                AuditEventIds = AppendAuditEventId(credential.AuditEventIds, auditEventId),
+                UpdatedAtUtc = now
+            };
+
+            RecordScopedIngestionCredentialAuditEventUnderLock(
+                updatedCredential,
+                request.ChangedByProductUserId,
+                request.ActorEffectiveRole,
+                "scoped_ingestion_credential_rotate",
+                "updated",
+                denialReason: null,
+                request.CorrelationId,
+                auditEventId,
+                now);
+            scopedIngestionCredentials[scopedIngestionCredentialId] = updatedCredential;
+
+            return Task.FromResult(updatedCredential);
+        }
+    }
+
+    public Task RecordScopedIngestionCredentialFailedAccessAsync(
+        CustomerOrganizationId customerOrganizationId,
+        ScopedIngestionCredentialId scopedIngestionCredentialId,
+        string reasonCode,
+        string correlationId)
+    {
+        var normalizedReasonCode = NormalizeRequiredText(reasonCode, nameof(reasonCode));
+        var normalizedCorrelationId = NormalizeRequiredText(correlationId, nameof(correlationId));
+        var now = clock.UtcNow.ToUniversalTime();
+
+        lock (gate)
+        {
+            var credential = RequireScopedIngestionCredentialForCustomerOrganization(customerOrganizationId, scopedIngestionCredentialId);
+
+            var auditEventId = $"ingestion-credential-denied-{Guid.NewGuid():N}";
+            var evidenceMetadata = NormalizeEvidenceMetadata(new Dictionary<string, string>
+            {
+                ["evidence_kind"] = "authorization_decision",
+                ["operation"] = "scoped_ingestion_credential_failed_access",
+                ["result"] = normalizedReasonCode,
+                ["scope_kind"] = ProductScopeKind.HarnessProfile.ToString(),
+                ["scope_id"] = credential.HarnessSetupProfileId
+            });
+
+            CreateGovernanceAuditEventUnderLock(
+                auditEventId,
+                customerOrganizationId,
+                actorProductUserId: null,
+                effectiveRole: null,
+                ProductAuthorizationAction.IngestionCredentialManage,
+                "scoped_ingestion_credential",
+                credential.ScopedIngestionCredentialId.ToString(),
+                "denied",
+                ProductAuthorizationDenialReason.ScopeMismatch,
+                normalizedCorrelationId,
+                evidenceMetadata,
+                now);
+
+            return Task.CompletedTask;
+        }
+    }
+
     public Task<GovernanceAuditEvent> RecordGovernanceAuditEventAsync(
         CustomerOrganizationId customerOrganizationId,
         CreateGovernanceAuditEventRequest request)
@@ -736,6 +995,173 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         }
     }
 
+    private Task<ScopedIngestionCredential> UpdateScopedIngestionCredentialLifecycleAsync(
+        CustomerOrganizationId customerOrganizationId,
+        ScopedIngestionCredentialId scopedIngestionCredentialId,
+        ScopedIngestionCredentialLifecycleRequest request,
+        ScopedIngestionCredentialStatus status,
+        string operation,
+        DateTimeOffset? revokedAtUtc = null)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var auditEventId = NormalizeRequiredText(request.AuditEventId, nameof(request.AuditEventId));
+        var now = clock.UtcNow.ToUniversalTime();
+
+        lock (gate)
+        {
+            var credential = RequireScopedIngestionCredentialForCustomerOrganization(customerOrganizationId, scopedIngestionCredentialId);
+            RequireProductUserForCustomerOrganization(customerOrganizationId, request.ChangedByProductUserId);
+
+            var updatedCredential = credential with
+            {
+                Status = status,
+                RevokedAtUtc = revokedAtUtc ?? credential.RevokedAtUtc,
+                ChangedByProductUserId = request.ChangedByProductUserId,
+                AuditEventIds = AppendAuditEventId(credential.AuditEventIds, auditEventId),
+                UpdatedAtUtc = now
+            };
+
+            RecordScopedIngestionCredentialAuditEventUnderLock(
+                updatedCredential,
+                request.ChangedByProductUserId,
+                request.ActorEffectiveRole,
+                operation,
+                status == ScopedIngestionCredentialStatus.Disabled ? "disabled" : "updated",
+                denialReason: null,
+                request.CorrelationId,
+                auditEventId,
+                now);
+            scopedIngestionCredentials[scopedIngestionCredentialId] = updatedCredential;
+
+            return Task.FromResult(updatedCredential);
+        }
+    }
+
+    private ScopedIngestionCredential RequireScopedIngestionCredentialForCustomerOrganization(
+        CustomerOrganizationId customerOrganizationId,
+        ScopedIngestionCredentialId scopedIngestionCredentialId)
+    {
+        if (scopedIngestionCredentialId == ScopedIngestionCredentialId.Empty ||
+            !scopedIngestionCredentials.TryGetValue(scopedIngestionCredentialId, out var credential) ||
+            credential.CustomerOrganizationId != customerOrganizationId)
+        {
+            throw new InvalidOperationException("Scoped ingestion credential does not belong to the customer organization.");
+        }
+
+        return credential;
+    }
+
+    private static IReadOnlyList<ProductScope> NormalizeCredentialScopes(IReadOnlyList<ProductScope> allowedScopes)
+    {
+        ArgumentNullException.ThrowIfNull(allowedScopes);
+
+        if (allowedScopes.Count == 0)
+        {
+            throw new ArgumentException("At least one scoped ingestion credential scope is required.", nameof(allowedScopes));
+        }
+
+        return new ReadOnlyCollection<ProductScope>(
+            allowedScopes
+                .Select(NormalizeCredentialScope)
+                .ToArray());
+    }
+
+    private static ProductScope NormalizeCredentialScope(ProductScope scope)
+    {
+        return scope.Kind switch
+        {
+            ProductScopeKind.Organization => string.IsNullOrWhiteSpace(scope.ScopeId)
+                ? new ProductScope(ProductScopeKind.Organization, ScopeId: null)
+                : throw new ArgumentException("Organization scoped ingestion credentials must not include a scope identifier.", nameof(scope)),
+            ProductScopeKind.Team or ProductScopeKind.Repository or ProductScopeKind.HarnessProfile => NormalizeResourceCredentialScope(scope),
+            _ => throw new ArgumentException("Scoped ingestion credential scope kind is not supported.", nameof(scope))
+        };
+    }
+
+    private static ProductScope NormalizeResourceCredentialScope(ProductScope scope)
+    {
+        var scopeId = NormalizeRequiredText(scope.ScopeId ?? string.Empty, nameof(scope));
+
+        if (!IsSafeResourceId(scopeId))
+        {
+            throw new ArgumentException("Scoped ingestion credential scope identifier is not supported.", nameof(scope));
+        }
+
+        return new ProductScope(scope.Kind, scopeId);
+    }
+
+    private static string NormalizeCredentialHash(
+        string credentialHash,
+        string? credentialPrefix,
+        string parameterName)
+    {
+        var normalizedCredentialHash = NormalizeRequiredText(credentialHash, parameterName);
+
+        if (!normalizedCredentialHash.StartsWith("sha256:", StringComparison.Ordinal) ||
+            normalizedCredentialHash.Length <= "sha256:".Length)
+        {
+            throw new ArgumentException("Scoped ingestion credential verifier must use the sha256: prefix.", parameterName);
+        }
+
+        if (!IsSafeMachineToken(normalizedCredentialHash) ||
+            normalizedCredentialHash.StartsWith("aito_", StringComparison.OrdinalIgnoreCase) ||
+            normalizedCredentialHash.Contains("bearer", StringComparison.OrdinalIgnoreCase) ||
+            SensitiveEvidenceValueFragments.Any(fragment =>
+                normalizedCredentialHash.Contains(fragment, StringComparison.OrdinalIgnoreCase)) ||
+            (!string.IsNullOrWhiteSpace(credentialPrefix) &&
+                StringComparer.Ordinal.Equals(normalizedCredentialHash, credentialPrefix.Trim())))
+        {
+            throw new ArgumentException("Scoped ingestion credential verifier must not contain credential secret material.", parameterName);
+        }
+
+        return normalizedCredentialHash;
+    }
+
+    private static IReadOnlyList<string> AppendAuditEventId(
+        IReadOnlyList<string> existingAuditEventIds,
+        string auditEventId)
+    {
+        return new ReadOnlyCollection<string>(
+            existingAuditEventIds
+                .Concat([NormalizeRequiredText(auditEventId, nameof(auditEventId))])
+                .ToArray());
+    }
+
+    private void RecordScopedIngestionCredentialAuditEventUnderLock(
+        ScopedIngestionCredential credential,
+        ProductUserId actorProductUserId,
+        ProductRole actorEffectiveRole,
+        string operation,
+        string decision,
+        ProductAuthorizationDenialReason? denialReason,
+        string correlationId,
+        string auditEventId,
+        DateTimeOffset now)
+    {
+        var evidenceMetadata = NormalizeEvidenceMetadata(new Dictionary<string, string>
+        {
+            ["evidence_kind"] = "admin_operation",
+            ["operation"] = operation,
+            ["scope_kind"] = ProductScopeKind.HarnessProfile.ToString(),
+            ["scope_id"] = credential.HarnessSetupProfileId
+        });
+
+        CreateGovernanceAuditEventUnderLock(
+            NormalizeRequiredText(auditEventId, nameof(auditEventId)),
+            credential.CustomerOrganizationId,
+            actorProductUserId,
+            actorEffectiveRole,
+            ProductAuthorizationAction.IngestionCredentialManage,
+            "scoped_ingestion_credential",
+            credential.ScopedIngestionCredentialId.ToString(),
+            decision,
+            denialReason,
+            NormalizeRequiredText(correlationId, nameof(correlationId)),
+            evidenceMetadata,
+            now);
+    }
+
     private static string NormalizeRequiredText(string value, string parameterName)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -823,6 +1249,7 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
             "evidence_kind" => value is "admin_operation" or "authorization_decision",
             "operation" => IsSafeMachineToken(value),
             "request_route" => value.StartsWith("/api/v1/", StringComparison.Ordinal) && IsSafeRoute(value),
+            "result" => IsSafeMachineToken(value),
             "external_principal_type" => Enum.TryParse<ExternalPrincipalType>(value, ignoreCase: false, out _),
             "product_role" => Enum.TryParse<ProductRole>(value, ignoreCase: false, out _),
             "scope_kind" or "requested_scope_kind" => Enum.TryParse<ProductScopeKind>(value, ignoreCase: false, out _),
