@@ -17,6 +17,14 @@ internal static class TokenObservabilityIngestionEndpointExtensions
     private const string SupportedSchemaVersion = "2026-06-01";
     private const string SupportedContentCaptureMode = "metadata-only";
     private const long MaximumPayloadBytes = 1024 * 1024;
+    private static readonly TokenMetricName[] TokenMetricNames =
+    [
+        TokenMetricName.InputTokens,
+        TokenMetricName.OutputTokens,
+        TokenMetricName.CachedInputTokens,
+        TokenMetricName.ReasoningOutputTokens,
+        TokenMetricName.TotalTokens
+    ];
 
     public static void AddTokenObservabilityIngestionServices(this WebApplicationBuilder builder)
     {
@@ -291,7 +299,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         return new OtlpProtobufResult([], StatusCodes.Status200OK);
     }
 
-    private static Task<TelemetryEnvelopeRecord> RecordAcceptedTelemetryAsync(
+    private static async Task RecordAcceptedTelemetryAsync(
         HttpContext httpContext,
         InMemoryTenantMetadataStore tenantMetadataStore,
         ScopedIngestionCredential credential,
@@ -316,7 +324,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
             "X-AITO-Repository-Evidence-State",
             ["observed", "correlated", "inferred", "unavailable", "mixed"],
             defaultValue: "unavailable");
-        var metricState = signalType == "metrics" ? "observed" : "unavailable";
+        var metricState = "unavailable";
         var stableFallbackEventKey = sourceEventTimestamp?.ToString("O") ?? $"unique-{Guid.NewGuid():N}";
         var dedupeKeyHash = ComputeSha256Hex(string.Join(
             "|",
@@ -330,7 +338,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
             sourceEventId ?? explicitDedupeKey ?? stableFallbackEventKey,
             sourceEventTimestamp?.ToString("O") ?? string.Empty));
 
-        return tenantMetadataStore.RecordTelemetryEnvelopeAsync(new CreateTelemetryEnvelopeRecordRequest(
+        var envelope = await tenantMetadataStore.RecordTelemetryEnvelopeAsync(new CreateTelemetryEnvelopeRecordRequest(
             credential.CustomerOrganizationId,
             credential.HarnessSetupProfileId,
             credential.ScopedIngestionCredentialId,
@@ -363,6 +371,8 @@ internal static class TokenObservabilityIngestionEndpointExtensions
             },
             "observed",
             metricState,
+            ToTokenMetricStatus(metricState),
+            ToTokenMetricConfidence(metricState),
             "harness_emitted",
             correlationId,
             dedupeKeyHash,
@@ -372,6 +382,33 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 ["harness_version"] = harnessVersion ?? "unavailable",
                 ["contract_version"] = SupportedSchemaVersion
             }));
+
+        var sessions = await tenantMetadataStore.ListAgentSessionsAsync(credential.CustomerOrganizationId);
+        var session = sessions.Single(candidate =>
+            candidate.SourceTelemetryEnvelopeIds.Contains(envelope.TelemetryEnvelopeId, StringComparer.Ordinal));
+        var existingObservations = await tenantMetadataStore.ListTokenObservationsAsync(
+            credential.CustomerOrganizationId,
+            session.AgentSessionId);
+
+        if (existingObservations.Any(observation =>
+                StringComparer.Ordinal.Equals(observation.SourceTelemetryEnvelopeId, envelope.TelemetryEnvelopeId)))
+        {
+            return;
+        }
+
+        foreach (var metricName in TokenMetricNames)
+        {
+            await tenantMetadataStore.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+                credential.CustomerOrganizationId,
+                session.AgentSessionId,
+                ModelInvocationId: null,
+                metricName,
+                Value: null,
+                TokenMetricStatus.Unavailable,
+                TokenMetricConfidence.Unavailable,
+                TokenObservationSourceKind.Missing,
+                envelope.TelemetryEnvelopeId));
+        }
     }
 
     private static IResult CreateCredentialProblem(
@@ -436,12 +473,301 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 "payload_too_large");
         }
 
-        return OtlpProtobufEnvelopeValidator.HasValidExportRequest(payload, signalType)
-            ? PayloadValidationResult.Valid()
-            : PayloadValidationResult.Invalid(
+        if (!OtlpProtobufEnvelopeValidator.HasValidExportRequest(payload, signalType))
+        {
+            return PayloadValidationResult.Invalid(
                 "Malformed OTLP payload.",
                 StatusCodes.Status400BadRequest,
                 "malformed_otlp");
+        }
+
+        if (!TryCreateMetadataFingerprint(payload, signalType, out _))
+        {
+            return PayloadValidationResult.Invalid(
+                "Content-bearing OTLP payload cannot be safely classified.",
+                StatusCodes.Status403Forbidden,
+                "policy_context_missing");
+        }
+
+        return PayloadValidationResult.Valid();
+    }
+
+    private static bool TryCreateMetadataFingerprint(
+        ReadOnlySpan<byte> payload,
+        string signalType,
+        out string metadataFingerprint)
+    {
+        var metadata = new StringBuilder(signalType);
+        var success = signalType switch
+        {
+            "logs" => TryAppendLogMetadata(payload, metadata),
+            "metrics" => TryAppendMetricMetadata(payload, metadata),
+            "traces" => TryAppendTraceMetadata(payload, metadata),
+            _ => false
+        };
+
+        metadataFingerprint = success
+            ? Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(metadata.ToString()))).ToLowerInvariant()
+            : string.Empty;
+        return success;
+    }
+
+    private static bool TryAppendLogMetadata(ReadOnlySpan<byte> payload, StringBuilder metadata)
+    {
+        return WalkPayloadFields(payload, (fieldNumber, wireType, value) =>
+            fieldNumber != 1 ||
+            (wireType == 2 && WalkPayloadFields(value, (resourceFieldNumber, resourceWireType, resourceValue) =>
+                resourceFieldNumber != 2 ||
+                (resourceWireType == 2 && WalkPayloadFields(resourceValue, (scopeFieldNumber, scopeWireType, scopeValue) =>
+                    scopeFieldNumber != 2 ||
+                    (scopeWireType == 2 && AppendLogRecordMetadata(scopeValue, metadata)))))));
+    }
+
+    private static bool AppendLogRecordMetadata(ReadOnlySpan<byte> logRecord, StringBuilder metadata)
+    {
+        return WalkPayloadFields(logRecord, (fieldNumber, wireType, value) =>
+        {
+            if (fieldNumber == 3)
+            {
+                if (wireType != 2 || !TryReadSafeMetadataText(value, out var severityText))
+                {
+                    return false;
+                }
+
+                metadata.Append("|severity=").Append(severityText);
+                return true;
+            }
+
+            if (fieldNumber is 5 or 6)
+            {
+                return false;
+            }
+
+            return wireType != 2;
+        });
+    }
+
+    private static bool TryAppendMetricMetadata(ReadOnlySpan<byte> payload, StringBuilder metadata)
+    {
+        return WalkPayloadFields(payload, (fieldNumber, wireType, value) =>
+            fieldNumber != 1 ||
+            (wireType == 2 && WalkPayloadFields(value, (resourceFieldNumber, resourceWireType, resourceValue) =>
+                resourceFieldNumber != 2 ||
+                (resourceWireType == 2 && WalkPayloadFields(resourceValue, (scopeFieldNumber, scopeWireType, scopeValue) =>
+                    scopeFieldNumber != 2 ||
+                    (scopeWireType == 2 && AppendMetricMetadata(scopeValue, metadata)))))));
+    }
+
+    private static bool AppendMetricMetadata(ReadOnlySpan<byte> metric, StringBuilder metadata)
+    {
+        return WalkPayloadFields(metric, (fieldNumber, wireType, value) =>
+        {
+            if (fieldNumber == 1)
+            {
+                if (wireType != 2 || !TryReadSafeMetadataText(value, out var metricName))
+                {
+                    return false;
+                }
+
+                metadata.Append("|metric=").Append(metricName);
+                return true;
+            }
+
+            if (fieldNumber is 5 or 7 or 9 or 10 or 11)
+            {
+                return wireType == 2 && AppendMetricDataMetadata(fieldNumber, value, metadata);
+            }
+
+            return wireType != 2;
+        });
+    }
+
+    private static bool AppendMetricDataMetadata(
+        ulong metricDataFieldNumber,
+        ReadOnlySpan<byte> metricData,
+        StringBuilder metadata)
+    {
+        metadata.Append("|metric_data=").Append(metricDataFieldNumber);
+
+        return WalkPayloadFields(metricData, (fieldNumber, wireType, value) =>
+        {
+            if (fieldNumber == 1)
+            {
+                return wireType == 2 && AppendNumberDataPointMetadata(value, metadata);
+            }
+
+            if (wireType is 0 or 1 or 5)
+            {
+                metadata.Append("|metric_data_scalar.")
+                    .Append(fieldNumber)
+                    .Append('=')
+                    .Append(Convert.ToHexString(value).ToLowerInvariant());
+                return true;
+            }
+
+            return false;
+        });
+    }
+
+    private static bool AppendNumberDataPointMetadata(
+        ReadOnlySpan<byte> dataPoint,
+        StringBuilder metadata)
+    {
+        return WalkPayloadFields(dataPoint, (fieldNumber, wireType, value) =>
+        {
+            if (wireType is 0 or 1 or 5)
+            {
+                metadata.Append("|point.")
+                    .Append(fieldNumber)
+                    .Append('=')
+                    .Append(Convert.ToHexString(value).ToLowerInvariant());
+                return true;
+            }
+
+            return false;
+        });
+    }
+
+    private static bool TryAppendTraceMetadata(ReadOnlySpan<byte> payload, StringBuilder metadata)
+    {
+        return WalkPayloadFields(payload, (fieldNumber, wireType, value) =>
+            fieldNumber != 1 ||
+            (wireType == 2 && WalkPayloadFields(value, (resourceFieldNumber, resourceWireType, resourceValue) =>
+                resourceFieldNumber != 2 ||
+                (resourceWireType == 2 && WalkPayloadFields(resourceValue, (scopeFieldNumber, scopeWireType, scopeValue) =>
+                    scopeFieldNumber != 2 ||
+                    (scopeWireType == 2 && AppendSpanMetadata(scopeValue, metadata)))))));
+    }
+
+    private static bool AppendSpanMetadata(ReadOnlySpan<byte> span, StringBuilder metadata)
+    {
+        return WalkPayloadFields(span, (fieldNumber, wireType, value) =>
+        {
+            if (fieldNumber == 1 && wireType == 2 && value.Length == 16)
+            {
+                metadata.Append("|trace_id=").Append(Convert.ToHexString(value).ToLowerInvariant());
+                return true;
+            }
+
+            if (fieldNumber == 2 && wireType == 2 && value.Length == 8)
+            {
+                metadata.Append("|span_id=").Append(Convert.ToHexString(value).ToLowerInvariant());
+                return true;
+            }
+
+            return wireType != 2;
+        });
+    }
+
+    private static bool TryReadSafeMetadataText(ReadOnlySpan<byte> value, out string text)
+    {
+        text = Encoding.UTF8.GetString(value).Trim();
+        return text.Length is > 0 and <= 128 &&
+            text.All(static character =>
+                char.IsAsciiLetterOrDigit(character) ||
+                character is '.' or '_' or '-' or ':' or '/');
+    }
+
+    private delegate bool PayloadFieldHandler(ulong fieldNumber, ulong wireType, ReadOnlySpan<byte> value);
+
+    private static bool WalkPayloadFields(ReadOnlySpan<byte> payload, PayloadFieldHandler handler)
+    {
+        var offset = 0;
+
+        while (offset < payload.Length)
+        {
+            if (!TryReadVarint(payload, ref offset, out var key))
+            {
+                return false;
+            }
+
+            var fieldNumber = key >> 3;
+            var wireType = key & 0x07;
+            var value = ReadOnlySpan<byte>.Empty;
+
+            switch (wireType)
+            {
+                case 0:
+                    var varintStart = offset;
+                    if (!TryReadVarint(payload, ref offset, out _))
+                    {
+                        return false;
+                    }
+
+                    value = payload.Slice(varintStart, offset - varintStart);
+                    break;
+                case 1:
+                    if (!TrySkip(payload, ref offset, 8))
+                    {
+                        return false;
+                    }
+
+                    value = payload.Slice(offset - 8, 8);
+                    break;
+                case 2:
+                    if (!TryReadVarint(payload, ref offset, out var length) ||
+                        length > int.MaxValue ||
+                        offset + (int)length > payload.Length)
+                    {
+                        return false;
+                    }
+
+                    value = payload.Slice(offset, (int)length);
+                    offset += (int)length;
+                    break;
+                case 5:
+                    if (!TrySkip(payload, ref offset, 4))
+                    {
+                        return false;
+                    }
+
+                    value = payload.Slice(offset - 4, 4);
+                    break;
+                default:
+                    return false;
+            }
+
+            if (!handler(fieldNumber, wireType, value))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool TryReadVarint(ReadOnlySpan<byte> payload, ref int offset, out ulong value)
+    {
+        value = 0;
+
+        for (var shift = 0; shift < 64; shift += 7)
+        {
+            if (offset >= payload.Length)
+            {
+                return false;
+            }
+
+            var current = payload[offset++];
+            value |= (ulong)(current & 0x7F) << shift;
+
+            if ((current & 0x80) == 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TrySkip(ReadOnlySpan<byte> payload, ref int offset, int count)
+    {
+        if (count < 0 || offset + count > payload.Length)
+        {
+            return false;
+        }
+
+        offset += count;
+        return true;
     }
 
     private static async Task<bool> TenantHintMismatchesAsync(
@@ -689,6 +1015,26 @@ internal static class TokenObservabilityIngestionEndpointExtensions
             "traces" => "trace",
             "metrics" => "metric",
             _ => throw new ArgumentOutOfRangeException(nameof(routeSignalType), routeSignalType, null)
+        };
+    }
+
+    private static TokenMetricStatus ToTokenMetricStatus(string metricState)
+    {
+        return metricState switch
+        {
+            "observed" => TokenMetricStatus.Observed,
+            "unavailable" => TokenMetricStatus.Unavailable,
+            _ => throw new ArgumentOutOfRangeException(nameof(metricState), metricState, null)
+        };
+    }
+
+    private static TokenMetricConfidence ToTokenMetricConfidence(string metricState)
+    {
+        return metricState switch
+        {
+            "observed" => TokenMetricConfidence.Observed,
+            "unavailable" => TokenMetricConfidence.Unavailable,
+            _ => throw new ArgumentOutOfRangeException(nameof(metricState), metricState, null)
         };
     }
 

@@ -65,9 +65,10 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
     private readonly Dictionary<ScopedIngestionCredentialId, ScopedIngestionCredential> scopedIngestionCredentials = [];
     private readonly Dictionary<IngestionRejectionId, IngestionRejectionRecord> ingestionRejections = [];
     private readonly Dictionary<string, TelemetryEnvelopeRecord> telemetryEnvelopes = [];
-    private readonly Dictionary<string, string> telemetryEnvelopeDedupeIndex = new(StringComparer.Ordinal);
+    private readonly Dictionary<TelemetryEnvelopeDedupeLookupKey, string> telemetryEnvelopeDedupeIndex = [];
     private readonly Dictionary<string, AgentSessionRecord> agentSessions = [];
     private readonly Dictionary<AgentSessionLookupKey, string> agentSessionLookupIndex = [];
+    private readonly Dictionary<TokenObservationId, TokenObservationRecord> tokenObservations = [];
     private readonly object gate = new();
 
     public Task<CustomerOrganization> CreateCustomerOrganizationAsync(CreateCustomerOrganizationRequest request)
@@ -659,6 +660,7 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         var routingDecision = NormalizeRoutingDecision(request.RoutingDecision);
         var evidenceState = NormalizeEvidenceState(request.EvidenceState, nameof(request.EvidenceState));
         var metricState = NormalizeMetricState(request.MetricState, nameof(request.MetricState));
+        ValidateMetricQuality(request.MetricStatus, request.MetricConfidence);
         var sourceEvidenceKind = NormalizeSourceEvidenceKind(request.SourceEvidenceKind, nameof(request.SourceEvidenceKind));
         var correlationId = NormalizeRequiredText(request.CorrelationId, nameof(request.CorrelationId));
         var dedupeKeyHash = NormalizeHash(request.DedupeKeyHash, nameof(request.DedupeKeyHash));
@@ -699,7 +701,9 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
                 throw new InvalidOperationException("Accepted telemetry must match credential-derived setup profile and user.");
             }
 
-            if (telemetryEnvelopeDedupeIndex.TryGetValue(dedupeKeyHash, out var existingEnvelopeId))
+            var dedupeLookupKey = new TelemetryEnvelopeDedupeLookupKey(request.CustomerOrganizationId, dedupeKeyHash);
+
+            if (telemetryEnvelopeDedupeIndex.TryGetValue(dedupeLookupKey, out var existingEnvelopeId))
             {
                 return Task.FromResult(telemetryEnvelopes[existingEnvelopeId]);
             }
@@ -732,13 +736,15 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
                 routingDecision,
                 evidenceState,
                 metricState,
+                request.MetricStatus,
+                request.MetricConfidence,
                 sourceEvidenceKind,
                 correlationId,
                 dedupeKeyHash,
                 ingestionVersionMetadata);
 
             telemetryEnvelopes.Add(telemetryEnvelopeId, envelope);
-            telemetryEnvelopeDedupeIndex.Add(dedupeKeyHash, telemetryEnvelopeId);
+            telemetryEnvelopeDedupeIndex.Add(dedupeLookupKey, telemetryEnvelopeId);
             UpsertAgentSessionUnderLock(envelope, repositoryEvidenceState);
 
             return Task.FromResult(envelope);
@@ -759,6 +765,88 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         }
     }
 
+    public Task<AgentSessionRecord> UpsertAgentSessionAsync(
+        CreateAgentSessionRecordRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var harnessSetupProfileId = NormalizeHarnessSetupProfileId(
+            request.HarnessSetupProfileId,
+            nameof(request.HarnessSetupProfileId));
+        var providerSessionIdHash = NormalizeOptionalHash(request.ProviderSessionIdHash, nameof(request.ProviderSessionIdHash));
+        var startedAtUtc = request.StartedAtUtc?.ToUniversalTime();
+        var endedAtUtc = request.EndedAtUtc?.ToUniversalTime();
+        var now = clock.UtcNow.ToUniversalTime();
+
+        if (startedAtUtc is not null && endedAtUtc is not null && endedAtUtc < startedAtUtc)
+        {
+            throw new ArgumentException("Session end must not be before session start.", nameof(request));
+        }
+
+        ValidateMetricQuality(request.TokenMetricStatus, request.TokenMetricConfidence);
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+            RequireProductUserForCustomerOrganization(request.CustomerOrganizationId, request.ProductUserId);
+
+            var lookupKey = new AgentSessionLookupKey(
+                request.CustomerOrganizationId,
+                harnessSetupProfileId,
+                request.ProductUserId,
+                providerSessionIdHash ?? "partial-session");
+
+            if (agentSessionLookupIndex.TryGetValue(lookupKey, out var existingSessionId))
+            {
+                var existing = agentSessions[existingSessionId];
+                var updated = existing with
+                {
+                    StartedAtUtc = MinDateTimeOffset(existing.StartedAtUtc, startedAtUtc),
+                    EndedAtUtc = MaxDateTimeOffset(existing.EndedAtUtc, endedAtUtc),
+                    SessionStatus = ToWireSessionStatus(request.SessionStatus),
+                    RepositoryEvidenceState = ToWireRepositoryEvidenceState(request.RepositoryEvidenceState),
+                    ContentCaptureSummary = ToWireContentCaptureSummary(request.ContentCaptureSummary),
+                    RecommendationStatus = ToWireRecommendationStatus(request.RecommendationStatus),
+                    TokenMetricStatus = request.TokenMetricStatus,
+                    TokenMetricConfidence = request.TokenMetricConfidence,
+                    UpdatedAtUtc = now
+                };
+
+                agentSessions[existingSessionId] = updated;
+                return Task.FromResult(updated);
+            }
+
+            var sessionId = $"agent-session-{Guid.NewGuid():N}";
+            var session = new AgentSessionRecord(
+                sessionId,
+                request.CustomerOrganizationId,
+                request.ProductUserId,
+                harnessSetupProfileId,
+                ToWireHarness(request.Harness),
+                providerSessionIdHash,
+                startedAtUtc,
+                endedAtUtc,
+                ToWireSessionStatus(request.SessionStatus),
+                Environment: null,
+                SandboxSetting: null,
+                ApprovalSetting: null,
+                ToWireRepositoryEvidenceState(request.RepositoryEvidenceState),
+                ToWireContentCaptureSummary(request.ContentCaptureSummary),
+                ToWireRecommendationStatus(request.RecommendationStatus),
+                request.TokenMetricStatus,
+                request.TokenMetricConfidence,
+                ModelNames: [],
+                SourceTelemetryEnvelopeIds: [],
+                now,
+                now);
+
+            agentSessions.Add(sessionId, session);
+            agentSessionLookupIndex.Add(lookupKey, sessionId);
+
+            return Task.FromResult(session);
+        }
+    }
+
     public Task<IReadOnlyList<AgentSessionRecord>> ListAgentSessionsAsync(
         CustomerOrganizationId customerOrganizationId)
     {
@@ -769,6 +857,78 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
                     .Where(session => session.CustomerOrganizationId == customerOrganizationId)
                     .OrderBy(session => session.StartedAtUtc ?? session.CreatedAtUtc)
                     .ThenBy(session => session.AgentSessionId, StringComparer.Ordinal)
+                    .ToArray());
+        }
+    }
+
+    public Task<TokenObservationRecord> RecordTokenObservationAsync(
+        CreateTokenObservationRecordRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var agentSessionId = NormalizeRequiredText(request.AgentSessionId, nameof(request.AgentSessionId));
+        var modelInvocationId = string.IsNullOrWhiteSpace(request.ModelInvocationId)
+            ? null
+            : NormalizeOptionalMachineToken(request.ModelInvocationId, nameof(request.ModelInvocationId));
+        var sourceTelemetryEnvelopeId = string.IsNullOrWhiteSpace(request.SourceTelemetryEnvelopeId)
+            ? null
+            : NormalizeRequiredText(request.SourceTelemetryEnvelopeId, nameof(request.SourceTelemetryEnvelopeId));
+        var now = clock.UtcNow.ToUniversalTime();
+
+        ValidateTokenObservationShape(request.Value, request.MetricStatus, request.MetricConfidence, request.SourceKind);
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+
+            if (!agentSessions.TryGetValue(agentSessionId, out var session) ||
+                session.CustomerOrganizationId != request.CustomerOrganizationId)
+            {
+                throw new InvalidOperationException("Token observation session does not belong to the customer organization.");
+            }
+
+            if (sourceTelemetryEnvelopeId is not null &&
+                (!telemetryEnvelopes.TryGetValue(sourceTelemetryEnvelopeId, out var envelope) ||
+                    envelope.CustomerOrganizationId != request.CustomerOrganizationId))
+            {
+                throw new InvalidOperationException("Token observation source envelope does not belong to the customer organization.");
+            }
+
+            var observation = new TokenObservationRecord(
+                TokenObservationId.NewId(),
+                request.CustomerOrganizationId,
+                agentSessionId,
+                modelInvocationId,
+                request.MetricName,
+                request.Value,
+                request.MetricStatus,
+                request.MetricConfidence,
+                request.SourceKind,
+                sourceTelemetryEnvelopeId,
+                now);
+
+            tokenObservations.Add(observation.TokenObservationId, observation);
+
+            return Task.FromResult(observation);
+        }
+    }
+
+    public Task<IReadOnlyList<TokenObservationRecord>> ListTokenObservationsAsync(
+        CustomerOrganizationId customerOrganizationId,
+        string agentSessionId)
+    {
+        var normalizedAgentSessionId = NormalizeRequiredText(agentSessionId, nameof(agentSessionId));
+
+        lock (gate)
+        {
+            return Task.FromResult<IReadOnlyList<TokenObservationRecord>>(
+                tokenObservations.Values
+                    .Where(observation =>
+                        observation.CustomerOrganizationId == customerOrganizationId &&
+                        StringComparer.Ordinal.Equals(observation.AgentSessionId, normalizedAgentSessionId))
+                    .OrderBy(observation => TokenMetricSortOrder(observation.MetricName))
+                    .ThenBy(observation => observation.CreatedAtUtc)
+                    .ThenBy(observation => observation.TokenObservationId.ToString(), StringComparer.Ordinal)
                     .ToArray());
         }
     }
@@ -1463,6 +1623,8 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
                 repositoryEvidenceState,
                 envelope.ContentCaptureState,
                 "not_started",
+                envelope.MetricStatus,
+                envelope.MetricConfidence,
                 envelope.ModelName is null ? [] : [envelope.ModelName],
                 [envelope.TelemetryEnvelopeId],
                 envelope.ReceivedAtUtc,
@@ -1496,6 +1658,8 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
             ApprovalSetting = envelope.ApprovalSetting ?? existing.ApprovalSetting,
             RepositoryEvidenceState = MergeEvidenceState(existing.RepositoryEvidenceState, repositoryEvidenceState),
             ContentCaptureSummary = MergeContentCaptureSummary(existing.ContentCaptureSummary, envelope.ContentCaptureState),
+            TokenMetricStatus = MergeMetricStatus(existing.TokenMetricStatus, envelope.MetricStatus),
+            TokenMetricConfidence = MergeMetricConfidence(existing.TokenMetricConfidence, envelope.MetricConfidence),
             ModelNames = modelNames,
             SourceTelemetryEnvelopeIds = sourceTelemetryEnvelopeIds,
             UpdatedAtUtc = envelope.ReceivedAtUtc
@@ -1507,6 +1671,98 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         return envelope.ConversationIdHash ?? "partial-session";
     }
 
+    private static DateTimeOffset? MinDateTimeOffset(DateTimeOffset? first, DateTimeOffset? second)
+    {
+        if (first is null)
+        {
+            return second;
+        }
+
+        if (second is null)
+        {
+            return first;
+        }
+
+        return first <= second ? first : second;
+    }
+
+    private static DateTimeOffset? MaxDateTimeOffset(DateTimeOffset? first, DateTimeOffset? second)
+    {
+        if (first is null)
+        {
+            return second;
+        }
+
+        if (second is null)
+        {
+            return first;
+        }
+
+        return first >= second ? first : second;
+    }
+
+    private static string ToWireHarness(CodingAgentHarness harness)
+    {
+        return harness switch
+        {
+            CodingAgentHarness.CodexCli => "codex-cli",
+            _ => throw new ArgumentOutOfRangeException(nameof(harness), harness, null)
+        };
+    }
+
+    private static string ToWireSessionStatus(AgentSessionStatus status)
+    {
+        return status switch
+        {
+            AgentSessionStatus.Active => "active",
+            AgentSessionStatus.Completed => "completed",
+            AgentSessionStatus.Failed => "failed",
+            AgentSessionStatus.Partial => "partial",
+            AgentSessionStatus.Expired => "expired",
+            _ => throw new ArgumentOutOfRangeException(nameof(status), status, null)
+        };
+    }
+
+    private static string ToWireRepositoryEvidenceState(RepositoryEvidenceState state)
+    {
+        return state switch
+        {
+            RepositoryEvidenceState.Observed => "observed",
+            RepositoryEvidenceState.Correlated => "correlated",
+            RepositoryEvidenceState.Inferred => "inferred",
+            RepositoryEvidenceState.Unavailable => "unavailable",
+            RepositoryEvidenceState.Mixed => "mixed",
+            _ => throw new ArgumentOutOfRangeException(nameof(state), state, null)
+        };
+    }
+
+    private static string ToWireContentCaptureSummary(ContentCaptureSummary state)
+    {
+        return state switch
+        {
+            ContentCaptureSummary.None => "none",
+            ContentCaptureSummary.MetadataOnly => "metadata_only",
+            ContentCaptureSummary.Captured => "captured",
+            ContentCaptureSummary.ReviewRequired => "review_required",
+            ContentCaptureSummary.RedactionFailed => "redaction_failed",
+            ContentCaptureSummary.Mixed => "mixed",
+            _ => throw new ArgumentOutOfRangeException(nameof(state), state, null)
+        };
+    }
+
+    private static string ToWireRecommendationStatus(RecommendationStatus status)
+    {
+        return status switch
+        {
+            RecommendationStatus.NotStarted => "not_started",
+            RecommendationStatus.Queued => "queued",
+            RecommendationStatus.Generated => "generated",
+            RecommendationStatus.Failed => "failed",
+            RecommendationStatus.Disabled => "disabled",
+            _ => throw new ArgumentOutOfRangeException(nameof(status), status, null)
+        };
+    }
+
     private static string MergeEvidenceState(string existing, string incoming)
     {
         return StringComparer.Ordinal.Equals(existing, incoming) ? existing : "mixed";
@@ -1515,6 +1771,16 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
     private static string MergeContentCaptureSummary(string existing, string incoming)
     {
         return StringComparer.Ordinal.Equals(existing, incoming) ? existing : "mixed";
+    }
+
+    private static TokenMetricStatus MergeMetricStatus(TokenMetricStatus existing, TokenMetricStatus incoming)
+    {
+        return existing == incoming ? existing : TokenMetricStatus.Mixed;
+    }
+
+    private static TokenMetricConfidence MergeMetricConfidence(TokenMetricConfidence existing, TokenMetricConfidence incoming)
+    {
+        return existing == incoming ? existing : TokenMetricConfidence.Estimated;
     }
 
     private static string NormalizeWireHarness(string value, string parameterName)
@@ -1610,6 +1876,73 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         return normalized is "observed" or "derived" or "estimated" or "unavailable" or "not_applicable" or "mixed"
             ? normalized
             : throw new ArgumentException("Metric state is not supported.", parameterName);
+    }
+
+    private static void ValidateMetricQuality(
+        TokenMetricStatus metricStatus,
+        TokenMetricConfidence metricConfidence)
+    {
+        if (metricStatus is TokenMetricStatus.Unavailable or TokenMetricStatus.NotApplicable &&
+            metricConfidence != TokenMetricConfidence.Unavailable)
+        {
+            throw new ArgumentException("Unavailable or not applicable metrics require unavailable confidence.", nameof(metricConfidence));
+        }
+    }
+
+    private static void ValidateTokenObservationShape(
+        long? value,
+        TokenMetricStatus metricStatus,
+        TokenMetricConfidence metricConfidence,
+        TokenObservationSourceKind sourceKind)
+    {
+        ValidateMetricQuality(metricStatus, metricConfidence);
+
+        if (value < 0)
+        {
+            throw new ArgumentException("Token metric values must not be negative.", nameof(value));
+        }
+
+        if (metricStatus is TokenMetricStatus.Unavailable or TokenMetricStatus.NotApplicable && value is not null)
+        {
+            throw new ArgumentException("Unavailable and not applicable token metrics must use null values.", nameof(value));
+        }
+
+        if (metricStatus is TokenMetricStatus.Observed or TokenMetricStatus.Derived or TokenMetricStatus.Estimated or TokenMetricStatus.Mixed &&
+            value is null)
+        {
+            throw new ArgumentException("Available token metric states require a value.", nameof(value));
+        }
+
+        if (value == 0 &&
+            metricStatus is not (TokenMetricStatus.Observed or TokenMetricStatus.Derived))
+        {
+            throw new ArgumentException("Zero token values require observed or deterministically derived evidence.", nameof(value));
+        }
+
+        if (value == 0 &&
+            metricConfidence is not (TokenMetricConfidence.Observed or TokenMetricConfidence.Deterministic))
+        {
+            throw new ArgumentException("Zero token values require observed or deterministic confidence.", nameof(metricConfidence));
+        }
+
+        if (sourceKind == TokenObservationSourceKind.Missing &&
+            metricStatus is not (TokenMetricStatus.Unavailable or TokenMetricStatus.NotApplicable))
+        {
+            throw new ArgumentException("Missing token observation sources require unavailable or not applicable status.", nameof(sourceKind));
+        }
+    }
+
+    private static int TokenMetricSortOrder(TokenMetricName metricName)
+    {
+        return metricName switch
+        {
+            TokenMetricName.InputTokens => 0,
+            TokenMetricName.OutputTokens => 1,
+            TokenMetricName.CachedInputTokens => 2,
+            TokenMetricName.ReasoningOutputTokens => 3,
+            TokenMetricName.TotalTokens => 4,
+            _ => throw new ArgumentOutOfRangeException(nameof(metricName), metricName, null)
+        };
     }
 
     private static string NormalizeContentDecision(string value, string parameterName)
@@ -2306,6 +2639,10 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
     private readonly record struct GovernanceAuditEventKey(
         CustomerOrganizationId CustomerOrganizationId,
         string AuditEventId);
+
+    private readonly record struct TelemetryEnvelopeDedupeLookupKey(
+        CustomerOrganizationId CustomerOrganizationId,
+        string DedupeKeyHash);
 
     private readonly record struct AgentSessionLookupKey(
         CustomerOrganizationId CustomerOrganizationId,

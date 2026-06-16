@@ -194,6 +194,37 @@ public sealed class TenantMetadataSchemaTests
     }
 
     [Fact]
+    public void PostgreSqlTenantMetadataMigrationPersistsTokenMetricQualitySemantics()
+    {
+        var root = FindRepositoryRoot();
+        var migrationPath = Path.Combine(
+            root,
+            "src",
+            "TokenObservability.Infrastructure",
+            "Persistence",
+            "PostgreSql",
+            "Migrations",
+            "0001_tenant_metadata.sql");
+
+        var migration = File.ReadAllText(migrationPath);
+
+        Assert.Contains("CREATE TABLE IF NOT EXISTS telemetry_envelope", migration);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS agent_session", migration);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS token_observation", migration);
+        Assert.Contains("metric_status text NOT NULL", migration);
+        Assert.Contains("metric_confidence text NOT NULL", migration);
+        Assert.Contains("value bigint NULL", migration);
+        Assert.Contains("'observed'", migration);
+        Assert.Contains("'estimated'", migration);
+        Assert.Contains("'unavailable'", migration);
+        Assert.Contains("'not_applicable'", migration);
+        Assert.Contains("'mixed'", migration);
+        Assert.Contains("ck_token_observation_null_semantics", migration);
+        Assert.Contains("ck_token_observation_zero_semantics", migration);
+        Assert.Contains("ix_token_observation_session_metric", migration);
+    }
+
+    [Fact]
     public void PostgreSqlCustomerOrganizationSlugConstraintMatchesTerraformSlugValidation()
     {
         var root = FindRepositoryRoot();
