@@ -65,6 +65,7 @@ Every product aggregate metric includes these labels unless explicitly marked ot
 | Metric | Type | Unit | Labels beyond common labels | Purpose |
 | --- | --- | --- | --- | --- |
 | `tokenobs_tokens_total` | Counter | tokens | `harness`, `model_provider`, `model`, `token_type`, `metric_status`, `metric_confidence` | Token burn by token class |
+| `tokenobs_token_metric_states_total` | Counter | observations | `harness`, `model_provider`, `model`, `token_type`, `metric_status`, `metric_confidence` | Token metric state observations, including unavailable and not applicable null-valued token metrics |
 | `tokenobs_estimated_cost_usd_total` | Counter | USD | `harness`, `model_provider`, `model`, `cost_status`, `pricing_basis_kind` | Estimated token cost |
 | `tokenobs_budget_threshold_usd` | Gauge | USD | `budget_scope`, `period` | Non-punitive budget threshold for aggregate comparison |
 | `tokenobs_sessions_started_total` | Counter | sessions | `harness` | Session creation trend |
