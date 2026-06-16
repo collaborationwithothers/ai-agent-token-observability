@@ -185,6 +185,17 @@ variable "product_ingestion_image" {
   }
 }
 
+variable "shared_jobs_image" {
+  description = "Shared container image for finite Product Jobs commands."
+  type        = string
+  default     = "ghcr.io/collaborationwithothers/ai-agent-token-observability/product-jobs:latest"
+
+  validation {
+    condition     = length(trimspace(var.shared_jobs_image)) > 0
+    error_message = "shared_jobs_image must not be empty."
+  }
+}
+
 variable "dashboard_target_port" {
   description = "Listening port for the Product Dashboard container."
   type        = number
@@ -238,6 +249,24 @@ variable "container_app_secret_names" {
 
 variable "container_app_key_vault_secret_ids" {
   description = "Key Vault secret IDs by Container App key and Container App secret name. Secret values are never supplied through Terraform variables."
+  type        = map(map(string))
+  default     = {}
+}
+
+variable "container_app_job_additional_environment" {
+  description = "Additional non-secret environment variables by Container Apps Job key."
+  type        = map(map(string))
+  default     = {}
+}
+
+variable "container_app_job_secret_names" {
+  description = "Secret-backed environment variable names by Container Apps Job key. Values are Container Apps Job secret names, not secret values."
+  type        = map(map(string))
+  default     = {}
+}
+
+variable "container_app_job_key_vault_secret_ids" {
+  description = "Key Vault secret IDs by Container Apps Job key and secret name. Plain secret values are not accepted."
   type        = map(map(string))
   default     = {}
 }

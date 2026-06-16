@@ -2,13 +2,28 @@
 
 Responsibility: Container Apps environment, Product API, Product Ingestion Endpoint, Product Dashboard, Container Apps Jobs, managed identities, and app configuration.
 
-This stage currently deploys the long-running runtime services only:
+This stage deploys the long-running runtime services:
 
 - Product Dashboard.
 - Product API.
 - Product Ingestion Endpoint.
 
-Container Apps Jobs are implemented by the shared jobs image issue.
+It also models the shared Product Jobs image as distinct Azure Container Apps Jobs through a local wrapper around the Azure Verified Module `Azure/avm-res-app-job/azurerm`.
+
+The shared jobs image default is `ghcr.io/collaborationwithothers/ai-agent-token-observability/product-jobs:latest`. Each job uses the same image with explicit `dotnet TokenObservability.Jobs.dll <command>` arguments:
+
+- `normalize-telemetry`.
+- `detect-hotspots`.
+- `generate-recommendations`.
+- `redact-content`.
+- `refresh-pricing`.
+- `retention-cleanup`.
+- `reprocess-session`.
+- `tenant-maintenance`.
+
+Jobs use separate Container Apps Job resources and system-assigned managed identities. Job settings support non-secret environment overrides, Key Vault backed secret references, retry limits, timeouts, and independent CPU or memory sizing. The stage does not accept plain secret values for job configuration.
+
+The runtime proof uses manual triggers only. Event or scheduled trigger policies can be added in later issues that own queue and scheduler decisions.
 
 Backend key: `app_runtime.tfstate`
 

@@ -39,3 +39,18 @@ output "container_app_identity_principal_ids" {
   description = "Managed identity principal IDs by long-running service key."
   value       = { for key, identity in azurerm_user_assigned_identity.services : key => identity.principal_id }
 }
+
+output "container_app_job_ids" {
+  description = "Container Apps Job resource IDs by finite job key."
+  value       = { for key, job in module.container_app_jobs : key => job.resource_id }
+}
+
+output "container_app_job_names" {
+  description = "Container Apps Job names by finite job key."
+  value       = { for key, job in module.container_app_jobs : key => job.name }
+}
+
+output "container_app_job_identities" {
+  description = "Managed identity details by finite job key."
+  value       = { for key, job in module.container_app_jobs : key => job.managed_identities }
+}
