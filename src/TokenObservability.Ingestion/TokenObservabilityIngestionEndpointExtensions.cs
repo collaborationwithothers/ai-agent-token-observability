@@ -34,6 +34,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         builder.Services.TryAddSingleton<InMemoryTenantMetadataStore>();
         builder.Services.TryAddSingleton<ScopedIngestionCredentialLifecycleService>();
         builder.Services.TryAddSingleton<IAggregateMetricSink, NoopAggregateMetricSink>();
+        builder.Services.TryAddSingleton<IIngestionDiagnosticSink, IngestionDiagnosticLoggerSink>();
         builder.Services.TryAddSingleton(static services =>
         {
             var options = services.GetRequiredService<IOptions<TokenObservabilityIngestionOptions>>().Value;
@@ -60,6 +61,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         ScopedIngestionCredentialLifecycleService credentialLifecycleService,
         InMemoryTenantMetadataStore tenantMetadataStore,
         AggregateMetricsExporter aggregateMetricsExporter,
+        IIngestionDiagnosticSink diagnosticSink,
         IOptions<TokenObservabilityIngestionOptions> options)
     {
         return HandleOtlpSignalAsync(
@@ -67,6 +69,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
             credentialLifecycleService,
             tenantMetadataStore,
             aggregateMetricsExporter,
+            diagnosticSink,
             options.Value,
             "logs");
     }
@@ -76,6 +79,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         ScopedIngestionCredentialLifecycleService credentialLifecycleService,
         InMemoryTenantMetadataStore tenantMetadataStore,
         AggregateMetricsExporter aggregateMetricsExporter,
+        IIngestionDiagnosticSink diagnosticSink,
         IOptions<TokenObservabilityIngestionOptions> options)
     {
         return HandleOtlpSignalAsync(
@@ -83,6 +87,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
             credentialLifecycleService,
             tenantMetadataStore,
             aggregateMetricsExporter,
+            diagnosticSink,
             options.Value,
             "traces");
     }
@@ -92,6 +97,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         ScopedIngestionCredentialLifecycleService credentialLifecycleService,
         InMemoryTenantMetadataStore tenantMetadataStore,
         AggregateMetricsExporter aggregateMetricsExporter,
+        IIngestionDiagnosticSink diagnosticSink,
         IOptions<TokenObservabilityIngestionOptions> options)
     {
         return HandleOtlpSignalAsync(
@@ -99,6 +105,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
             credentialLifecycleService,
             tenantMetadataStore,
             aggregateMetricsExporter,
+            diagnosticSink,
             options.Value,
             "metrics");
     }
@@ -108,6 +115,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         ScopedIngestionCredentialLifecycleService credentialLifecycleService,
         InMemoryTenantMetadataStore tenantMetadataStore,
         AggregateMetricsExporter aggregateMetricsExporter,
+        IIngestionDiagnosticSink diagnosticSink,
         TokenObservabilityIngestionOptions options,
         string signalType)
     {
@@ -117,7 +125,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
 
         if (bearerSecret is null)
         {
-            await RecordCredentialRejectionAsync(
+            var rejection = await RecordCredentialRejectionAsync(
                 httpContext,
                 tenantMetadataStore,
                 credential: null,
@@ -126,6 +134,11 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 StatusCodes.Status401Unauthorized,
                 "invalid_credential",
                 correlationId);
+            await RouteRejectedIngestionDiagnosticAsync(
+                tenantMetadataStore,
+                diagnosticSink,
+                rejection,
+                credential: null);
 
             return CreateProblem(
                 httpContext,
@@ -151,7 +164,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 validation.Credential,
                 correlationId);
 
-            await RecordCredentialRejectionAsync(
+            var rejection = await RecordCredentialRejectionAsync(
                 httpContext,
                 tenantMetadataStore,
                 validation.Credential,
@@ -161,13 +174,18 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 code,
                 correlationId,
                 auditEventId);
+            await RouteRejectedIngestionDiagnosticAsync(
+                tenantMetadataStore,
+                diagnosticSink,
+                rejection,
+                validation.Credential);
 
             return CreateCredentialProblem(httpContext, validation.FailureReason, correlationId);
         }
 
         if (validation.Credential is null)
         {
-            await RecordCredentialRejectionAsync(
+            var rejection = await RecordCredentialRejectionAsync(
                 httpContext,
                 tenantMetadataStore,
                 credential: null,
@@ -176,6 +194,11 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 StatusCodes.Status401Unauthorized,
                 "invalid_credential",
                 correlationId);
+            await RouteRejectedIngestionDiagnosticAsync(
+                tenantMetadataStore,
+                diagnosticSink,
+                rejection,
+                credential: null);
 
             return CreateProblem(
                 httpContext,
@@ -189,13 +212,18 @@ internal static class TokenObservabilityIngestionEndpointExtensions
 
         if (!StringComparer.Ordinal.Equals(ReadHeader(httpContext, "X-AITO-Schema-Version"), SupportedSchemaVersion))
         {
-            await RecordIngestionRejectionAsync(
+            var rejection = await RecordIngestionRejectionAsync(
                 tenantMetadataStore,
                 credential,
                 signalType,
                 route,
                 "unsupported_schema",
                 correlationId);
+            await RouteRejectedIngestionDiagnosticAsync(
+                tenantMetadataStore,
+                diagnosticSink,
+                rejection,
+                credential);
 
             return CreateProblem(
                 httpContext,
@@ -207,13 +235,18 @@ internal static class TokenObservabilityIngestionEndpointExtensions
 
         if (await TenantHintMismatchesAsync(httpContext, tenantMetadataStore, credential))
         {
-            await RecordIngestionRejectionAsync(
+            var rejection = await RecordIngestionRejectionAsync(
                 tenantMetadataStore,
                 credential,
                 signalType,
                 route,
                 "tenant_context_mismatch",
                 correlationId);
+            await RouteRejectedIngestionDiagnosticAsync(
+                tenantMetadataStore,
+                diagnosticSink,
+                rejection,
+                credential);
 
             return CreateProblem(
                 httpContext,
@@ -225,13 +258,18 @@ internal static class TokenObservabilityIngestionEndpointExtensions
 
         if (await DataResidencyMismatchesAsync(tenantMetadataStore, credential, options.Region))
         {
-            await RecordIngestionRejectionAsync(
+            var rejection = await RecordIngestionRejectionAsync(
                 tenantMetadataStore,
                 credential,
                 signalType,
                 route,
                 "residency_mismatch",
                 correlationId);
+            await RouteRejectedIngestionDiagnosticAsync(
+                tenantMetadataStore,
+                diagnosticSink,
+                rejection,
+                credential);
 
             return CreateProblem(
                 httpContext,
@@ -243,13 +281,18 @@ internal static class TokenObservabilityIngestionEndpointExtensions
 
         if (!HasValidPolicyContext(httpContext))
         {
-            await RecordIngestionRejectionAsync(
+            var rejection = await RecordIngestionRejectionAsync(
                 tenantMetadataStore,
                 credential,
                 signalType,
                 route,
                 "policy_context_missing",
                 correlationId);
+            await RouteRejectedIngestionDiagnosticAsync(
+                tenantMetadataStore,
+                diagnosticSink,
+                rejection,
+                credential);
 
             return CreateProblem(
                 httpContext,
@@ -266,13 +309,18 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         if (httpContext.Request.ContentLength is > 0 &&
             httpContext.Request.ContentLength > maxPayloadBytes)
         {
-            await RecordIngestionRejectionAsync(
+            var rejection = await RecordIngestionRejectionAsync(
                 tenantMetadataStore,
                 credential,
                 signalType,
                 route,
                 "payload_too_large",
                 correlationId);
+            await RouteRejectedIngestionDiagnosticAsync(
+                tenantMetadataStore,
+                diagnosticSink,
+                rejection,
+                credential);
 
             return CreateProblem(
                 httpContext,
@@ -286,13 +334,18 @@ internal static class TokenObservabilityIngestionEndpointExtensions
 
         if (!payloadValidation.IsValid)
         {
-            await RecordIngestionRejectionAsync(
+            var rejection = await RecordIngestionRejectionAsync(
                 tenantMetadataStore,
                 credential,
                 signalType,
                 route,
                 payloadValidation.Code,
                 correlationId);
+            await RouteRejectedIngestionDiagnosticAsync(
+                tenantMetadataStore,
+                diagnosticSink,
+                rejection,
+                credential);
 
             return CreateProblem(
                 httpContext,
@@ -302,19 +355,24 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 correlationId);
         }
 
-        await RecordAcceptedTelemetryAsync(
+        var accepted = await RecordAcceptedTelemetryAsync(
             httpContext,
             tenantMetadataStore,
             aggregateMetricsExporter,
             credential,
             signalType,
             correlationId);
+        await RouteAcceptedIngestionDiagnosticAsync(
+            tenantMetadataStore,
+            diagnosticSink,
+            accepted,
+            route);
 
         httpContext.Response.Headers["X-Correlation-Id"] = correlationId;
         return new OtlpProtobufResult([], StatusCodes.Status200OK);
     }
 
-    private static async Task RecordAcceptedTelemetryAsync(
+    private static async Task<AcceptedTelemetryRoutingResult> RecordAcceptedTelemetryAsync(
         HttpContext httpContext,
         InMemoryTenantMetadataStore tenantMetadataStore,
         AggregateMetricsExporter aggregateMetricsExporter,
@@ -409,7 +467,10 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         if (existingObservations.Any(observation =>
                 StringComparer.Ordinal.Equals(observation.SourceTelemetryEnvelopeId, envelope.TelemetryEnvelopeId)))
         {
-            return;
+            return new AcceptedTelemetryRoutingResult(
+                envelope,
+                session,
+                AggregateMetricsExportResult.Success(exportedPointCount: 0));
         }
 
         foreach (var metricName in TokenMetricNames)
@@ -426,11 +487,13 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 envelope.TelemetryEnvelopeId));
         }
 
-        await aggregateMetricsExporter.ExportAcceptedSessionAsync(
+        var aggregateMetricExportResult = await aggregateMetricsExporter.ExportAcceptedSessionAsync(
             credential.CustomerOrganizationId,
             session.AgentSessionId,
             correlationId,
             envelope.TelemetryEnvelopeId);
+
+        return new AcceptedTelemetryRoutingResult(envelope, session, aggregateMetricExportResult);
     }
 
     private static IResult CreateCredentialProblem(
@@ -833,7 +896,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
             SupportedContentCaptureMode);
     }
 
-    private static async Task RecordIngestionRejectionAsync(
+    private static async Task<IngestionRejectionRecord> RecordIngestionRejectionAsync(
         InMemoryTenantMetadataStore tenantMetadataStore,
         ScopedIngestionCredential credential,
         string signalType,
@@ -858,7 +921,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 CorrelationId: correlationId,
                 EvidenceMetadata: evidenceMetadata));
 
-        await tenantMetadataStore.RecordIngestionRejectionAsync(
+        return await tenantMetadataStore.RecordIngestionRejectionAsync(
             new CreateIngestionRejectionRecordRequest(
                 CustomerOrganizationId: credential.CustomerOrganizationId,
                 HarnessSetupProfileId: credential.HarnessSetupProfileId,
@@ -873,7 +936,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 EvidenceMetadata: evidenceMetadata));
     }
 
-    private static async Task RecordCredentialRejectionAsync(
+    private static async Task<IngestionRejectionRecord> RecordCredentialRejectionAsync(
         HttpContext httpContext,
         InMemoryTenantMetadataStore tenantMetadataStore,
         ScopedIngestionCredential? credential,
@@ -911,7 +974,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
             resolvedAuditEventId = auditEvent.AuditEventId;
         }
 
-        await tenantMetadataStore.RecordIngestionRejectionAsync(
+        return await tenantMetadataStore.RecordIngestionRejectionAsync(
             new CreateIngestionRejectionRecordRequest(
                 CustomerOrganizationId: customerOrganizationId,
                 HarnessSetupProfileId: string.IsNullOrWhiteSpace(harnessSetupProfileId) ? null : harnessSetupProfileId,
@@ -924,6 +987,93 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 CorrelationId: correlationId,
                 AuditEventId: resolvedAuditEventId,
                 EvidenceMetadata: evidenceMetadata));
+    }
+
+    private static async Task RouteAcceptedIngestionDiagnosticAsync(
+        InMemoryTenantMetadataStore tenantMetadataStore,
+        IIngestionDiagnosticSink diagnosticSink,
+        AcceptedTelemetryRoutingResult accepted,
+        string route)
+    {
+        var organization = await tenantMetadataStore.FindCustomerOrganizationAsync(accepted.Envelope.CustomerOrganizationId);
+        var aggregateMetricExportResult = accepted.AggregateMetricExportResult;
+        var aggregateMetricExportOutcome = aggregateMetricExportResult.Succeeded
+            ? "succeeded"
+            : "failed";
+
+        await diagnosticSink.RouteAsync(new IngestionDiagnosticEvent(
+            OperationName: "tokenobs.ingestion.request",
+            SignalType: accepted.Envelope.SignalType,
+            Outcome: "accepted",
+            RejectionReason: null,
+            HttpStatus: StatusCodes.Status200OK,
+            RequestRoute: route,
+            accepted.Envelope.CorrelationId,
+            accepted.Envelope.CustomerOrganizationId,
+            organization?.Slug,
+            accepted.Envelope.Harness,
+            accepted.Envelope.HarnessSetupProfileId,
+            DiagnosticStore: "application_insights_log_analytics",
+            accepted.Envelope.ContentCaptureState,
+            AuditEventId: null,
+            accepted.Envelope.TelemetryEnvelopeId,
+            accepted.Session.AgentSessionId,
+            aggregateMetricExportOutcome,
+            aggregateMetricExportResult.ExportedPointCount,
+            aggregateMetricExportResult.FailureReason,
+            new Dictionary<string, string>
+            {
+                ["content_capture"] = accepted.Envelope.ContentCaptureState,
+                ["diagnostic_store"] = accepted.Envelope.RoutingDecision.GetValueOrDefault("diagnostic_store", "not_applicable"),
+                ["metrics_store"] = accepted.Envelope.RoutingDecision.GetValueOrDefault("metrics_store", "not_applicable"),
+                ["aggregate_metric_export"] = aggregateMetricExportOutcome
+            }));
+    }
+
+    private static async Task RouteRejectedIngestionDiagnosticAsync(
+        InMemoryTenantMetadataStore tenantMetadataStore,
+        IIngestionDiagnosticSink diagnosticSink,
+        IngestionRejectionRecord rejection,
+        ScopedIngestionCredential? credential)
+    {
+        var organization = rejection.CustomerOrganizationId is { } customerOrganizationId
+            ? await tenantMetadataStore.FindCustomerOrganizationAsync(customerOrganizationId)
+            : null;
+        var signalType = ToEnvelopeSignalType(rejection.SignalType);
+        var properties = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["content_capture"] = "metadata_only",
+            ["diagnostic_store"] = "application_insights",
+            ["rejection_reason"] = rejection.ReasonCode,
+            ["ingestion_rejection_id"] = rejection.IngestionRejectionId.ToString()
+        };
+
+        foreach (var item in rejection.EvidenceMetadata)
+        {
+            properties.TryAdd(item.Key, item.Value);
+        }
+
+        await diagnosticSink.RouteAsync(new IngestionDiagnosticEvent(
+            OperationName: "tokenobs.ingestion.request",
+            signalType,
+            Outcome: "rejected",
+            rejection.ReasonCode,
+            rejection.HttpStatus,
+            rejection.RequestRoute,
+            rejection.CorrelationId,
+            rejection.CustomerOrganizationId,
+            organization?.Slug,
+            credential is null ? rejection.DeclaredHarness : ToWireHarness(credential.AllowedHarness),
+            rejection.HarnessSetupProfileId,
+            DiagnosticStore: "application_insights_log_analytics",
+            ContentCaptureState: "metadata_only",
+            rejection.AuditEventId,
+            TelemetryEnvelopeId: null,
+            AgentSessionId: null,
+            AggregateMetricExportOutcome: "not_applicable",
+            AggregateMetricPointCount: null,
+            AggregateMetricExportFailureReason: null,
+            properties));
     }
 
     private static ProductAuthorizationDenialReason ToCredentialDenialReason(string reasonCode)
@@ -1269,6 +1419,11 @@ internal static class TokenObservabilityIngestionEndpointExtensions
             return new PayloadValidationResult(false, title, statusCode, code);
         }
     }
+
+    private sealed record AcceptedTelemetryRoutingResult(
+        TelemetryEnvelopeRecord Envelope,
+        AgentSessionRecord Session,
+        AggregateMetricsExportResult AggregateMetricExportResult);
 
     private sealed record OtlpProtobufResult(byte[] Body, int StatusCode) : IResult
     {
