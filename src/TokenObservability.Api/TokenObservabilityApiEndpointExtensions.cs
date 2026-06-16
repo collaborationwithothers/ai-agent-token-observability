@@ -271,11 +271,11 @@ internal static class TokenObservabilityApiEndpointExtensions
                 customerOrganizationId = session.CustomerOrganizationId.ToString(),
                 productUserId = session.ProductUserId.ToString(),
                 harnessSetupProfileId = session.HarnessSetupProfileId,
-                harness = ToWireHarness(session.Harness),
+                harness = session.Harness,
                 providerSessionIdHash = session.ProviderSessionIdHash,
                 startedAtUtc = session.StartedAtUtc,
                 endedAtUtc = session.EndedAtUtc,
-                sessionStatus = ToWireSessionStatus(session.SessionStatus),
+                sessionStatus = session.SessionStatus,
                 tokenSummary = new
                 {
                     metricStatus = ToWireMetricStatus(session.TokenMetricStatus),
@@ -446,28 +446,6 @@ internal static class TokenObservabilityApiEndpointExtensions
     private static string ToContractAction(ProductAuthorizationAction action)
     {
         return action.ToString();
-    }
-
-    private static string ToWireHarness(CodingAgentHarness harness)
-    {
-        return harness switch
-        {
-            CodingAgentHarness.CodexCli => "codex_cli",
-            _ => throw new ArgumentOutOfRangeException(nameof(harness), harness, null)
-        };
-    }
-
-    private static string ToWireSessionStatus(AgentSessionStatus status)
-    {
-        return status switch
-        {
-            AgentSessionStatus.Active => "active",
-            AgentSessionStatus.Completed => "completed",
-            AgentSessionStatus.Failed => "failed",
-            AgentSessionStatus.Partial => "partial",
-            AgentSessionStatus.Expired => "expired",
-            _ => throw new ArgumentOutOfRangeException(nameof(status), status, null)
-        };
     }
 
     private static string ToWireMetricName(TokenMetricName metricName)

@@ -1,4 +1,5 @@
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Http;
@@ -528,29 +529,57 @@ public sealed class ProductApiAuthorizationContextTests
             "entra-admin-group",
             ProductRole.PlatformAdmin);
         var credential = await IssueCredentialAsync(store, seed, "profile-contoso-codex");
+        var providerSessionIdHash = ComputeSha256Hex("conversation-api-001");
         var envelope = await store.RecordTelemetryEnvelopeAsync(new CreateTelemetryEnvelopeRecordRequest(
             CustomerOrganizationId: seed.Organization.CustomerOrganizationId,
             HarnessSetupProfileId: credential.Credential.HarnessSetupProfileId,
             ScopedIngestionCredentialId: credential.Credential.ScopedIngestionCredentialId,
             ProductUserId: credential.Credential.ProductUserId,
-            Harness: CodingAgentHarness.CodexCli,
+            Harness: "codex-cli",
             SchemaVersion: "2026-06-01",
-            SignalType: "metrics",
+            SignalType: "metric",
             SourceEventName: "codex.api_request",
             SourceEventTimestampUtc: Now,
-            ConversationIdHash: "conversation-api-001",
+            ConversationIdHash: providerSessionIdHash,
+            TurnIdHash: null,
+            SourceEventId: null,
+            TraceIdHash: null,
+            SpanIdHash: null,
             ModelName: "gpt-5",
+            HarnessVersion: null,
+            SandboxSetting: null,
+            ApprovalSetting: null,
+            RepositoryEvidenceState: "unavailable",
             ContentPolicyDecision: "metadata_only",
-            RoutingDecision: "metadata_store",
+            ContentCaptureState: "metadata_only",
+            RedactionState: "not_required",
+            RoutingDecision: new Dictionary<string, string>
+            {
+                ["result"] = "accepted",
+                ["metadata_store"] = "postgresql",
+                ["diagnostic_store"] = "not_applicable",
+                ["metrics_store"] = "azure_monitor_workspace",
+                ["content_capture"] = "metadata_only"
+            },
+            EvidenceState: "observed",
+            MetricState: "mixed",
             MetricStatus: TokenMetricStatus.Mixed,
             MetricConfidence: TokenMetricConfidence.Estimated,
-            DedupeKeyHash: "dedupe-api-001"));
+            SourceEvidenceKind: "harness_emitted",
+            CorrelationId: "correlation-api-001",
+            DedupeKeyHash: ComputeSha256Hex("dedupe-api-001"),
+            IngestionVersionMetadata: new Dictionary<string, string>
+            {
+                ["schema_version"] = "2026-06-01",
+                ["harness_version"] = "unavailable",
+                ["contract_version"] = "2026-06-01"
+            }));
         var session = await store.UpsertAgentSessionAsync(new CreateAgentSessionRecordRequest(
             CustomerOrganizationId: seed.Organization.CustomerOrganizationId,
             ProductUserId: credential.Credential.ProductUserId,
             HarnessSetupProfileId: credential.Credential.HarnessSetupProfileId,
             Harness: CodingAgentHarness.CodexCli,
-            ProviderSessionIdHash: "conversation-api-001",
+            ProviderSessionIdHash: providerSessionIdHash,
             StartedAtUtc: Now,
             EndedAtUtc: null,
             SessionStatus: AgentSessionStatus.Active,
@@ -1009,29 +1038,57 @@ public sealed class ProductApiAuthorizationContextTests
         ScopedIngestionCredential credential,
         string providerSessionIdHash)
     {
+        var normalizedProviderSessionIdHash = ComputeSha256Hex(providerSessionIdHash);
         var envelope = await store.RecordTelemetryEnvelopeAsync(new CreateTelemetryEnvelopeRecordRequest(
             CustomerOrganizationId: credential.CustomerOrganizationId,
             HarnessSetupProfileId: credential.HarnessSetupProfileId,
             ScopedIngestionCredentialId: credential.ScopedIngestionCredentialId,
             ProductUserId: credential.ProductUserId,
-            Harness: credential.AllowedHarness,
+            Harness: "codex-cli",
             SchemaVersion: "2026-06-01",
-            SignalType: "metrics",
-            SourceEventName: null,
+            SignalType: "metric",
+            SourceEventName: "codex.api_request",
             SourceEventTimestampUtc: Now,
-            ConversationIdHash: providerSessionIdHash,
+            ConversationIdHash: normalizedProviderSessionIdHash,
+            TurnIdHash: null,
+            SourceEventId: null,
+            TraceIdHash: null,
+            SpanIdHash: null,
             ModelName: null,
+            HarnessVersion: null,
+            SandboxSetting: null,
+            ApprovalSetting: null,
+            RepositoryEvidenceState: "unavailable",
             ContentPolicyDecision: "metadata_only",
-            RoutingDecision: "metadata_store",
+            ContentCaptureState: "metadata_only",
+            RedactionState: "not_required",
+            RoutingDecision: new Dictionary<string, string>
+            {
+                ["result"] = "accepted",
+                ["metadata_store"] = "postgresql",
+                ["diagnostic_store"] = "not_applicable",
+                ["metrics_store"] = "azure_monitor_workspace",
+                ["content_capture"] = "metadata_only"
+            },
+            EvidenceState: "observed",
+            MetricState: "unavailable",
             MetricStatus: TokenMetricStatus.Unavailable,
             MetricConfidence: TokenMetricConfidence.Unavailable,
-            DedupeKeyHash: $"dedupe-{providerSessionIdHash}"));
+            SourceEvidenceKind: "harness_emitted",
+            CorrelationId: $"correlation-{providerSessionIdHash}",
+            DedupeKeyHash: ComputeSha256Hex($"dedupe-{providerSessionIdHash}"),
+            IngestionVersionMetadata: new Dictionary<string, string>
+            {
+                ["schema_version"] = "2026-06-01",
+                ["harness_version"] = "unavailable",
+                ["contract_version"] = "2026-06-01"
+            }));
         var session = await store.UpsertAgentSessionAsync(new CreateAgentSessionRecordRequest(
             CustomerOrganizationId: credential.CustomerOrganizationId,
             ProductUserId: credential.ProductUserId,
             HarnessSetupProfileId: credential.HarnessSetupProfileId,
             Harness: credential.AllowedHarness,
-            ProviderSessionIdHash: providerSessionIdHash,
+            ProviderSessionIdHash: normalizedProviderSessionIdHash,
             StartedAtUtc: Now,
             EndedAtUtc: null,
             SessionStatus: AgentSessionStatus.Active,
@@ -1088,6 +1145,11 @@ public sealed class ProductApiAuthorizationContextTests
             ["scope_kind"] = ProductScopeKind.HarnessProfile.ToString(),
             ["scope_id"] = harnessSetupProfileId
         };
+    }
+
+    private static string ComputeSha256Hex(string value)
+    {
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
     }
 
     private static async Task AssertProblemCodeAsync(HttpResponseMessage response, string expectedCode)

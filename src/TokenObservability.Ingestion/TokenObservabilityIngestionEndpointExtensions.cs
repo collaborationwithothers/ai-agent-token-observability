@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
@@ -288,61 +289,109 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         }
 
         await RecordAcceptedTelemetryAsync(
+            httpContext,
             tenantMetadataStore,
             credential,
             signalType,
-            SupportedSchemaVersion,
-            payloadValidation.PayloadHash);
+            correlationId);
 
         httpContext.Response.Headers["X-Correlation-Id"] = correlationId;
         return new OtlpProtobufResult([], StatusCodes.Status200OK);
     }
 
     private static async Task RecordAcceptedTelemetryAsync(
+        HttpContext httpContext,
         InMemoryTenantMetadataStore tenantMetadataStore,
         ScopedIngestionCredential credential,
         string signalType,
-        string schemaVersion,
-        string payloadHash)
+        string correlationId)
     {
+        var envelopeSignalType = ToEnvelopeSignalType(signalType);
+        var schemaVersion = ReadHeader(httpContext, "X-AITO-Schema-Version");
+        var sourceEventName = ReadSafeMachineHeader(httpContext, "X-AITO-Source-Event-Name") ??
+            $"otlp.{envelopeSignalType}.export";
+        var sourceEventId = ReadSafeMachineHeader(httpContext, "X-AITO-Source-Event-Id");
+        var explicitDedupeKey = ReadSafeMachineHeader(httpContext, "X-AITO-Dedupe-Key");
+        var sourceEventTimestamp = ReadTimestampHeader(httpContext, "X-AITO-Source-Event-Timestamp");
+        var conversationIdHash = HashOptionalHeader(httpContext, "X-AITO-Conversation-Id");
+        var turnIdHash = HashOptionalHeader(httpContext, "X-AITO-Turn-Id");
+        var modelName = ReadSafeLabelHeader(httpContext, "X-AITO-Model");
+        var harnessVersion = ReadSafeLabelHeader(httpContext, "X-AITO-Harness-Version");
+        var sandboxSetting = ReadSafeLabelHeader(httpContext, "X-AITO-Sandbox");
+        var approvalSetting = ReadSafeLabelHeader(httpContext, "X-AITO-Approval-Policy");
+        var repositoryEvidenceState = ReadKnownStateHeader(
+            httpContext,
+            "X-AITO-Repository-Evidence-State",
+            ["observed", "correlated", "inferred", "unavailable", "mixed"],
+            defaultValue: "unavailable");
+        var metricState = "unavailable";
+        var stableFallbackEventKey = sourceEventTimestamp?.ToString("O") ?? $"unique-{Guid.NewGuid():N}";
+        var dedupeKeyHash = ComputeSha256Hex(string.Join(
+            "|",
+            credential.CustomerOrganizationId.ToString(),
+            credential.HarnessSetupProfileId,
+            credential.ScopedIngestionCredentialId.ToString(),
+            envelopeSignalType,
+            conversationIdHash ?? string.Empty,
+            turnIdHash ?? string.Empty,
+            sourceEventName,
+            sourceEventId ?? explicitDedupeKey ?? stableFallbackEventKey,
+            sourceEventTimestamp?.ToString("O") ?? string.Empty));
+
         var envelope = await tenantMetadataStore.RecordTelemetryEnvelopeAsync(new CreateTelemetryEnvelopeRecordRequest(
-            CustomerOrganizationId: credential.CustomerOrganizationId,
-            HarnessSetupProfileId: credential.HarnessSetupProfileId,
-            ScopedIngestionCredentialId: credential.ScopedIngestionCredentialId,
-            ProductUserId: credential.ProductUserId,
-            Harness: credential.AllowedHarness,
-            SchemaVersion: schemaVersion,
-            SignalType: signalType,
-            SourceEventName: null,
-            SourceEventTimestampUtc: null,
-            ConversationIdHash: payloadHash,
-            ModelName: null,
-            ContentPolicyDecision: "metadata_only",
-            RoutingDecision: "metadata_store",
-            MetricStatus: TokenMetricStatus.Unavailable,
-            MetricConfidence: TokenMetricConfidence.Unavailable,
-            DedupeKeyHash: $"{credential.ScopedIngestionCredentialId}:{schemaVersion}:{signalType}:{payloadHash}"));
+            credential.CustomerOrganizationId,
+            credential.HarnessSetupProfileId,
+            credential.ScopedIngestionCredentialId,
+            credential.ProductUserId,
+            ToWireHarness(credential.AllowedHarness),
+            schemaVersion,
+            envelopeSignalType,
+            sourceEventName,
+            sourceEventTimestamp,
+            conversationIdHash,
+            turnIdHash,
+            sourceEventId,
+            TraceIdHash: null,
+            SpanIdHash: null,
+            modelName,
+            harnessVersion,
+            sandboxSetting,
+            approvalSetting,
+            repositoryEvidenceState,
+            "metadata_only",
+            "metadata_only",
+            "not_required",
+            new Dictionary<string, string>
+            {
+                ["result"] = "accepted",
+                ["metadata_store"] = "postgresql",
+                ["diagnostic_store"] = signalType is "logs" or "traces" ? "application_insights" : "not_applicable",
+                ["metrics_store"] = signalType == "metrics" ? "azure_monitor_workspace" : "not_applicable",
+                ["content_capture"] = "metadata_only"
+            },
+            "observed",
+            metricState,
+            ToTokenMetricStatus(metricState),
+            ToTokenMetricConfidence(metricState),
+            "harness_emitted",
+            correlationId,
+            dedupeKeyHash,
+            new Dictionary<string, string>
+            {
+                ["schema_version"] = schemaVersion,
+                ["harness_version"] = harnessVersion ?? "unavailable",
+                ["contract_version"] = SupportedSchemaVersion
+            }));
 
-        var session = await tenantMetadataStore.UpsertAgentSessionAsync(new CreateAgentSessionRecordRequest(
-            CustomerOrganizationId: credential.CustomerOrganizationId,
-            ProductUserId: credential.ProductUserId,
-            HarnessSetupProfileId: credential.HarnessSetupProfileId,
-            Harness: credential.AllowedHarness,
-            ProviderSessionIdHash: payloadHash,
-            StartedAtUtc: envelope.ReceivedAtUtc,
-            EndedAtUtc: null,
-            SessionStatus: AgentSessionStatus.Active,
-            RepositoryEvidenceState: RepositoryEvidenceState.Unavailable,
-            ContentCaptureSummary: ContentCaptureSummary.MetadataOnly,
-            RecommendationStatus: RecommendationStatus.NotStarted,
-            TokenMetricStatus: TokenMetricStatus.Unavailable,
-            TokenMetricConfidence: TokenMetricConfidence.Unavailable));
-
+        var sessions = await tenantMetadataStore.ListAgentSessionsAsync(credential.CustomerOrganizationId);
+        var session = sessions.Single(candidate =>
+            candidate.SourceTelemetryEnvelopeIds.Contains(envelope.TelemetryEnvelopeId, StringComparer.Ordinal));
         var existingObservations = await tenantMetadataStore.ListTokenObservationsAsync(
             credential.CustomerOrganizationId,
             session.AgentSessionId);
 
-        if (existingObservations.Any(observation => observation.SourceTelemetryEnvelopeId == envelope.TelemetryEnvelopeId))
+        if (existingObservations.Any(observation =>
+                StringComparer.Ordinal.Equals(observation.SourceTelemetryEnvelopeId, envelope.TelemetryEnvelopeId)))
         {
             return;
         }
@@ -432,7 +481,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 "malformed_otlp");
         }
 
-        if (!TryCreateMetadataFingerprint(payload, signalType, out var metadataFingerprint))
+        if (!TryCreateMetadataFingerprint(payload, signalType, out _))
         {
             return PayloadValidationResult.Invalid(
                 "Content-bearing OTLP payload cannot be safely classified.",
@@ -440,7 +489,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 "policy_context_missing");
         }
 
-        return PayloadValidationResult.Valid(metadataFingerprint);
+        return PayloadValidationResult.Valid();
     }
 
     private static bool TryCreateMetadataFingerprint(
@@ -958,6 +1007,37 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         };
     }
 
+    private static string ToEnvelopeSignalType(string routeSignalType)
+    {
+        return routeSignalType switch
+        {
+            "logs" => "log",
+            "traces" => "trace",
+            "metrics" => "metric",
+            _ => throw new ArgumentOutOfRangeException(nameof(routeSignalType), routeSignalType, null)
+        };
+    }
+
+    private static TokenMetricStatus ToTokenMetricStatus(string metricState)
+    {
+        return metricState switch
+        {
+            "observed" => TokenMetricStatus.Observed,
+            "unavailable" => TokenMetricStatus.Unavailable,
+            _ => throw new ArgumentOutOfRangeException(nameof(metricState), metricState, null)
+        };
+    }
+
+    private static TokenMetricConfidence ToTokenMetricConfidence(string metricState)
+    {
+        return metricState switch
+        {
+            "observed" => TokenMetricConfidence.Observed,
+            "unavailable" => TokenMetricConfidence.Unavailable,
+            _ => throw new ArgumentOutOfRangeException(nameof(metricState), metricState, null)
+        };
+    }
+
     private static string? ReadBearerSecret(string authorizationHeader)
     {
         if (string.IsNullOrWhiteSpace(authorizationHeader) ||
@@ -974,6 +1054,68 @@ internal static class TokenObservabilityIngestionEndpointExtensions
     private static string ReadHeader(HttpContext httpContext, string name)
     {
         return httpContext.Request.Headers[name].ToString().Trim();
+    }
+
+    private static string? ReadSafeMachineHeader(HttpContext httpContext, string name)
+    {
+        var value = ReadHeader(httpContext, name);
+
+        return value.Length is > 0 and <= 128 &&
+            value.All(static character =>
+                char.IsAsciiLetterOrDigit(character) ||
+                character is '_' or '-' or '.' or ':')
+            ? value
+            : null;
+    }
+
+    private static string? ReadSafeLabelHeader(HttpContext httpContext, string name)
+    {
+        var value = ReadHeader(httpContext, name);
+
+        return value.Length is > 0 and <= 128 &&
+            value.All(static character =>
+                char.IsAsciiLetterOrDigit(character) ||
+                character is '-' or '_' or ':' or '.' or '/')
+            ? value
+            : null;
+    }
+
+    private static DateTimeOffset? ReadTimestampHeader(HttpContext httpContext, string name)
+    {
+        return DateTimeOffset.TryParse(
+            ReadHeader(httpContext, name),
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+            out var timestamp)
+            ? timestamp.ToUniversalTime()
+            : null;
+    }
+
+    private static string ReadKnownStateHeader(
+        HttpContext httpContext,
+        string name,
+        IReadOnlyCollection<string> allowedValues,
+        string defaultValue)
+    {
+        var value = ReadHeader(httpContext, name);
+
+        return allowedValues.Contains(value, StringComparer.Ordinal)
+            ? value
+            : defaultValue;
+    }
+
+    private static string? HashOptionalHeader(HttpContext httpContext, string name)
+    {
+        var value = ReadHeader(httpContext, name);
+
+        return string.IsNullOrWhiteSpace(value)
+            ? null
+            : ComputeSha256Hex(value);
+    }
+
+    private static string ComputeSha256Hex(string value)
+    {
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
     }
 
     private static async Task<byte[]?> ReadBoundedPayloadAsync(Stream body, long maxPayloadBytes)
@@ -1089,22 +1231,20 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         bool IsValid,
         string Title,
         int StatusCode,
-        string Code,
-        string PayloadHash)
+        string Code)
     {
-        public static PayloadValidationResult Valid(string payloadHash)
+        public static PayloadValidationResult Valid()
         {
             return new PayloadValidationResult(
                 true,
                 Title: string.Empty,
                 StatusCodes.Status200OK,
-                Code: string.Empty,
-                payloadHash);
+                Code: string.Empty);
         }
 
         public static PayloadValidationResult Invalid(string title, int statusCode, string code)
         {
-            return new PayloadValidationResult(false, title, statusCode, code, PayloadHash: string.Empty);
+            return new PayloadValidationResult(false, title, statusCode, code);
         }
     }
 

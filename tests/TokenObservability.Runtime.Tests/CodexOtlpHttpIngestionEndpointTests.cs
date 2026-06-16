@@ -98,118 +98,310 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
     }
 
     [Fact]
-    public async Task CodexOtlpEndpointPersistsAcceptedTelemetryWithUnavailableTokenMetrics()
+    public async Task AcceptedCodexTelemetryCreatesNormalizedEnvelopeAndSessionRecord()
     {
         var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
         var seed = await CreateTenantAsync(store);
         var issued = await IssueCredentialAsync(store, seed);
         using var factory = CreateFactory(store);
         using var client = factory.CreateClient();
-        using var request = CreateOtlpRequest("/v1/metrics", issued.Secret);
-        request.Headers.Add("X-Correlation-Id", "codex-ingest-accepted-metrics-001");
+        using var request = CreateOtlpRequest("/v1/logs", issued.Secret);
+        request.Headers.Add("X-Correlation-Id", "codex-session-correlation-001");
+        request.Headers.Add("X-AITO-Conversation-Id", "codex-conversation-001");
+        request.Headers.Add("X-AITO-Turn-Id", "turn-001");
+        request.Headers.Add("X-AITO-Source-Event-Id", "event-001");
+        request.Headers.Add("X-AITO-Source-Event-Name", "codex.conversation_starts");
+        request.Headers.Add("X-AITO-Source-Event-Timestamp", "2026-06-17T11:15:00Z");
+        request.Headers.Add("X-AITO-Model", "gpt-5-codex");
+        request.Headers.Add("X-AITO-Harness-Version", "codex-cli/1.2.3");
+        request.Headers.Add("X-AITO-Sandbox", "workspace-write");
+        request.Headers.Add("X-AITO-Approval-Policy", "on-request");
+        request.Headers.Add("X-AITO-Harness-User", "developer@example.test");
+        request.Headers.Add("X-AITO-Repository-Evidence-State", "observed");
 
         using var response = await client.SendAsync(request);
 
-        response.EnsureSuccessStatusCode();
-
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var envelope = Assert.Single(await store.ListTelemetryEnvelopesAsync(seed.Organization.CustomerOrganizationId));
         Assert.Equal(seed.Organization.CustomerOrganizationId, envelope.CustomerOrganizationId);
+        Assert.Equal(SetupProfileId, envelope.HarnessSetupProfileId);
         Assert.Equal(issued.Credential.ScopedIngestionCredentialId, envelope.ScopedIngestionCredentialId);
         Assert.Equal(issued.Credential.ProductUserId, envelope.ProductUserId);
-        Assert.Equal("metrics", envelope.SignalType);
-        Assert.Equal(TokenMetricStatus.Unavailable, envelope.MetricStatus);
-        Assert.Equal(TokenMetricConfidence.Unavailable, envelope.MetricConfidence);
+        Assert.Equal("codex-cli", envelope.Harness);
+        Assert.Equal(SchemaVersion, envelope.SchemaVersion);
+        Assert.Equal("log", envelope.SignalType);
+        Assert.Equal("codex.conversation_starts", envelope.SourceEventName);
+        Assert.Equal(new DateTimeOffset(2026, 6, 17, 11, 15, 0, TimeSpan.Zero), envelope.SourceEventTimestampUtc);
+        Assert.NotNull(envelope.ConversationIdHash);
+        Assert.NotNull(envelope.TurnIdHash);
+        Assert.Equal("gpt-5-codex", envelope.ModelName);
+        Assert.Equal("codex-cli/1.2.3", envelope.HarnessVersion);
         Assert.Equal("metadata_only", envelope.ContentPolicyDecision);
+        Assert.Equal("metadata_only", envelope.ContentCaptureState);
+        Assert.Equal("not_required", envelope.RedactionState);
+        Assert.Equal("observed", envelope.EvidenceState);
+        Assert.Equal("unavailable", envelope.MetricState);
+        Assert.Equal("harness_emitted", envelope.SourceEvidenceKind);
+        Assert.Equal("codex-session-correlation-001", envelope.CorrelationId);
+        Assert.Equal("accepted", envelope.RoutingDecision["result"]);
+        Assert.Equal("metadata_only", envelope.RoutingDecision["content_capture"]);
+        Assert.Equal(SchemaVersion, envelope.IngestionVersionMetadata["schema_version"]);
+        Assert.Equal("codex-cli/1.2.3", envelope.IngestionVersionMetadata["harness_version"]);
+        Assert.DoesNotContain("codex-conversation-001", envelope.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("developer@example.test", envelope.ToString(), StringComparison.Ordinal);
 
         var session = Assert.Single(await store.ListAgentSessionsAsync(seed.Organization.CustomerOrganizationId));
+        Assert.Equal(seed.Organization.CustomerOrganizationId, session.CustomerOrganizationId);
         Assert.Equal(issued.Credential.ProductUserId, session.ProductUserId);
-        Assert.Equal(TokenMetricStatus.Unavailable, session.TokenMetricStatus);
-        Assert.Equal(TokenMetricConfidence.Unavailable, session.TokenMetricConfidence);
-
-        var observations = await store.ListTokenObservationsAsync(
-            seed.Organization.CustomerOrganizationId,
-            session.AgentSessionId);
-        Assert.Equal(
-            [
-                TokenMetricName.InputTokens,
-                TokenMetricName.OutputTokens,
-                TokenMetricName.CachedInputTokens,
-                TokenMetricName.ReasoningOutputTokens,
-                TokenMetricName.TotalTokens
-            ],
-            observations.Select(observation => observation.MetricName).ToArray());
-        Assert.All(observations, observation =>
-        {
-            Assert.Null(observation.Value);
-            Assert.Equal(TokenMetricStatus.Unavailable, observation.MetricStatus);
-            Assert.Equal(TokenMetricConfidence.Unavailable, observation.MetricConfidence);
-            Assert.Equal(TokenObservationSourceKind.Missing, observation.SourceKind);
-            Assert.Equal(envelope.TelemetryEnvelopeId, observation.SourceTelemetryEnvelopeId);
-        });
+        Assert.Equal(SetupProfileId, session.HarnessSetupProfileId);
+        Assert.Equal("codex-cli", session.Harness);
+        Assert.Equal(envelope.ConversationIdHash, session.ProviderSessionIdHash);
+        Assert.Equal(envelope.SourceEventTimestampUtc, session.StartedAtUtc);
+        Assert.Equal(envelope.SourceEventTimestampUtc, session.EndedAtUtc);
+        Assert.Equal("active", session.SessionStatus);
+        Assert.Equal("workspace-write", session.SandboxSetting);
+        Assert.Equal("on-request", session.ApprovalSetting);
+        Assert.Equal("observed", session.RepositoryEvidenceState);
+        Assert.Equal("metadata_only", session.ContentCaptureSummary);
+        Assert.Equal("not_started", session.RecommendationStatus);
+        Assert.Equal("gpt-5-codex", Assert.Single(session.ModelNames));
+        Assert.Equal(envelope.TelemetryEnvelopeId, Assert.Single(session.SourceTelemetryEnvelopeIds));
     }
 
     [Fact]
-    public async Task CodexOtlpEndpointTreatsDuplicateAcceptedTelemetryAsIdempotent()
+    public async Task TokenObservationStorePreservesMetricStatesNullsAndTrueZeroes()
     {
         var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
         var seed = await CreateTenantAsync(store);
-        var issued = await IssueCredentialAsync(store, seed);
-        using var factory = CreateFactory(store);
-        using var client = factory.CreateClient();
-        using var firstRequest = CreateOtlpRequest("/v1/metrics", issued.Secret);
-        using var secondRequest = CreateOtlpRequest("/v1/metrics", issued.Secret);
-        firstRequest.Headers.Add("X-Correlation-Id", "codex-ingest-accepted-duplicate-001");
-        secondRequest.Headers.Add("X-Correlation-Id", "codex-ingest-accepted-duplicate-001");
+        var productUser = await CreateProductUserAsync(store, seed, "developer-subject");
+        var session = await store.UpsertAgentSessionAsync(new CreateAgentSessionRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            productUser.ProductUserId,
+            SetupProfileId,
+            CodingAgentHarness.CodexCli,
+            ProviderSessionIdHash: null,
+            StartedAtUtc: Now,
+            EndedAtUtc: null,
+            AgentSessionStatus.Active,
+            RepositoryEvidenceState.Unavailable,
+            ContentCaptureSummary.MetadataOnly,
+            RecommendationStatus.NotStarted,
+            TokenMetricStatus.Mixed,
+            TokenMetricConfidence.Estimated));
 
-        using var firstResponse = await client.SendAsync(firstRequest);
-        using var secondResponse = await client.SendAsync(secondRequest);
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            ModelInvocationId: null,
+            TokenMetricName.InputTokens,
+            Value: 0,
+            TokenMetricStatus.Observed,
+            TokenMetricConfidence.Observed,
+            TokenObservationSourceKind.CodexEvent,
+            SourceTelemetryEnvelopeId: null));
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            ModelInvocationId: null,
+            TokenMetricName.OutputTokens,
+            Value: 25,
+            TokenMetricStatus.Estimated,
+            TokenMetricConfidence.Estimated,
+            TokenObservationSourceKind.Estimator,
+            SourceTelemetryEnvelopeId: null));
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            ModelInvocationId: null,
+            TokenMetricName.CachedInputTokens,
+            Value: null,
+            TokenMetricStatus.Unavailable,
+            TokenMetricConfidence.Unavailable,
+            TokenObservationSourceKind.Missing,
+            SourceTelemetryEnvelopeId: null));
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            ModelInvocationId: null,
+            TokenMetricName.ReasoningOutputTokens,
+            Value: null,
+            TokenMetricStatus.NotApplicable,
+            TokenMetricConfidence.Unavailable,
+            TokenObservationSourceKind.Missing,
+            SourceTelemetryEnvelopeId: null));
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            ModelInvocationId: null,
+            TokenMetricName.TotalTokens,
+            Value: 25,
+            TokenMetricStatus.Mixed,
+            TokenMetricConfidence.Estimated,
+            TokenObservationSourceKind.DerivedSummary,
+            SourceTelemetryEnvelopeId: null));
 
-        firstResponse.EnsureSuccessStatusCode();
-        secondResponse.EnsureSuccessStatusCode();
-
-        var envelope = Assert.Single(await store.ListTelemetryEnvelopesAsync(seed.Organization.CustomerOrganizationId));
-        var session = Assert.Single(await store.ListAgentSessionsAsync(seed.Organization.CustomerOrganizationId));
         var observations = await store.ListTokenObservationsAsync(
             seed.Organization.CustomerOrganizationId,
             session.AgentSessionId);
-        Assert.Equal(5, observations.Count);
-        Assert.All(observations, observation => Assert.Equal(envelope.TelemetryEnvelopeId, observation.SourceTelemetryEnvelopeId));
+
+        Assert.Collection(
+            observations,
+            observation =>
+            {
+                Assert.Equal(TokenMetricName.InputTokens, observation.MetricName);
+                Assert.Equal(0, observation.Value);
+                Assert.Equal(TokenMetricStatus.Observed, observation.MetricStatus);
+            },
+            observation =>
+            {
+                Assert.Equal(TokenMetricName.OutputTokens, observation.MetricName);
+                Assert.Equal(TokenMetricStatus.Estimated, observation.MetricStatus);
+            },
+            observation =>
+            {
+                Assert.Equal(TokenMetricName.CachedInputTokens, observation.MetricName);
+                Assert.Null(observation.Value);
+                Assert.Equal(TokenMetricStatus.Unavailable, observation.MetricStatus);
+            },
+            observation =>
+            {
+                Assert.Equal(TokenMetricName.ReasoningOutputTokens, observation.MetricName);
+                Assert.Null(observation.Value);
+                Assert.Equal(TokenMetricStatus.NotApplicable, observation.MetricStatus);
+            },
+            observation =>
+            {
+                Assert.Equal(TokenMetricName.TotalTokens, observation.MetricName);
+                Assert.Equal(TokenMetricStatus.Mixed, observation.MetricStatus);
+            });
+
+        await Assert.ThrowsAsync<ArgumentException>(() => store.RecordTokenObservationAsync(
+            new CreateTokenObservationRecordRequest(
+                seed.Organization.CustomerOrganizationId,
+                session.AgentSessionId,
+                ModelInvocationId: null,
+                TokenMetricName.InputTokens,
+                Value: 1,
+                TokenMetricStatus.Unavailable,
+                TokenMetricConfidence.Unavailable,
+                TokenObservationSourceKind.Missing,
+                SourceTelemetryEnvelopeId: null)));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.RecordTokenObservationAsync(
+            new CreateTokenObservationRecordRequest(
+                seed.Organization.CustomerOrganizationId,
+                session.AgentSessionId,
+                ModelInvocationId: null,
+                TokenMetricName.InputTokens,
+                Value: 0,
+                TokenMetricStatus.Estimated,
+                TokenMetricConfidence.Estimated,
+                TokenObservationSourceKind.Estimator,
+                SourceTelemetryEnvelopeId: null)));
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task CodexOtlpEndpointDedupeDoesNotDependOnCallerSuppliedCorrelationId(bool useUnsafeCorrelationId)
+    [Fact]
+    public async Task TelemetryEnvelopeDedupeIsScopedPerCustomerOrganization()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var contoso = await CreateTenantAsync(store);
+        var fabrikam = await CreateTenantAsync(store, slug: "fabrikam", externalTenantId: "fabrikam-tenant");
+        var contosoCredential = await IssueCredentialAsync(store, contoso);
+        var fabrikamCredential = await IssueCredentialAsync(store, fabrikam);
+        var sharedDedupeHash = new string('a', 64);
+
+        var contosoEnvelope = await RecordAcceptedEnvelopeAsync(
+            store,
+            contosoCredential.Credential,
+            sharedDedupeHash,
+            "contoso-correlation-001");
+        var fabrikamEnvelope = await RecordAcceptedEnvelopeAsync(
+            store,
+            fabrikamCredential.Credential,
+            sharedDedupeHash,
+            "fabrikam-correlation-001");
+
+        Assert.NotEqual(contosoEnvelope.TelemetryEnvelopeId, fabrikamEnvelope.TelemetryEnvelopeId);
+        Assert.Equal(contoso.Organization.CustomerOrganizationId, contosoEnvelope.CustomerOrganizationId);
+        Assert.Equal(fabrikam.Organization.CustomerOrganizationId, fabrikamEnvelope.CustomerOrganizationId);
+        Assert.Same(contosoEnvelope, Assert.Single(await store.ListTelemetryEnvelopesAsync(contoso.Organization.CustomerOrganizationId)));
+        Assert.Same(fabrikamEnvelope, Assert.Single(await store.ListTelemetryEnvelopesAsync(fabrikam.Organization.CustomerOrganizationId)));
+    }
+
+    [Fact]
+    public async Task AcceptedCodexTelemetryUpdatesExistingSessionAndDeduplicatesEnvelope()
     {
         var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
         var seed = await CreateTenantAsync(store);
         var issued = await IssueCredentialAsync(store, seed);
         using var factory = CreateFactory(store);
         using var client = factory.CreateClient();
-        using var firstRequest = CreateOtlpRequest("/v1/metrics", issued.Secret);
-        using var secondRequest = CreateOtlpRequest("/v1/metrics", issued.Secret);
-        firstRequest.Headers.Remove("X-Correlation-Id");
-        secondRequest.Headers.Remove("X-Correlation-Id");
 
-        if (useUnsafeCorrelationId)
+        using (var first = CreateOtlpRequest("/v1/logs", issued.Secret))
         {
-            firstRequest.Headers.Add("X-Correlation-Id", "unsafe correlation id with spaces");
-            secondRequest.Headers.Add("X-Correlation-Id", "unsafe correlation id with spaces");
+            AddSessionHeaders(first, "event-001", "2026-06-17T11:15:00Z", "gpt-5-codex");
+            using var firstResponse = await client.SendAsync(first);
+            Assert.Equal(HttpStatusCode.OK, firstResponse.StatusCode);
         }
 
-        using var firstResponse = await client.SendAsync(firstRequest);
-        using var secondResponse = await client.SendAsync(secondRequest);
+        using (var duplicate = CreateOtlpRequest("/v1/logs", issued.Secret))
+        {
+            AddSessionHeaders(duplicate, "event-001", "2026-06-17T11:15:00Z", "gpt-5-codex");
+            using var duplicateResponse = await client.SendAsync(duplicate);
+            Assert.Equal(HttpStatusCode.OK, duplicateResponse.StatusCode);
+        }
 
-        firstResponse.EnsureSuccessStatusCode();
-        secondResponse.EnsureSuccessStatusCode();
+        using (var update = CreateOtlpRequest("/v1/logs", issued.Secret))
+        {
+            AddSessionHeaders(update, "event-002", "2026-06-17T11:25:00Z", "gpt-5.1-codex");
+            using var updateResponse = await client.SendAsync(update);
+            Assert.Equal(HttpStatusCode.OK, updateResponse.StatusCode);
+        }
+
+        var envelopes = await store.ListTelemetryEnvelopesAsync(seed.Organization.CustomerOrganizationId);
+        var session = Assert.Single(await store.ListAgentSessionsAsync(seed.Organization.CustomerOrganizationId));
+
+        Assert.Equal(2, envelopes.Count);
+        Assert.Equal(new DateTimeOffset(2026, 6, 17, 11, 15, 0, TimeSpan.Zero), session.StartedAtUtc);
+        Assert.Equal(new DateTimeOffset(2026, 6, 17, 11, 25, 0, TimeSpan.Zero), session.EndedAtUtc);
+        Assert.Equal(["gpt-5-codex", "gpt-5.1-codex"], session.ModelNames);
+        Assert.Equal(envelopes.Select(envelope => envelope.TelemetryEnvelopeId).Order(StringComparer.Ordinal), session.SourceTelemetryEnvelopeIds.Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public async Task AcceptedCodexTelemetryDeduplicatesRetryWithoutSourceEventId()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store);
+        var issued = await IssueCredentialAsync(store, seed);
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+
+        using (var first = CreateOtlpRequest("/v1/logs", issued.Secret))
+        {
+            AddSessionHeaders(first, "event-removed", "2026-06-17T11:15:00Z", "gpt-5-codex");
+            first.Headers.Remove("X-AITO-Source-Event-Id");
+            first.Headers.Remove("X-Correlation-Id");
+            first.Headers.Add("X-Correlation-Id", "retry-correlation-001");
+            using var firstResponse = await client.SendAsync(first);
+            Assert.Equal(HttpStatusCode.OK, firstResponse.StatusCode);
+        }
+
+        using (var retry = CreateOtlpRequest("/v1/logs", issued.Secret))
+        {
+            AddSessionHeaders(retry, "event-removed", "2026-06-17T11:15:00Z", "gpt-5-codex");
+            retry.Headers.Remove("X-AITO-Source-Event-Id");
+            retry.Headers.Remove("X-Correlation-Id");
+            retry.Headers.Add("X-Correlation-Id", "retry-correlation-002");
+            using var retryResponse = await client.SendAsync(retry);
+            Assert.Equal(HttpStatusCode.OK, retryResponse.StatusCode);
+        }
 
         var envelope = Assert.Single(await store.ListTelemetryEnvelopesAsync(seed.Organization.CustomerOrganizationId));
         var session = Assert.Single(await store.ListAgentSessionsAsync(seed.Organization.CustomerOrganizationId));
-        var observations = await store.ListTokenObservationsAsync(
-            seed.Organization.CustomerOrganizationId,
-            session.AgentSessionId);
-        Assert.Equal(5, observations.Count);
-        Assert.All(observations, observation => Assert.Equal(envelope.TelemetryEnvelopeId, observation.SourceTelemetryEnvelopeId));
+
+        Assert.Null(envelope.SourceEventId);
+        Assert.Equal("retry-correlation-001", envelope.CorrelationId);
+        Assert.Equal(envelope.TelemetryEnvelopeId, Assert.Single(session.SourceTelemetryEnvelopeIds));
     }
 
     [Fact]
@@ -236,199 +428,122 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
     }
 
     [Fact]
-    public async Task CodexOtlpEndpointDoesNotCollapseDistinctSafeMetadataPayloadsWithSameShape()
+    public async Task AcceptedCodexTelemetryWithoutEventMetadataCreatesDistinctEnvelopesInOnePartialSession()
     {
         var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
         var seed = await CreateTenantAsync(store);
         var issued = await IssueCredentialAsync(store, seed);
         using var factory = CreateFactory(store);
         using var client = factory.CreateClient();
-        using var firstRequest = CreateOtlpRequest("/v1/metrics", issued.Secret, CreateMetricPayload("cost"));
-        using var secondRequest = CreateOtlpRequest("/v1/metrics", issued.Secret, CreateMetricPayload("burn"));
-        firstRequest.Headers.Remove("X-Correlation-Id");
-        secondRequest.Headers.Remove("X-Correlation-Id");
 
-        using var firstResponse = await client.SendAsync(firstRequest);
-        using var secondResponse = await client.SendAsync(secondRequest);
+        using (var first = CreateOtlpRequest("/v1/logs", issued.Secret))
+        {
+            first.Headers.Add("X-Correlation-Id", "minimal-correlation-001");
+            using var firstResponse = await client.SendAsync(first);
+            Assert.Equal(HttpStatusCode.OK, firstResponse.StatusCode);
+        }
 
-        firstResponse.EnsureSuccessStatusCode();
-        secondResponse.EnsureSuccessStatusCode();
+        using (var second = CreateOtlpRequest("/v1/logs", issued.Secret))
+        {
+            second.Headers.Add("X-Correlation-Id", "minimal-correlation-002");
+            using var secondResponse = await client.SendAsync(second);
+            Assert.Equal(HttpStatusCode.OK, secondResponse.StatusCode);
+        }
 
-        Assert.Equal(2, (await store.ListTelemetryEnvelopesAsync(seed.Organization.CustomerOrganizationId)).Count);
-        Assert.Equal(2, (await store.ListAgentSessionsAsync(seed.Organization.CustomerOrganizationId)).Count);
+        var envelopes = await store.ListTelemetryEnvelopesAsync(seed.Organization.CustomerOrganizationId);
+        var session = Assert.Single(await store.ListAgentSessionsAsync(seed.Organization.CustomerOrganizationId));
+
+        Assert.Equal(2, envelopes.Count);
+        Assert.All(envelopes, envelope =>
+        {
+            Assert.Equal("otlp.log.export", envelope.SourceEventName);
+            Assert.Null(envelope.SourceEventId);
+            Assert.Null(envelope.SourceEventTimestampUtc);
+            Assert.Null(envelope.ConversationIdHash);
+        });
+        Assert.Null(session.ProviderSessionIdHash);
+        Assert.Equal(envelopes.Select(envelope => envelope.TelemetryEnvelopeId).Order(StringComparer.Ordinal), session.SourceTelemetryEnvelopeIds.Order(StringComparer.Ordinal));
     }
 
     [Fact]
-    public async Task CodexOtlpEndpointDoesNotCollapseDistinctSafeMetricDataWithSameLength()
+    public async Task AcceptedCodexTelemetryWithoutEventMetadataDeduplicatesWithExplicitSafeDedupeKey()
     {
         var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
         var seed = await CreateTenantAsync(store);
         var issued = await IssueCredentialAsync(store, seed);
         using var factory = CreateFactory(store);
         using var client = factory.CreateClient();
-        using var firstRequest = CreateOtlpRequest("/v1/metrics", issued.Secret, CreateMetricPayloadWithIntData("cost", value: 7));
-        using var secondRequest = CreateOtlpRequest("/v1/metrics", issued.Secret, CreateMetricPayloadWithIntData("cost", value: 8));
-        firstRequest.Headers.Remove("X-Correlation-Id");
-        secondRequest.Headers.Remove("X-Correlation-Id");
 
-        using var firstResponse = await client.SendAsync(firstRequest);
-        using var secondResponse = await client.SendAsync(secondRequest);
+        using (var first = CreateOtlpRequest("/v1/logs", issued.Secret))
+        {
+            first.Headers.Add("X-Correlation-Id", "minimal-retry-correlation-001");
+            first.Headers.Add("X-AITO-Dedupe-Key", "codex-retry-key-001");
+            using var firstResponse = await client.SendAsync(first);
+            Assert.Equal(HttpStatusCode.OK, firstResponse.StatusCode);
+        }
 
-        firstResponse.EnsureSuccessStatusCode();
-        secondResponse.EnsureSuccessStatusCode();
+        using (var retry = CreateOtlpRequest("/v1/logs", issued.Secret))
+        {
+            retry.Headers.Add("X-Correlation-Id", "minimal-retry-correlation-002");
+            retry.Headers.Add("X-AITO-Dedupe-Key", "codex-retry-key-001");
+            using var retryResponse = await client.SendAsync(retry);
+            Assert.Equal(HttpStatusCode.OK, retryResponse.StatusCode);
+        }
 
-        Assert.Equal(2, (await store.ListTelemetryEnvelopesAsync(seed.Organization.CustomerOrganizationId)).Count);
-        Assert.Equal(2, (await store.ListAgentSessionsAsync(seed.Organization.CustomerOrganizationId)).Count);
+        var envelope = Assert.Single(await store.ListTelemetryEnvelopesAsync(seed.Organization.CustomerOrganizationId));
+        var session = Assert.Single(await store.ListAgentSessionsAsync(seed.Organization.CustomerOrganizationId));
+
+        Assert.Null(envelope.SourceEventId);
+        Assert.Null(envelope.SourceEventTimestampUtc);
+        Assert.Equal("minimal-retry-correlation-001", envelope.CorrelationId);
+        Assert.Equal(envelope.TelemetryEnvelopeId, Assert.Single(session.SourceTelemetryEnvelopeIds));
     }
 
     [Fact]
-    public async Task TokenObservationStorePreservesMetricStatesNullsAndTrueZeroes()
+    public async Task RejectedWrongTenantTelemetryDoesNotCreateAcceptedEnvelopeOrSession()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var contoso = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        await CreateTenantAsync(store, "fabrikam", "fabrikam-tenant");
+        var issued = await IssueCredentialAsync(store, contoso);
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+        using var request = CreateOtlpRequest("/v1/logs", issued.Secret);
+        request.Headers.Add("X-Customer-Organization-Slug", "fabrikam");
+        AddSessionHeaders(request, "event-001", "2026-06-17T11:15:00Z", "gpt-5-codex");
+
+        using var response = await client.SendAsync(request);
+
+        await AssertOtlpRejectionAsync(response, HttpStatusCode.Forbidden, "tenant_context_mismatch");
+        Assert.Empty(await store.ListTelemetryEnvelopesAsync(contoso.Organization.CustomerOrganizationId));
+        Assert.Empty(await store.ListAgentSessionsAsync(contoso.Organization.CustomerOrganizationId));
+    }
+
+    [Fact]
+    public async Task AcceptedCodexTelemetryDoesNotPersistRawContentHeaders()
     {
         var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
         var seed = await CreateTenantAsync(store);
         var issued = await IssueCredentialAsync(store, seed);
-        var envelope = await store.RecordTelemetryEnvelopeAsync(new CreateTelemetryEnvelopeRecordRequest(
-            CustomerOrganizationId: seed.Organization.CustomerOrganizationId,
-            HarnessSetupProfileId: issued.Credential.HarnessSetupProfileId,
-            ScopedIngestionCredentialId: issued.Credential.ScopedIngestionCredentialId,
-            ProductUserId: issued.Credential.ProductUserId,
-            Harness: CodingAgentHarness.CodexCli,
-            SchemaVersion,
-            SignalType: "metrics",
-            SourceEventName: "codex.api_request",
-            SourceEventTimestampUtc: Now,
-            ConversationIdHash: "conversation-001",
-            ModelName: "gpt-5",
-            ContentPolicyDecision: "metadata_only",
-            RoutingDecision: "metadata_store",
-            MetricStatus: TokenMetricStatus.Observed,
-            MetricConfidence: TokenMetricConfidence.Observed,
-            DedupeKeyHash: "dedupe-001"));
-        var session = await store.UpsertAgentSessionAsync(new CreateAgentSessionRecordRequest(
-            CustomerOrganizationId: seed.Organization.CustomerOrganizationId,
-            ProductUserId: issued.Credential.ProductUserId,
-            HarnessSetupProfileId: issued.Credential.HarnessSetupProfileId,
-            Harness: CodingAgentHarness.CodexCli,
-            ProviderSessionIdHash: "conversation-001",
-            StartedAtUtc: Now,
-            EndedAtUtc: null,
-            SessionStatus: AgentSessionStatus.Active,
-            RepositoryEvidenceState: RepositoryEvidenceState.Unavailable,
-            ContentCaptureSummary: ContentCaptureSummary.MetadataOnly,
-            RecommendationStatus: RecommendationStatus.NotStarted,
-            TokenMetricStatus: TokenMetricStatus.Mixed,
-            TokenMetricConfidence: TokenMetricConfidence.Estimated));
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+        using var request = CreateOtlpRequest("/v1/logs", issued.Secret);
+        AddSessionHeaders(request, "event-001", "2026-06-17T11:15:00Z", "gpt-5-codex");
+        request.Headers.Add("X-AITO-Raw-Prompt", "please print the secret");
+        request.Headers.Add("X-AITO-Command-Output", "secret command output");
+        request.Headers.Add("X-AITO-Tool-Result", "tool result with file content");
 
-        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
-            seed.Organization.CustomerOrganizationId,
-            session.AgentSessionId,
-            ModelInvocationId: null,
-            TokenMetricName.InputTokens,
-            Value: 0,
-            TokenMetricStatus.Observed,
-            TokenMetricConfidence.Observed,
-            TokenObservationSourceKind.OtlpMetric,
-            envelope.TelemetryEnvelopeId));
-        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
-            seed.Organization.CustomerOrganizationId,
-            session.AgentSessionId,
-            ModelInvocationId: null,
-            TokenMetricName.OutputTokens,
-            Value: 7,
-            TokenMetricStatus.Estimated,
-            TokenMetricConfidence.Estimated,
-            TokenObservationSourceKind.Estimator,
-            envelope.TelemetryEnvelopeId));
-        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
-            seed.Organization.CustomerOrganizationId,
-            session.AgentSessionId,
-            ModelInvocationId: null,
-            TokenMetricName.CachedInputTokens,
-            Value: null,
-            TokenMetricStatus.Unavailable,
-            TokenMetricConfidence.Unavailable,
-            TokenObservationSourceKind.Missing,
-            envelope.TelemetryEnvelopeId));
-        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
-            seed.Organization.CustomerOrganizationId,
-            session.AgentSessionId,
-            ModelInvocationId: null,
-            TokenMetricName.ReasoningOutputTokens,
-            Value: null,
-            TokenMetricStatus.NotApplicable,
-            TokenMetricConfidence.Unavailable,
-            TokenObservationSourceKind.Missing,
-            envelope.TelemetryEnvelopeId));
-        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
-            seed.Organization.CustomerOrganizationId,
-            session.AgentSessionId,
-            ModelInvocationId: null,
-            TokenMetricName.TotalTokens,
-            Value: 7,
-            TokenMetricStatus.Mixed,
-            TokenMetricConfidence.Estimated,
-            TokenObservationSourceKind.DerivedSummary,
-            envelope.TelemetryEnvelopeId));
+        using var response = await client.SendAsync(request);
 
-        var observations = await store.ListTokenObservationsAsync(
-            seed.Organization.CustomerOrganizationId,
-            session.AgentSessionId);
-
-        Assert.Collection(
-            observations,
-            observation =>
-            {
-                Assert.Equal(TokenMetricName.InputTokens, observation.MetricName);
-                Assert.Equal(0, observation.Value);
-                Assert.Equal(TokenMetricStatus.Observed, observation.MetricStatus);
-            },
-            observation =>
-            {
-                Assert.Equal(TokenMetricName.OutputTokens, observation.MetricName);
-                Assert.Equal(7, observation.Value);
-                Assert.Equal(TokenMetricStatus.Estimated, observation.MetricStatus);
-            },
-            observation =>
-            {
-                Assert.Equal(TokenMetricName.CachedInputTokens, observation.MetricName);
-                Assert.Null(observation.Value);
-                Assert.Equal(TokenMetricStatus.Unavailable, observation.MetricStatus);
-            },
-            observation =>
-            {
-                Assert.Equal(TokenMetricName.ReasoningOutputTokens, observation.MetricName);
-                Assert.Null(observation.Value);
-                Assert.Equal(TokenMetricStatus.NotApplicable, observation.MetricStatus);
-            },
-            observation =>
-            {
-                Assert.Equal(TokenMetricName.TotalTokens, observation.MetricName);
-                Assert.Equal(7, observation.Value);
-                Assert.Equal(TokenMetricStatus.Mixed, observation.MetricStatus);
-            });
-
-        await Assert.ThrowsAsync<ArgumentException>(() => store.RecordTokenObservationAsync(
-            new CreateTokenObservationRecordRequest(
-                seed.Organization.CustomerOrganizationId,
-                session.AgentSessionId,
-                ModelInvocationId: null,
-                TokenMetricName.CachedInputTokens,
-                Value: 1,
-                TokenMetricStatus.Unavailable,
-                TokenMetricConfidence.Unavailable,
-                TokenObservationSourceKind.Missing,
-                envelope.TelemetryEnvelopeId)));
-        await Assert.ThrowsAsync<ArgumentException>(() => store.RecordTokenObservationAsync(
-            new CreateTokenObservationRecordRequest(
-                seed.Organization.CustomerOrganizationId,
-                session.AgentSessionId,
-                ModelInvocationId: null,
-                TokenMetricName.CachedInputTokens,
-                Value: 0,
-                TokenMetricStatus.Estimated,
-                TokenMetricConfidence.Estimated,
-                TokenObservationSourceKind.Estimator,
-                envelope.TelemetryEnvelopeId)));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var envelope = Assert.Single(await store.ListTelemetryEnvelopesAsync(seed.Organization.CustomerOrganizationId));
+        var session = Assert.Single(await store.ListAgentSessionsAsync(seed.Organization.CustomerOrganizationId));
+        Assert.DoesNotContain("please print the secret", envelope.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("secret command output", envelope.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("tool result with file content", envelope.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("please print the secret", session.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("secret command output", session.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("tool result with file content", session.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -1102,11 +1217,11 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
 
     private static byte[] CreateLogPayloadWithBody(string body)
     {
-        using var anyValue = new MemoryStream();
-        WriteLengthDelimitedField(anyValue, fieldNumber: 1, Encoding.UTF8.GetBytes(body));
-
         using var logRecord = new MemoryStream();
         WriteLengthDelimitedField(logRecord, fieldNumber: 3, Encoding.UTF8.GetBytes("info"));
+
+        using var anyValue = new MemoryStream();
+        WriteLengthDelimitedField(anyValue, fieldNumber: 1, Encoding.UTF8.GetBytes(body));
         WriteLengthDelimitedField(logRecord, fieldNumber: 5, anyValue.ToArray());
 
         using var scopeLogs = new MemoryStream();
@@ -1115,55 +1230,10 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
         using var resourceLogs = new MemoryStream();
         WriteLengthDelimitedField(resourceLogs, fieldNumber: 2, scopeLogs.ToArray());
 
-        using var exportRequest = new MemoryStream();
-        WriteLengthDelimitedField(exportRequest, fieldNumber: 1, resourceLogs.ToArray());
-        return exportRequest.ToArray();
-    }
+        using var export = new MemoryStream();
+        WriteLengthDelimitedField(export, fieldNumber: 1, resourceLogs.ToArray());
 
-    private static byte[] CreateMetricPayload(string metricName)
-    {
-        using var metric = new MemoryStream();
-        WriteLengthDelimitedField(metric, fieldNumber: 1, Encoding.UTF8.GetBytes(metricName));
-        WriteLengthDelimitedField(metric, fieldNumber: 5, []);
-
-        using var scopeMetrics = new MemoryStream();
-        WriteLengthDelimitedField(scopeMetrics, fieldNumber: 2, metric.ToArray());
-
-        using var resourceMetrics = new MemoryStream();
-        WriteLengthDelimitedField(resourceMetrics, fieldNumber: 2, scopeMetrics.ToArray());
-
-        using var exportRequest = new MemoryStream();
-        WriteLengthDelimitedField(exportRequest, fieldNumber: 1, resourceMetrics.ToArray());
-        return exportRequest.ToArray();
-    }
-
-    private static byte[] CreateMetricPayloadWithIntData(string metricName, uint value)
-    {
-        using var numberDataPoint = new MemoryStream();
-        WriteVarintField(numberDataPoint, fieldNumber: 6, value);
-
-        using var sum = new MemoryStream();
-        WriteLengthDelimitedField(sum, fieldNumber: 1, numberDataPoint.ToArray());
-
-        using var metric = new MemoryStream();
-        WriteLengthDelimitedField(metric, fieldNumber: 1, Encoding.UTF8.GetBytes(metricName));
-        WriteLengthDelimitedField(metric, fieldNumber: 5, sum.ToArray());
-
-        using var scopeMetrics = new MemoryStream();
-        WriteLengthDelimitedField(scopeMetrics, fieldNumber: 2, metric.ToArray());
-
-        using var resourceMetrics = new MemoryStream();
-        WriteLengthDelimitedField(resourceMetrics, fieldNumber: 2, scopeMetrics.ToArray());
-
-        using var exportRequest = new MemoryStream();
-        WriteLengthDelimitedField(exportRequest, fieldNumber: 1, resourceMetrics.ToArray());
-        return exportRequest.ToArray();
-    }
-
-    private static void WriteVarintField(Stream stream, int fieldNumber, uint value)
-    {
-        WriteVarint(stream, (uint)(fieldNumber << 3));
-        WriteVarint(stream, value);
+        return export.ToArray();
     }
 
     private static void WriteLengthDelimitedField(Stream stream, int fieldNumber, byte[] value)
@@ -1182,6 +1252,24 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
         }
 
         stream.WriteByte((byte)value);
+    }
+
+    private static void AddSessionHeaders(
+        HttpRequestMessage request,
+        string sourceEventId,
+        string timestamp,
+        string model)
+    {
+        request.Headers.Add("X-Correlation-Id", "codex-session-correlation-001");
+        request.Headers.Add("X-AITO-Conversation-Id", "codex-conversation-001");
+        request.Headers.Add("X-AITO-Turn-Id", "turn-001");
+        request.Headers.Add("X-AITO-Source-Event-Id", sourceEventId);
+        request.Headers.Add("X-AITO-Source-Event-Name", "codex.api_request");
+        request.Headers.Add("X-AITO-Source-Event-Timestamp", timestamp);
+        request.Headers.Add("X-AITO-Model", model);
+        request.Headers.Add("X-AITO-Harness-Version", "codex-cli/1.2.3");
+        request.Headers.Add("X-AITO-Sandbox", "workspace-write");
+        request.Headers.Add("X-AITO-Approval-Policy", "on-request");
     }
 
     private static async Task<IssuedScopedIngestionCredential> IssueCredentialAsync(
@@ -1272,6 +1360,58 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
                 ExternalSubjectId: externalSubjectId,
                 DisplayLabel: externalSubjectId,
                 Email: $"{externalSubjectId}@example.test"));
+    }
+
+    private static Task<TelemetryEnvelopeRecord> RecordAcceptedEnvelopeAsync(
+        InMemoryTenantMetadataStore store,
+        ScopedIngestionCredential credential,
+        string dedupeKeyHash,
+        string correlationId)
+    {
+        return store.RecordTelemetryEnvelopeAsync(new CreateTelemetryEnvelopeRecordRequest(
+            credential.CustomerOrganizationId,
+            credential.HarnessSetupProfileId,
+            credential.ScopedIngestionCredentialId,
+            credential.ProductUserId,
+            "codex-cli",
+            SchemaVersion,
+            "log",
+            "codex.api_request",
+            SourceEventTimestampUtc: Now,
+            ConversationIdHash: null,
+            TurnIdHash: null,
+            SourceEventId: null,
+            TraceIdHash: null,
+            SpanIdHash: null,
+            ModelName: null,
+            HarnessVersion: null,
+            SandboxSetting: null,
+            ApprovalSetting: null,
+            RepositoryEvidenceState: "unavailable",
+            ContentPolicyDecision: "metadata_only",
+            ContentCaptureState: "metadata_only",
+            RedactionState: "not_required",
+            RoutingDecision: new Dictionary<string, string>
+            {
+                ["result"] = "accepted",
+                ["metadata_store"] = "postgresql",
+                ["diagnostic_store"] = "application_insights",
+                ["metrics_store"] = "not_applicable",
+                ["content_capture"] = "metadata_only"
+            },
+            EvidenceState: "observed",
+            MetricState: "unavailable",
+            TokenMetricStatus.Unavailable,
+            TokenMetricConfidence.Unavailable,
+            SourceEvidenceKind: "harness_emitted",
+            correlationId,
+            dedupeKeyHash,
+            IngestionVersionMetadata: new Dictionary<string, string>
+            {
+                ["schema_version"] = SchemaVersion,
+                ["harness_version"] = "unavailable",
+                ["contract_version"] = SchemaVersion
+            }));
     }
 
     private static async Task AssertOtlpRejectionAsync(
