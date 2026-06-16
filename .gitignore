@@ -54,3 +54,6 @@ web/token-observability-dashboard/tsconfig.tsbuildinfo
 
 # Local telemetry captures and scratch data
 .local/
+
+# Transient Code Reviewer output
+Comments.md

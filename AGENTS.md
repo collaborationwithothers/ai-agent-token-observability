@@ -90,6 +90,31 @@ The reviewer must write findings to `Comments.md` only. `Comments.md` is transie
 
 If the reviewer reports `CHANGES_REQUESTED`, either fix the findings and rerun validation, or explicitly document why a finding is not accepted before proceeding.
 
+### Ready-For-Agent Issue Workflow
+
+When the user asks to work the next issue, implement a ready-for-agent issue, review a worktree, or create a PR for issue work, use the repo-local skill `.agents/skills/review-worktree-issue-pr/SKILL.md`.
+
+Before changing code, produce an Issue Start Packet and use it as the working checklist:
+
+- Current repository path.
+- Issue number, title, labels, URL, and acceptance criteria from `gh issue view`.
+- Active worktree from `git worktree list --porcelain`.
+- Branch and worktree state from `git status --short --branch`.
+- Diff scope from `git diff --stat HEAD`.
+- Untracked implementation files from `git ls-files --others --exclude-standard`.
+- Acceptance matrix: criterion, implementation file, test evidence, and docs or schema evidence.
+- Focused validation commands for the changed surface.
+
+Use `scripts/issue-start.sh ISSUE_NUMBER` to generate the packet when an issue number is known. Do not spawn Code Reviewer until the Issue Start Packet exists.
+
+### Subagent Budget
+
+Use subagents only for parallel review or independent research. Do not use implementation subagents for sequential issue work unless the user explicitly asks for them.
+
+If a subagent wait or close attempt fails once, stop waiting on that subagent and continue with verified local evidence.
+
+For Code Reviewer, request one full review after focused validation. If it reports `CHANGES_REQUESTED`, fix the findings, rerun validation, and request one targeted rereview using the prior findings ledger.
+
 ### Review Efficiency
 
 Before running Code Reviewer:
@@ -105,6 +130,17 @@ When Code Reviewer reports `CHANGES_REQUESTED`:
 - Rerun validation before requesting re-review.
 - In the re-review prompt, include the prior findings ledger and ask the reviewer to verify the fixes plus regressions in touched files.
 - Within the single allowed rereview pass, use a full-diff rereview only when the fix changes architecture, security, privacy, tenant-boundary behavior, persistence, Terraform deployment behavior, or product authorization. Otherwise restrict rereview to prior `Must Fix` findings, the fix delta, and direct regressions in touched files.
+
+### PR Gate
+
+Before creating or updating a PR for implementation work:
+
+- `Comments.md` must be untracked or ignored, and must not be staged.
+- Run `scripts/validate-focused.sh PROFILE` for the changed surface before the first review.
+- Run `scripts/validate-pr.sh` before PR creation unless the change is documentation-only and the issue acceptance criteria do not require build/test evidence.
+- Code Reviewer must report `APPROVE`, or any remaining finding must be explicitly rejected with a defensible reason.
+- The PR body must close only the intended issue or issues.
+- After `gh pr create`, run `gh pr view PR_NUMBER --json closingIssuesReferences` and verify the closing references.
 
 ## Implementation Rules
 
