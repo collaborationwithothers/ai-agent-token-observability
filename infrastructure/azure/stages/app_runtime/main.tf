@@ -152,6 +152,55 @@ resource "azurerm_container_app" "services" {
   }
 }
 
+module "container_app_jobs" {
+  source   = "../../modules/container_app_job"
+  for_each = local.container_app_jobs
+
+  name                                  = each.value.name
+  resource_group_name                   = azurerm_resource_group.app_runtime.name
+  location                              = azurerm_resource_group.app_runtime.location
+  container_app_environment_resource_id = azurerm_container_app_environment.this.id
+  workload_profile_name                 = "Consumption"
+  tags                                  = local.common_tags
+
+  managed_identities = {
+    system_assigned = true
+  }
+
+  registries                 = local.container_app_job_registries
+  key_vault_secrets          = lookup(local.container_app_job_key_vault_secrets, each.key, [])
+  replica_retry_limit        = each.value.retry
+  replica_timeout_in_seconds = each.value.timeout
+  trigger_config             = each.value.trigger
+
+  template = {
+    min_replicas = 0
+    max_replicas = each.value.max_replicas
+    container = {
+      name    = "product-jobs"
+      image   = var.shared_jobs_image
+      cpu     = each.value.cpu
+      memory  = each.value.memory
+      command = ["dotnet", "TokenObservability.Jobs.dll"]
+      args    = [each.value.command]
+      env = concat(
+        [
+          for name, value in local.container_app_job_environment[each.key] : {
+            name  = name
+            value = value
+          }
+        ],
+        [
+          for name, secret_name in lookup(var.container_app_job_secret_names, each.key, {}) : {
+            name        = name
+            secret_name = secret_name
+          }
+        ]
+      )
+    }
+  }
+}
+
 resource "azurerm_monitor_diagnostic_setting" "container_apps" {
   for_each = local.diagnostic_settings_enabled ? local.container_app_diagnostic_targets : {}
 

@@ -1,14 +1,14 @@
 # Azure Terraform Skeleton
 
-This directory contains the Terraform stage skeleton for the Azure Production MVP.
+This directory contains the Terraform stages for the Azure Production MVP.
 
-No Azure resources are created by this skeleton issue. Resource implementation issues must add resources behind local wrapper modules and follow this order:
+Resource implementation issues must add resources behind local wrapper modules and follow this order:
 
 1. Azure Verified Modules (AVM) through a local wrapper module.
 2. AzureRM resources when no suitable AVM exists.
 3. AzAPI only when AzureRM cannot model the required feature.
 
-The first skeleton intentionally contains only stage contracts, inactive backend examples, providers, variables, locals, and outputs so validation can run without Azure deployment or remote state access.
+Stages keep inactive backend examples so validation can run without Azure deployment or remote state access.
 
 ## Stage Order
 
