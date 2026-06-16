@@ -2,10 +2,13 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
+using System.Diagnostics;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging.Abstractions;
 using TokenObservability.Domain.Authorization;
 using TokenObservability.Domain.Ingestion;
 using TokenObservability.Domain.Tenancy;
@@ -166,6 +169,192 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
         Assert.Equal("not_started", session.RecommendationStatus);
         Assert.Equal("gpt-5-codex", Assert.Single(session.ModelNames));
         Assert.Equal(envelope.TelemetryEnvelopeId, Assert.Single(session.SourceTelemetryEnvelopeIds));
+    }
+
+    [Theory]
+    [InlineData("/v1/logs", "log")]
+    [InlineData("/v1/traces", "trace")]
+    public async Task AcceptedCodexTelemetryRoutesSafeDiagnosticEventWithAggregateCorrelation(
+        string path,
+        string expectedSignalType)
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var diagnostics = new RecordingIngestionDiagnosticSink();
+        var seed = await CreateTenantAsync(store);
+        var issued = await IssueCredentialAsync(store, seed);
+        using var factory = CreateFactory(store, diagnostics);
+        using var client = factory.CreateClient();
+        using var request = CreateOtlpRequest(path, issued.Secret);
+        AddSessionHeaders(request, "event-diagnostic-001", "2026-06-17T11:15:00Z", "gpt-5-codex");
+        request.Headers.Remove("X-Correlation-Id");
+        request.Headers.Add("X-Correlation-Id", "codex-diagnostic-correlation-001");
+        request.Headers.Add("X-AITO-Raw-Prompt", "summarize the secret prompt");
+        request.Headers.Add("X-AITO-Command-Output", "secret command output");
+        request.Headers.Add("X-AITO-Tool-Result", "tool result with file content");
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var envelope = Assert.Single(await store.ListTelemetryEnvelopesAsync(seed.Organization.CustomerOrganizationId));
+        var session = Assert.Single(await store.ListAgentSessionsAsync(seed.Organization.CustomerOrganizationId));
+        var diagnosticEvent = Assert.Single(diagnostics.Events);
+        Assert.Equal("tokenobs.ingestion.request", diagnosticEvent.OperationName);
+        Assert.Equal(expectedSignalType, diagnosticEvent.SignalType);
+        Assert.Equal("accepted", diagnosticEvent.Outcome);
+        Assert.Null(diagnosticEvent.RejectionReason);
+        Assert.Equal(StatusCodes.Status200OK, diagnosticEvent.HttpStatus);
+        Assert.Equal(path, diagnosticEvent.RequestRoute);
+        Assert.Equal("codex-diagnostic-correlation-001", diagnosticEvent.CorrelationId);
+        Assert.Equal(seed.Organization.CustomerOrganizationId, diagnosticEvent.CustomerOrganizationId);
+        Assert.Equal("contoso", diagnosticEvent.CustomerOrganizationSlug);
+        Assert.Equal("codex-cli", diagnosticEvent.Harness);
+        Assert.Equal(SetupProfileId, diagnosticEvent.HarnessSetupProfileId);
+        Assert.Equal("application_insights_log_analytics", diagnosticEvent.DiagnosticStore);
+        Assert.Equal("metadata_only", diagnosticEvent.ContentCaptureState);
+        Assert.Null(diagnosticEvent.AuditEventId);
+        Assert.Equal(envelope.TelemetryEnvelopeId, diagnosticEvent.TelemetryEnvelopeId);
+        Assert.Equal(session.AgentSessionId, diagnosticEvent.AgentSessionId);
+        Assert.Equal("succeeded", diagnosticEvent.AggregateMetricExportOutcome);
+        Assert.Equal(6, diagnosticEvent.AggregateMetricPointCount);
+        Assert.Null(diagnosticEvent.AggregateMetricExportFailureReason);
+        Assert.Equal("metadata_only", diagnosticEvent.Properties["content_capture"]);
+        Assert.Equal("application_insights", diagnosticEvent.Properties["diagnostic_store"]);
+        Assert.DoesNotContain("event-diagnostic-001", diagnosticEvent.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("codex-conversation-001", diagnosticEvent.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("summarize the secret prompt", diagnosticEvent.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("secret command output", diagnosticEvent.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("tool result with file content", diagnosticEvent.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("/v1/logs", "log")]
+    [InlineData("/v1/traces", "trace")]
+    public async Task RejectedCodexTelemetryRoutesSafeDiagnosticEventWithAuditCorrelation(
+        string path,
+        string expectedSignalType)
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var diagnostics = new RecordingIngestionDiagnosticSink();
+        var seed = await CreateTenantAsync(store);
+        var issued = await IssueCredentialAsync(store, seed);
+        using var factory = CreateFactory(store, diagnostics);
+        using var client = factory.CreateClient();
+        using var request = CreateOtlpRequest(path, issued.Secret);
+        request.Headers.Remove("X-AITO-Content-Capture-Mode");
+        request.Headers.Add("X-AITO-Content-Capture-Mode", "capture_candidate");
+        request.Headers.Add("X-Correlation-Id", "codex-diagnostic-rejection-001");
+        request.Headers.Add("X-AITO-Raw-Prompt", "prompt text must not be logged");
+
+        using var response = await client.SendAsync(request);
+
+        await AssertOtlpRejectionAsync(response, HttpStatusCode.Forbidden, "policy_context_missing", "capture_candidate");
+        var rejection = Assert.Single(await store.ListIngestionRejectionsAsync(seed.Organization.CustomerOrganizationId));
+        var auditEvent = Assert.Single(
+            await store.ListGovernanceAuditEventsAsync(seed.Organization.CustomerOrganizationId),
+            auditEvent => auditEvent.Action == ProductAuthorizationAction.TelemetryIngest);
+        var diagnosticEvent = Assert.Single(diagnostics.Events);
+        Assert.Equal("tokenobs.ingestion.request", diagnosticEvent.OperationName);
+        Assert.Equal(expectedSignalType, diagnosticEvent.SignalType);
+        Assert.Equal("rejected", diagnosticEvent.Outcome);
+        Assert.Equal("policy_context_missing", diagnosticEvent.RejectionReason);
+        Assert.Equal(StatusCodes.Status403Forbidden, diagnosticEvent.HttpStatus);
+        Assert.Equal(path, diagnosticEvent.RequestRoute);
+        Assert.Equal("codex-diagnostic-rejection-001", diagnosticEvent.CorrelationId);
+        Assert.Equal(seed.Organization.CustomerOrganizationId, diagnosticEvent.CustomerOrganizationId);
+        Assert.Equal("contoso", diagnosticEvent.CustomerOrganizationSlug);
+        Assert.Equal("codex-cli", diagnosticEvent.Harness);
+        Assert.Equal(SetupProfileId, diagnosticEvent.HarnessSetupProfileId);
+        Assert.Equal("application_insights_log_analytics", diagnosticEvent.DiagnosticStore);
+        Assert.Equal("metadata_only", diagnosticEvent.ContentCaptureState);
+        Assert.Equal(auditEvent.AuditEventId, diagnosticEvent.AuditEventId);
+        Assert.Null(diagnosticEvent.TelemetryEnvelopeId);
+        Assert.Null(diagnosticEvent.AgentSessionId);
+        Assert.Equal("not_applicable", diagnosticEvent.AggregateMetricExportOutcome);
+        Assert.Null(diagnosticEvent.AggregateMetricPointCount);
+        Assert.Equal("policy_context_missing", diagnosticEvent.Properties["rejection_reason"]);
+        Assert.Equal(rejection.IngestionRejectionId.ToString(), diagnosticEvent.Properties["ingestion_rejection_id"]);
+        Assert.DoesNotContain("capture_candidate", diagnosticEvent.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("prompt text must not be logged", diagnosticEvent.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(issued.Secret, diagnosticEvent.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void IngestionServiceGraphRoutesDiagnosticsThroughStructuredLoggerByDefault()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        using var factory = CreateFactory(store);
+
+        var sink = factory.Services.GetRequiredService<IIngestionDiagnosticSink>();
+
+        Assert.IsType<IngestionDiagnosticLoggerSink>(sink);
+    }
+
+    [Fact]
+    public void IngestionServiceGraphConfiguresOpenTelemetryForAzureMonitorExport()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        using var factory = CreateFactory(
+            store,
+            azureMonitorConnectionString: "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://example.invalid/");
+
+        var hostedServices = factory.Services.GetServices<IHostedService>();
+
+        Assert.Contains(hostedServices, service =>
+            service.GetType().Assembly.GetName().Name?.Contains("OpenTelemetry", StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
+    public async Task IngestionDiagnosticLoggerSinkEmitsTraceActivityWithSafeTags()
+    {
+        var capturedActivities = new List<Activity>();
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name == IngestionDiagnosticLoggerSink.ActivitySourceName,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
+            ActivityStopped = activity => capturedActivities.Add(activity)
+        };
+        ActivitySource.AddActivityListener(listener);
+        var diagnosticEvent = new IngestionDiagnosticEvent(
+            OperationName: "tokenobs.ingestion.request",
+            SignalType: "log",
+            Outcome: "rejected",
+            RejectionReason: "policy_context_missing",
+            HttpStatus: StatusCodes.Status403Forbidden,
+            RequestRoute: "/v1/logs",
+            CorrelationId: "codex-trace-correlation-001",
+            CustomerOrganizationId: CustomerOrganizationId.NewId(),
+            CustomerOrganizationSlug: "contoso",
+            Harness: "codex-cli",
+            HarnessSetupProfileId: SetupProfileId,
+            DiagnosticStore: "application_insights_log_analytics",
+            ContentCaptureState: "metadata_only",
+            AuditEventId: "audit-event-001",
+            TelemetryEnvelopeId: null,
+            AgentSessionId: null,
+            AggregateMetricExportOutcome: "not_applicable",
+            AggregateMetricPointCount: null,
+            AggregateMetricExportFailureReason: null,
+            new Dictionary<string, string>
+            {
+                ["rejection_reason"] = "policy_context_missing",
+                ["content_capture"] = "metadata_only"
+            });
+        var sink = new IngestionDiagnosticLoggerSink(NullLogger<IngestionDiagnosticLoggerSink>.Instance);
+
+        await sink.RouteAsync(diagnosticEvent);
+
+        var activity = Assert.Single(capturedActivities);
+        Assert.Equal("tokenobs.ingestion.request", activity.OperationName);
+        Assert.Equal("codex-trace-correlation-001", activity.GetTagItem("tokenobs.correlation_id"));
+        Assert.Equal("rejected", activity.GetTagItem("tokenobs.ingestion.outcome"));
+        Assert.Equal("policy_context_missing", activity.GetTagItem("tokenobs.ingestion.rejection_reason"));
+        Assert.Equal("contoso", activity.GetTagItem("tokenobs.customer_organization_slug"));
+        Assert.Equal("codex-cli", activity.GetTagItem("tokenobs.harness"));
+        Assert.Equal("metadata_only", activity.GetTagItem("tokenobs.content_capture_state"));
+        Assert.Equal("application_insights_log_analytics", activity.GetTagItem("tokenobs.diagnostic_store"));
+        Assert.DoesNotContain("prompt", activity.Tags.Select(tag => tag.Value), StringComparer.OrdinalIgnoreCase);
+        Assert.DoesNotContain("command output", activity.Tags.Select(tag => tag.Value), StringComparer.OrdinalIgnoreCase);
+        Assert.DoesNotContain("tool result", activity.Tags.Select(tag => tag.Value), StringComparer.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -1429,7 +1618,9 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
 
     private static WebApplicationFactory<TokenObservabilityIngestionAssemblyMarker> CreateFactory(
         InMemoryTenantMetadataStore store,
-        string? endpointRegion = null)
+        IIngestionDiagnosticSink? diagnosticSink = null,
+        string? endpointRegion = null,
+        string? azureMonitorConnectionString = null)
     {
         return new WebApplicationFactory<TokenObservabilityIngestionAssemblyMarker>()
             .WithWebHostBuilder(builder =>
@@ -1439,10 +1630,21 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
                     builder.UseSetting("ProductIngestion:Region", endpointRegion);
                 }
 
+                if (azureMonitorConnectionString is not null)
+                {
+                    builder.UseSetting("APPLICATIONINSIGHTS_CONNECTION_STRING", azureMonitorConnectionString);
+                }
+
                 builder.ConfigureServices(services =>
                 {
                     services.RemoveAll<InMemoryTenantMetadataStore>();
                     services.AddSingleton(store);
+
+                    if (diagnosticSink is not null)
+                    {
+                        services.RemoveAll<IIngestionDiagnosticSink>();
+                        services.AddSingleton(diagnosticSink);
+                    }
                 });
             });
     }
@@ -1795,6 +1997,19 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
             CancellationToken cancellationToken = default)
         {
             throw new InvalidOperationException("The aggregate metric sink is unavailable.");
+        }
+    }
+
+    private sealed class RecordingIngestionDiagnosticSink : IIngestionDiagnosticSink
+    {
+        public List<IngestionDiagnosticEvent> Events { get; } = [];
+
+        public Task RouteAsync(
+            IngestionDiagnosticEvent diagnosticEvent,
+            CancellationToken cancellationToken = default)
+        {
+            Events.Add(diagnosticEvent);
+            return Task.CompletedTask;
         }
     }
 
