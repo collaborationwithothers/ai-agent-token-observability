@@ -93,5 +93,86 @@ variable "enable_zone_redundancy" {
 variable "public_ingress_hostnames" {
   description = "Public ingress hostnames used by stages that expose product traffic."
   type        = map(string)
-  default     = {}
+  default = {
+    app    = "app.tokenobs.consultwithcloud.com"
+    api    = "api.tokenobs.consultwithcloud.com"
+    ingest = "ingest.tokenobs.consultwithcloud.com"
+  }
+
+  validation {
+    condition = alltrue([
+      contains(keys(var.public_ingress_hostnames), "app"),
+      contains(keys(var.public_ingress_hostnames), "api"),
+      contains(keys(var.public_ingress_hostnames), "ingest"),
+      alltrue([for hostname in values(var.public_ingress_hostnames) : can(regex("^[a-z0-9][a-z0-9.-]*[a-z0-9]$", hostname))])
+    ])
+    error_message = "public_ingress_hostnames must include valid app, api, and ingest hostnames."
+  }
+}
+
+variable "edge_resource_group_name" {
+  description = "Optional explicit resource group name for edge resources. When null, a deterministic stage name is used."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.edge_resource_group_name == null || can(regex("^[A-Za-z0-9._() -]{1,90}$", var.edge_resource_group_name))
+    error_message = "edge_resource_group_name must be a valid Azure resource group name when supplied."
+  }
+}
+
+variable "front_door_sku" {
+  description = "Front Door SKU for the production edge."
+  type        = string
+  default     = "Premium_AzureFrontDoor"
+
+  validation {
+    condition     = var.front_door_sku == "Premium_AzureFrontDoor"
+    error_message = "front_door_sku must be Premium_AzureFrontDoor."
+  }
+}
+
+variable "waf_policy_mode" {
+  description = "Optional Front Door WAF policy mode. Defaults to Detection in dv/qa and Prevention in pp/pd."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.waf_policy_mode == null || contains(["Detection", "Prevention"], var.waf_policy_mode)
+    error_message = "waf_policy_mode must be Detection or Prevention when supplied."
+  }
+}
+
+variable "waf_rate_limits" {
+  description = "Rate-limit thresholds for app and ingestion WAF custom rules."
+  type = object({
+    app = object({
+      duration_in_minutes = number
+      threshold           = number
+    })
+    ingestion = object({
+      duration_in_minutes = number
+      threshold           = number
+    })
+  })
+  default = {
+    app = {
+      duration_in_minutes = 1
+      threshold           = 600
+    }
+    ingestion = {
+      duration_in_minutes = 1
+      threshold           = 300
+    }
+  }
+}
+
+variable "container_app_fqdns" {
+  description = "Container App generated FQDNs by app_runtime output key."
+  type        = map(string)
+}
+
+variable "log_analytics_workspace_id" {
+  description = "Log Analytics workspace ID used for Front Door access, health probe, WAF logs, and metrics."
+  type        = string
 }
