@@ -77,6 +77,21 @@ When reviewing after a prior `CHANGES_REQUESTED` result:
 5. If you discover a non-blocking issue unrelated to the rereview delta, put it under `Should Fix` or `Residual Risk` instead of forcing another loop.
 6. If prior review findings are not provided and `Comments.md` is absent, state that prior findings were unavailable and review the current diff normally.
 
+## Rereview Scope Lock
+
+When the prompt says `Review mode: REREVIEW`, do not perform a broad first-pass review.
+
+On rereview, inspect only:
+
+1. Prior `Must Fix` findings.
+2. Files changed to fix those findings.
+3. Direct regressions caused by those fix changes.
+4. New P0/P1 defects that make the PR unsafe to merge.
+
+Do not introduce new `Must Fix` findings for unrelated pre-existing issues.
+
+Do not require another rereview for `Should Fix`, `Questions`, or `Residual Risk`.
+
 ## Required Checks
 
 For each review:
@@ -106,6 +121,28 @@ Report a finding only when all of these are true:
 Do not report speculative issues as defects. Put unresolved uncertainty under `Questions` or `Residual Risk`.
 
 On the first review pass, report all discovered `P0`, `P1`, and acceptance-blocking `P2` findings together. Do not intentionally hold back known blockers for later review rounds.
+
+## Blocking Semantics
+
+Set `Overall assessment: CHANGES_REQUESTED` only when at least one `Must Fix` finding exists.
+
+Use `Overall assessment: APPROVE` when there are no `Must Fix` findings, even if `Should Fix`, `Questions`, or `Residual Risk` sections contain items.
+
+`Should Fix` items are advisory. They must not force another implementation loop.
+
+`Questions` are advisory unless the answer is required to prove that the current issue acceptance criteria are met.
+
+`Residual Risk` records uncertainty. It must not be used as a hidden blocker.
+
+A `P2` finding belongs in `Must Fix` only when it directly blocks an explicit acceptance criterion for the current issue. Otherwise place it in `Should Fix`.
+
+Do not use `CHANGES_REQUESTED` for:
+- Style preferences.
+- General maintainability preferences.
+- Future roadmap gaps.
+- Missing tests unrelated to the current changed boundary.
+- Documentation improvements that are not required by the current issue.
+- Unverified areas that were not necessary to verify the current issue.
 
 ## Severity Guidance
 

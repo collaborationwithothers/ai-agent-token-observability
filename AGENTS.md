@@ -84,11 +84,58 @@ These commands validate the production-shaped active tree. They are not producti
 
 ## Review Before PR
 
-After any implementation change and before opening, updating, or declaring a PR ready, run the Codex `Code Reviewer` subagent against the current branch diff.
+Run the Codex `Code Reviewer` subagent only after an issue-level implementation is complete and the main agent has run focused validation.
+
+Do not run Code Reviewer after every small edit or every individual finding fix.
 
 The reviewer must write findings to `Comments.md` only. `Comments.md` is transient review output and must not be committed.
 
-If the reviewer reports `CHANGES_REQUESTED`, either fix the findings and rerun validation, or explicitly document why a finding is not accepted before proceeding.
+### Blocking Rules
+
+Only `Must Fix` findings block merge readiness.
+
+`Should Fix`, `Questions`, `Residual Risk`, and unverified areas do not block merge readiness unless the reviewer explicitly shows that they violate the current issue acceptance criteria or create a P0/P1 risk.
+
+The main agent may reject a finding when it provides a concrete reason grounded in code, docs, tests, or accepted scope.
+
+### First Review
+
+Before the first Code Reviewer pass, the main agent must prepare a review packet containing:
+
+- Branch and worktree status.
+- Diff stat.
+- List of changed and untracked implementation files.
+- Issue acceptance matrix.
+- Relevant docs read.
+- Focused validation commands and results.
+- Known intentional exclusions.
+
+The first review prompt must say:
+
+`Review mode: FIRST_PASS. Review only the current issue scope and changed surface. Report all P0, P1, and acceptance-blocking P2 findings in one pass. Do not report speculative or future-roadmap issues as blockers.`
+
+### Rereview
+
+When Code Reviewer reports `CHANGES_REQUESTED`, the main agent must:
+
+- Build a findings ledger.
+- Mark each finding as accepted, rejected with reason, or deferred.
+- Fix all accepted `Must Fix` findings in one batch.
+- Run focused validation once.
+- Request a single rereview.
+
+The rereview prompt must say:
+
+`Review mode: REREVIEW. Verify only the prior Must Fix findings, the fix delta, and direct regressions in touched files. Do not restart a full review unless the fix changed architecture, security, privacy, tenant boundary, persistence, Terraform deployment behavior, or product authorization.`
+
+### Review Pass Budget
+
+Use at most two Code Reviewer passes per issue:
+
+1. First pass.
+2. One rereview pass.
+
+If the second pass still reports `Must Fix`, stop and produce a human decision summary instead of continuing the agent loop.
 
 ### Review Efficiency
 
