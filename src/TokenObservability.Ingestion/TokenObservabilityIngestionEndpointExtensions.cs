@@ -33,6 +33,13 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         builder.Services.TryAddSingleton<ITenantMetadataClock, SystemTenantMetadataClock>();
         builder.Services.TryAddSingleton<InMemoryTenantMetadataStore>();
         builder.Services.TryAddSingleton<ScopedIngestionCredentialLifecycleService>();
+        builder.Services.TryAddSingleton<IAggregateMetricSink, NoopAggregateMetricSink>();
+        builder.Services.TryAddSingleton(static services =>
+        {
+            var options = services.GetRequiredService<IOptions<TokenObservabilityIngestionOptions>>().Value;
+            return new AggregateMetricsExportOptions(options.Environment);
+        });
+        builder.Services.TryAddSingleton<AggregateMetricsExporter>();
     }
 
     public static void MapTokenObservabilityIngestionEndpoints(this WebApplication app)
@@ -52,12 +59,14 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         HttpContext httpContext,
         ScopedIngestionCredentialLifecycleService credentialLifecycleService,
         InMemoryTenantMetadataStore tenantMetadataStore,
+        AggregateMetricsExporter aggregateMetricsExporter,
         IOptions<TokenObservabilityIngestionOptions> options)
     {
         return HandleOtlpSignalAsync(
             httpContext,
             credentialLifecycleService,
             tenantMetadataStore,
+            aggregateMetricsExporter,
             options.Value,
             "logs");
     }
@@ -66,12 +75,14 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         HttpContext httpContext,
         ScopedIngestionCredentialLifecycleService credentialLifecycleService,
         InMemoryTenantMetadataStore tenantMetadataStore,
+        AggregateMetricsExporter aggregateMetricsExporter,
         IOptions<TokenObservabilityIngestionOptions> options)
     {
         return HandleOtlpSignalAsync(
             httpContext,
             credentialLifecycleService,
             tenantMetadataStore,
+            aggregateMetricsExporter,
             options.Value,
             "traces");
     }
@@ -80,12 +91,14 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         HttpContext httpContext,
         ScopedIngestionCredentialLifecycleService credentialLifecycleService,
         InMemoryTenantMetadataStore tenantMetadataStore,
+        AggregateMetricsExporter aggregateMetricsExporter,
         IOptions<TokenObservabilityIngestionOptions> options)
     {
         return HandleOtlpSignalAsync(
             httpContext,
             credentialLifecycleService,
             tenantMetadataStore,
+            aggregateMetricsExporter,
             options.Value,
             "metrics");
     }
@@ -94,6 +107,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         HttpContext httpContext,
         ScopedIngestionCredentialLifecycleService credentialLifecycleService,
         InMemoryTenantMetadataStore tenantMetadataStore,
+        AggregateMetricsExporter aggregateMetricsExporter,
         TokenObservabilityIngestionOptions options,
         string signalType)
     {
@@ -291,6 +305,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         await RecordAcceptedTelemetryAsync(
             httpContext,
             tenantMetadataStore,
+            aggregateMetricsExporter,
             credential,
             signalType,
             correlationId);
@@ -302,6 +317,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
     private static async Task RecordAcceptedTelemetryAsync(
         HttpContext httpContext,
         InMemoryTenantMetadataStore tenantMetadataStore,
+        AggregateMetricsExporter aggregateMetricsExporter,
         ScopedIngestionCredential credential,
         string signalType,
         string correlationId)
@@ -409,6 +425,12 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 TokenObservationSourceKind.Missing,
                 envelope.TelemetryEnvelopeId));
         }
+
+        await aggregateMetricsExporter.ExportAcceptedSessionAsync(
+            credential.CustomerOrganizationId,
+            session.AgentSessionId,
+            correlationId,
+            envelope.TelemetryEnvelopeId);
     }
 
     private static IResult CreateCredentialProblem(
@@ -1264,6 +1286,8 @@ internal static class TokenObservabilityIngestionEndpointExtensions
 internal sealed class TokenObservabilityIngestionOptions
 {
     public long MaximumPayloadBytes { get; set; } = 1024 * 1024;
+
+    public string Environment { get; set; } = "dv";
 
     public string? Region { get; set; }
 }

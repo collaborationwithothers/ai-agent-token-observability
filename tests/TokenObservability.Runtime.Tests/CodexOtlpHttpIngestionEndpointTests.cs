@@ -232,7 +232,7 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
         await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
             seed.Organization.CustomerOrganizationId,
             session.AgentSessionId,
-            ModelInvocationId: null,
+            ModelInvocationId: "summary-only-001",
             TokenMetricName.TotalTokens,
             Value: 25,
             TokenMetricStatus.Mixed,
@@ -297,6 +297,288 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
                 TokenMetricConfidence.Estimated,
                 TokenObservationSourceKind.Estimator,
                 SourceTelemetryEnvelopeId: null)));
+    }
+
+    [Fact]
+    public async Task AcceptedCodexTelemetryExportsAggregateMetricPointsOnIngestionPath()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store);
+        var issued = await IssueCredentialAsync(store, seed);
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+        using var request = CreateOtlpRequest("/v1/logs", issued.Secret);
+        AddSessionHeaders(request, "event-aggregate-001", "2026-06-17T11:15:00Z", "gpt-5-codex");
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var persistedPoints = await store.ListAggregateMetricPointsAsync(seed.Organization.CustomerOrganizationId);
+        var sessionPoint = Assert.Single(persistedPoints, point => point.Name == "tokenobs_sessions_started_total");
+        Assert.Equal(1, sessionPoint.Value);
+        Assert.Equal("contoso", sessionPoint.Labels["customer_organization_slug"]);
+        Assert.Equal("dv", sessionPoint.Labels["environment"]);
+        Assert.Equal("eastus2", sessionPoint.Labels["region"]);
+        Assert.Equal("codex", sessionPoint.Labels["harness"]);
+        Assert.Equal(5, persistedPoints.Count(point => point.Name == "tokenobs_token_metric_states_total"));
+        Assert.DoesNotContain(persistedPoints, point => point.Name == "tokenobs_tokens_total");
+        Assert.All(persistedPoints, point =>
+        {
+            AssertForbiddenAggregateLabelsAreAbsent(point.Labels);
+            Assert.DoesNotContain("event-aggregate-001", point.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("codex-conversation-001", point.ToString(), StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task AggregateMetricsExporterExportsTenantScopedPointsFromAcceptedSession()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store);
+        var issued = await IssueCredentialAsync(store, seed);
+        var envelope = await RecordAcceptedEnvelopeAsync(
+            store,
+            issued.Credential,
+            new string('c', 64),
+            "accepted-session-correlation-002",
+            modelName: "gpt-5-codex");
+        var session = Assert.Single(await store.ListAgentSessionsAsync(seed.Organization.CustomerOrganizationId));
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            ModelInvocationId: null,
+            TokenMetricName.InputTokens,
+            Value: 0,
+            TokenMetricStatus.Observed,
+            TokenMetricConfidence.Observed,
+            TokenObservationSourceKind.CodexEvent,
+            envelope.TelemetryEnvelopeId));
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            ModelInvocationId: null,
+            TokenMetricName.OutputTokens,
+            Value: 25,
+            TokenMetricStatus.Estimated,
+            TokenMetricConfidence.Estimated,
+            TokenObservationSourceKind.Estimator,
+            envelope.TelemetryEnvelopeId));
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            ModelInvocationId: null,
+            TokenMetricName.CachedInputTokens,
+            Value: null,
+            TokenMetricStatus.Unavailable,
+            TokenMetricConfidence.Unavailable,
+            TokenObservationSourceKind.Missing,
+            envelope.TelemetryEnvelopeId));
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            ModelInvocationId: null,
+            TokenMetricName.ReasoningOutputTokens,
+            Value: null,
+            TokenMetricStatus.NotApplicable,
+            TokenMetricConfidence.Unavailable,
+            TokenObservationSourceKind.Missing,
+            envelope.TelemetryEnvelopeId));
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            ModelInvocationId: "summary-only-001",
+            TokenMetricName.TotalTokens,
+            Value: 25,
+            TokenMetricStatus.Mixed,
+            TokenMetricConfidence.Estimated,
+            TokenObservationSourceKind.DerivedSummary,
+            envelope.TelemetryEnvelopeId));
+        var sink = new RecordingAggregateMetricSink();
+        var exporter = new AggregateMetricsExporter(
+            store,
+            sink,
+            new AggregateMetricsExportOptions(Environment: "dv"));
+
+        var result = await exporter.ExportAcceptedSessionAsync(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            "aggregate-export-correlation-001");
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(9, result.ExportedPointCount);
+        Assert.Empty(await store.ListAggregateMetricExportFailuresAsync(seed.Organization.CustomerOrganizationId));
+        var persistedPoints = await store.ListAggregateMetricPointsAsync(seed.Organization.CustomerOrganizationId);
+        Assert.Equal(persistedPoints.Count, sink.Points.Count);
+
+        var sessionPoint = Assert.Single(persistedPoints, point => point.Name == "tokenobs_sessions_started_total");
+        Assert.Equal(1, sessionPoint.Value);
+        Assert.Equal("sessions", sessionPoint.Unit);
+        Assert.Equal("contoso", sessionPoint.Labels["customer_organization_slug"]);
+        Assert.Equal("dv", sessionPoint.Labels["environment"]);
+        Assert.Equal("eastus2", sessionPoint.Labels["region"]);
+        Assert.Equal("codex", sessionPoint.Labels["harness"]);
+
+        var tokenPoints = persistedPoints
+            .Where(point => point.Name == "tokenobs_tokens_total")
+            .OrderBy(point => point.Labels["token_type"], StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Collection(
+            tokenPoints,
+            point =>
+            {
+                Assert.Equal("input", point.Labels["token_type"]);
+                Assert.Equal(0, point.Value);
+                Assert.Equal("observed", point.Labels["metric_status"]);
+                Assert.Equal("observed", point.Labels["metric_confidence"]);
+            },
+            point =>
+            {
+                Assert.Equal("output", point.Labels["token_type"]);
+                Assert.Equal(25, point.Value);
+                Assert.Equal("estimated", point.Labels["metric_status"]);
+                Assert.Equal("estimated", point.Labels["metric_confidence"]);
+            },
+            point =>
+            {
+                Assert.Equal("total", point.Labels["token_type"]);
+                Assert.Equal(25, point.Value);
+                Assert.Equal("mixed", point.Labels["metric_status"]);
+                Assert.Equal("estimated", point.Labels["metric_confidence"]);
+            });
+
+        var statePoints = persistedPoints
+            .Where(point => point.Name == "tokenobs_token_metric_states_total")
+            .OrderBy(point => point.Labels["token_type"], StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Collection(
+            statePoints,
+            point =>
+            {
+                Assert.Equal("cached_input", point.Labels["token_type"]);
+                Assert.Equal("unavailable", point.Labels["metric_status"]);
+                Assert.Equal("unavailable", point.Labels["metric_confidence"]);
+            },
+            point =>
+            {
+                Assert.Equal("input", point.Labels["token_type"]);
+                Assert.Equal("observed", point.Labels["metric_status"]);
+                Assert.Equal("observed", point.Labels["metric_confidence"]);
+            },
+            point =>
+            {
+                Assert.Equal("output", point.Labels["token_type"]);
+                Assert.Equal("estimated", point.Labels["metric_status"]);
+                Assert.Equal("estimated", point.Labels["metric_confidence"]);
+            },
+            point =>
+            {
+                Assert.Equal("reasoning_output", point.Labels["token_type"]);
+                Assert.Equal("not_applicable", point.Labels["metric_status"]);
+                Assert.Equal("unavailable", point.Labels["metric_confidence"]);
+            },
+            point =>
+            {
+                Assert.Equal("total", point.Labels["token_type"]);
+                Assert.Equal("mixed", point.Labels["metric_status"]);
+                Assert.Equal("estimated", point.Labels["metric_confidence"]);
+            });
+
+        Assert.All(persistedPoints, point =>
+        {
+            AssertForbiddenAggregateLabelsAreAbsent(point.Labels);
+            Assert.Equal("openai", point.Labels.GetValueOrDefault("model_provider", "openai"));
+            Assert.DoesNotContain("event-aggregate-001", point.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("codex-conversation-001", point.ToString(), StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task AggregateMetricsExporterRecordsBoundedFailureWithoutLosingAcceptedSession()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store);
+        var issued = await IssueCredentialAsync(store, seed);
+        var envelope = await RecordAcceptedEnvelopeAsync(
+            store,
+            issued.Credential,
+            new string('b', 64),
+            "accepted-session-correlation-001");
+        var session = Assert.Single(await store.ListAgentSessionsAsync(seed.Organization.CustomerOrganizationId));
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            ModelInvocationId: null,
+            TokenMetricName.InputTokens,
+            Value: 10,
+            TokenMetricStatus.Observed,
+            TokenMetricConfidence.Observed,
+            TokenObservationSourceKind.CodexEvent,
+            envelope.TelemetryEnvelopeId));
+        var exporter = new AggregateMetricsExporter(
+            store,
+            new ThrowingAggregateMetricSink(),
+            new AggregateMetricsExportOptions(Environment: "dv"));
+
+        var result = await exporter.ExportAcceptedSessionAsync(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            "aggregate-export-failure-correlation-001");
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("sink_failure", result.FailureReason);
+        Assert.Single(await store.ListAgentSessionsAsync(seed.Organization.CustomerOrganizationId));
+        Assert.Empty(await store.ListAggregateMetricPointsAsync(seed.Organization.CustomerOrganizationId));
+        var failure = Assert.Single(await store.ListAggregateMetricExportFailuresAsync(seed.Organization.CustomerOrganizationId));
+        Assert.Equal(session.AgentSessionId, failure.AgentSessionId);
+        Assert.Equal("sink_failure", failure.FailureReason);
+        Assert.Equal("aggregate-export-failure-correlation-001", failure.CorrelationId);
+        Assert.DoesNotContain("source event", failure.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task AggregateMetricsExporterValidatesMetricShapeBeforeSinkExport()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store);
+        var issued = await IssueCredentialAsync(store, seed);
+        var envelope = await RecordAcceptedEnvelopeAsync(
+            store,
+            issued.Credential,
+            new string('d', 64),
+            "accepted-session-correlation-003",
+            modelName: "sk-secret-model");
+        var session = Assert.Single(await store.ListAgentSessionsAsync(seed.Organization.CustomerOrganizationId));
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            ModelInvocationId: null,
+            TokenMetricName.InputTokens,
+            Value: 10,
+            TokenMetricStatus.Observed,
+            TokenMetricConfidence.Observed,
+            TokenObservationSourceKind.CodexEvent,
+            envelope.TelemetryEnvelopeId));
+        var sink = new RecordingAggregateMetricSink();
+        var exporter = new AggregateMetricsExporter(
+            store,
+            sink,
+            new AggregateMetricsExportOptions(Environment: "dv"));
+
+        var result = await exporter.ExportAcceptedSessionAsync(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            "aggregate-export-invalid-shape-correlation-001");
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("invalid_metric_shape", result.FailureReason);
+        Assert.Empty(sink.Points);
+        Assert.Empty(await store.ListAggregateMetricPointsAsync(seed.Organization.CustomerOrganizationId));
+        var failure = Assert.Single(await store.ListAggregateMetricExportFailuresAsync(seed.Organization.CustomerOrganizationId));
+        Assert.Equal("invalid_metric_shape", failure.FailureReason);
+        Assert.Equal("aggregate-export-invalid-shape-correlation-001", failure.CorrelationId);
+        Assert.DoesNotContain("sk-secret-model", failure.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -1366,7 +1648,8 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
         InMemoryTenantMetadataStore store,
         ScopedIngestionCredential credential,
         string dedupeKeyHash,
-        string correlationId)
+        string correlationId,
+        string? modelName = null)
     {
         return store.RecordTelemetryEnvelopeAsync(new CreateTelemetryEnvelopeRecordRequest(
             credential.CustomerOrganizationId,
@@ -1383,7 +1666,7 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
             SourceEventId: null,
             TraceIdHash: null,
             SpanIdHash: null,
-            ModelName: null,
+            ModelName: modelName,
             HarnessVersion: null,
             SandboxSetting: null,
             ApprovalSetting: null,
@@ -1465,6 +1748,54 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
             rejection.EvidenceMetadata,
             item => item.Key.Contains(forbiddenText, StringComparison.OrdinalIgnoreCase) ||
                 item.Value.Contains(forbiddenText, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static void AssertForbiddenAggregateLabelsAreAbsent(IReadOnlyDictionary<string, string> labels)
+    {
+        var forbiddenLabels = new[]
+        {
+            "session_id",
+            "agent_session_id",
+            "product_user_id",
+            "developer",
+            "credential_id",
+            "trace_id",
+            "span_id",
+            "repository_path",
+            "file_path",
+            "prompt",
+            "command_output",
+            "tool_result",
+            "source_event_id"
+        };
+
+        foreach (var forbiddenLabel in forbiddenLabels)
+        {
+            Assert.False(labels.ContainsKey(forbiddenLabel), $"Aggregate label '{forbiddenLabel}' must not be emitted.");
+        }
+    }
+
+    private sealed class RecordingAggregateMetricSink : IAggregateMetricSink
+    {
+        public List<AggregateMetricPoint> Points { get; } = [];
+
+        public Task ExportAsync(
+            IReadOnlyList<AggregateMetricPoint> points,
+            CancellationToken cancellationToken = default)
+        {
+            Points.AddRange(points);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class ThrowingAggregateMetricSink : IAggregateMetricSink
+    {
+        public Task ExportAsync(
+            IReadOnlyList<AggregateMetricPoint> points,
+            CancellationToken cancellationToken = default)
+        {
+            throw new InvalidOperationException("The aggregate metric sink is unavailable.");
+        }
     }
 
     private sealed record TenantSeed(CustomerOrganization Organization, IdentityTenant IdentityTenant);

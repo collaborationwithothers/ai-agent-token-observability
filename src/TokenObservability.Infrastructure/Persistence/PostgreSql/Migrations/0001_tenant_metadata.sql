@@ -327,6 +327,45 @@ CREATE TABLE IF NOT EXISTS token_observation (
     )
 );
 
+CREATE TABLE IF NOT EXISTS aggregate_metric_point (
+    aggregate_metric_point_id uuid PRIMARY KEY,
+    customer_organization_id uuid NOT NULL,
+    agent_session_id text NOT NULL,
+    metric_name text NOT NULL,
+    metric_value double precision NOT NULL,
+    unit text NOT NULL,
+    labels_json jsonb NOT NULL,
+    exported_at_utc timestamptz NOT NULL,
+    CONSTRAINT fk_aggregate_metric_point_agent_session FOREIGN KEY (customer_organization_id, agent_session_id) REFERENCES agent_session (customer_organization_id, agent_session_id),
+    CONSTRAINT ck_aggregate_metric_point_name CHECK (metric_name IN ('tokenobs_tokens_total', 'tokenobs_sessions_started_total', 'tokenobs_token_metric_states_total')),
+    CONSTRAINT ck_aggregate_metric_point_value CHECK (metric_value >= 0),
+    CONSTRAINT ck_aggregate_metric_point_unit CHECK (unit IN ('tokens', 'sessions', 'observations')),
+    CONSTRAINT ck_aggregate_metric_point_labels_json CHECK (
+        jsonb_typeof(labels_json) = 'object'
+        AND labels_json ? 'customer_organization_slug'
+        AND labels_json ? 'environment'
+        AND labels_json ? 'region'
+        AND NOT labels_json ? 'agent_session_id'
+        AND NOT labels_json ? 'product_user_id'
+        AND NOT labels_json ? 'credential_id'
+        AND NOT labels_json ? 'trace_id'
+        AND NOT labels_json ? 'span_id'
+        AND NOT labels_json ? 'repository_path'
+        AND NOT labels_json ? 'file_path'
+    )
+);
+
+CREATE TABLE IF NOT EXISTS aggregate_metric_export_failure (
+    aggregate_metric_export_failure_id uuid PRIMARY KEY,
+    customer_organization_id uuid NOT NULL,
+    agent_session_id text NOT NULL,
+    failure_reason text NOT NULL,
+    correlation_id text NOT NULL,
+    created_at_utc timestamptz NOT NULL,
+    CONSTRAINT fk_aggregate_metric_export_failure_agent_session FOREIGN KEY (customer_organization_id, agent_session_id) REFERENCES agent_session (customer_organization_id, agent_session_id),
+    CONSTRAINT ck_aggregate_metric_export_failure_reason CHECK (failure_reason IN ('sink_failure', 'invalid_metric_shape'))
+);
+
 CREATE INDEX IF NOT EXISTS ix_customer_organization_status
     ON customer_organization (status);
 
@@ -367,6 +406,12 @@ CREATE INDEX IF NOT EXISTS ix_agent_session_customer_updated
 
 CREATE INDEX IF NOT EXISTS ix_token_observation_session_metric
     ON token_observation (customer_organization_id, agent_session_id, metric_name, created_at_utc);
+
+CREATE INDEX IF NOT EXISTS ix_aggregate_metric_point_customer_exported
+    ON aggregate_metric_point (customer_organization_id, exported_at_utc DESC);
+
+CREATE INDEX IF NOT EXISTS ix_aggregate_metric_export_failure_customer_created
+    ON aggregate_metric_export_failure (customer_organization_id, created_at_utc DESC);
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_agent_session_customer_provider_session
     ON agent_session (customer_organization_id, harness_setup_profile_id, product_user_id, provider_session_id_hash)

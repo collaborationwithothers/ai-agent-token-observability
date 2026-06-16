@@ -225,6 +225,53 @@ public sealed class TenantMetadataSchemaTests
     }
 
     [Fact]
+    public void PostgreSqlTenantMetadataMigrationPersistsAggregateMetricExportShape()
+    {
+        var root = FindRepositoryRoot();
+        var migrationPath = Path.Combine(
+            root,
+            "src",
+            "TokenObservability.Infrastructure",
+            "Persistence",
+            "PostgreSql",
+            "Migrations",
+            "0001_tenant_metadata.sql");
+
+        var migration = File.ReadAllText(migrationPath);
+
+        Assert.Contains("CREATE TABLE IF NOT EXISTS aggregate_metric_point", migration);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS aggregate_metric_export_failure", migration);
+        Assert.Contains("aggregate_metric_point_id uuid PRIMARY KEY", migration);
+        Assert.Contains("aggregate_metric_export_failure_id uuid PRIMARY KEY", migration);
+        Assert.Contains("customer_organization_id uuid NOT NULL", migration);
+        Assert.Contains("agent_session_id text NOT NULL", migration);
+        Assert.Contains("metric_name text NOT NULL", migration);
+        Assert.Contains("metric_value double precision NOT NULL", migration);
+        Assert.Contains("unit text NOT NULL", migration);
+        Assert.Contains("labels_json jsonb NOT NULL", migration);
+        Assert.Contains("exported_at_utc timestamptz NOT NULL", migration);
+        Assert.Contains("failure_reason text NOT NULL", migration);
+        Assert.Contains("correlation_id text NOT NULL", migration);
+        Assert.Contains("ck_aggregate_metric_point_name CHECK", migration);
+        Assert.Contains("ck_aggregate_metric_point_labels_json", migration);
+        Assert.Contains("ck_aggregate_metric_export_failure_reason CHECK", migration);
+        Assert.Contains("tokenobs_token_metric_states_total", migration);
+        Assert.Contains("'observations'", migration);
+        Assert.Contains("ix_aggregate_metric_point_customer_exported", migration);
+        Assert.Contains("ix_aggregate_metric_export_failure_customer_created", migration);
+
+        var aggregateSection = migration[migration.IndexOf(
+            "CREATE TABLE IF NOT EXISTS aggregate_metric_point",
+            StringComparison.Ordinal)..];
+        Assert.DoesNotContain("developer", aggregateSection, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("credential_id text", aggregateSection, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("trace_id text", aggregateSection, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("prompt text", aggregateSection, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("command_output text", aggregateSection, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("tool_result text", aggregateSection, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void PostgreSqlCustomerOrganizationSlugConstraintMatchesTerraformSlugValidation()
     {
         var root = FindRepositoryRoot();

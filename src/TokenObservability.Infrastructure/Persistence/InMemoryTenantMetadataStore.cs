@@ -69,6 +69,8 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
     private readonly Dictionary<string, AgentSessionRecord> agentSessions = [];
     private readonly Dictionary<AgentSessionLookupKey, string> agentSessionLookupIndex = [];
     private readonly Dictionary<TokenObservationId, TokenObservationRecord> tokenObservations = [];
+    private readonly Dictionary<AggregateMetricPointId, AggregateMetricPointRecord> aggregateMetricPoints = [];
+    private readonly Dictionary<AggregateMetricExportFailureId, AggregateMetricExportFailureRecord> aggregateMetricExportFailures = [];
     private readonly object gate = new();
 
     public Task<CustomerOrganization> CreateCustomerOrganizationAsync(CreateCustomerOrganizationRequest request)
@@ -929,6 +931,123 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
                     .OrderBy(observation => TokenMetricSortOrder(observation.MetricName))
                     .ThenBy(observation => observation.CreatedAtUtc)
                     .ThenBy(observation => observation.TokenObservationId.ToString(), StringComparer.Ordinal)
+                    .ToArray());
+        }
+    }
+
+    public Task<AggregateMetricPointRecord> RecordAggregateMetricPointAsync(
+        CreateAggregateMetricPointRecordRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var (agentSessionId, name, unit, labels) = NormalizeAggregateMetricPointRequest(request);
+        var now = clock.UtcNow.ToUniversalTime();
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+
+            if (!agentSessions.TryGetValue(agentSessionId, out var session) ||
+                session.CustomerOrganizationId != request.CustomerOrganizationId)
+            {
+                throw new InvalidOperationException("Aggregate metric session does not belong to the customer organization.");
+            }
+
+            var point = new AggregateMetricPointRecord(
+                AggregateMetricPointId.NewId(),
+                request.CustomerOrganizationId,
+                agentSessionId,
+                name,
+                request.Value,
+                unit,
+                labels,
+                now);
+
+            aggregateMetricPoints.Add(point.AggregateMetricPointId, point);
+
+            return Task.FromResult(point);
+        }
+    }
+
+    public Task ValidateAggregateMetricPointAsync(
+        CreateAggregateMetricPointRecordRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var (agentSessionId, _, _, _) = NormalizeAggregateMetricPointRequest(request);
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+
+            if (!agentSessions.TryGetValue(agentSessionId, out var session) ||
+                session.CustomerOrganizationId != request.CustomerOrganizationId)
+            {
+                throw new InvalidOperationException("Aggregate metric session does not belong to the customer organization.");
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<AggregateMetricPointRecord>> ListAggregateMetricPointsAsync(
+        CustomerOrganizationId customerOrganizationId)
+    {
+        lock (gate)
+        {
+            return Task.FromResult<IReadOnlyList<AggregateMetricPointRecord>>(
+                aggregateMetricPoints.Values
+                    .Where(point => point.CustomerOrganizationId == customerOrganizationId)
+                    .OrderBy(point => point.ExportedAtUtc)
+                    .ThenBy(point => point.AggregateMetricPointId.ToString(), StringComparer.Ordinal)
+                    .ToArray());
+        }
+    }
+
+    public Task<AggregateMetricExportFailureRecord> RecordAggregateMetricExportFailureAsync(
+        CreateAggregateMetricExportFailureRecordRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var agentSessionId = NormalizeRequiredText(request.AgentSessionId, nameof(request.AgentSessionId));
+        var failureReason = NormalizeAggregateMetricExportFailureReason(request.FailureReason, nameof(request.FailureReason));
+        var correlationId = NormalizeRequiredText(request.CorrelationId, nameof(request.CorrelationId));
+        var now = clock.UtcNow.ToUniversalTime();
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+
+            if (!agentSessions.TryGetValue(agentSessionId, out var session) ||
+                session.CustomerOrganizationId != request.CustomerOrganizationId)
+            {
+                throw new InvalidOperationException("Aggregate metric export failure session does not belong to the customer organization.");
+            }
+
+            var failure = new AggregateMetricExportFailureRecord(
+                AggregateMetricExportFailureId.NewId(),
+                request.CustomerOrganizationId,
+                agentSessionId,
+                failureReason,
+                correlationId,
+                now);
+
+            aggregateMetricExportFailures.Add(failure.AggregateMetricExportFailureId, failure);
+
+            return Task.FromResult(failure);
+        }
+    }
+
+    public Task<IReadOnlyList<AggregateMetricExportFailureRecord>> ListAggregateMetricExportFailuresAsync(
+        CustomerOrganizationId customerOrganizationId)
+    {
+        lock (gate)
+        {
+            return Task.FromResult<IReadOnlyList<AggregateMetricExportFailureRecord>>(
+                aggregateMetricExportFailures.Values
+                    .Where(failure => failure.CustomerOrganizationId == customerOrganizationId)
+                    .OrderBy(failure => failure.CreatedAtUtc)
+                    .ThenBy(failure => failure.AggregateMetricExportFailureId.ToString(), StringComparer.Ordinal)
                     .ToArray());
         }
     }
@@ -1930,6 +2049,116 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         {
             throw new ArgumentException("Missing token observation sources require unavailable or not applicable status.", nameof(sourceKind));
         }
+    }
+
+    private static string NormalizeAggregateMetricName(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+
+        return normalized is "tokenobs_tokens_total" or "tokenobs_sessions_started_total" or "tokenobs_token_metric_states_total"
+            ? normalized
+            : throw new ArgumentException("Aggregate metric name is not supported.", parameterName);
+    }
+
+    private static string NormalizeAggregateMetricUnit(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+
+        return normalized is "tokens" or "sessions" or "observations"
+            ? normalized
+            : throw new ArgumentException("Aggregate metric unit is not supported.", parameterName);
+    }
+
+    private static (
+        string AgentSessionId,
+        string Name,
+        string Unit,
+        IReadOnlyDictionary<string, string> Labels) NormalizeAggregateMetricPointRequest(
+            CreateAggregateMetricPointRecordRequest request)
+    {
+        var agentSessionId = NormalizeRequiredText(request.AgentSessionId, nameof(request.AgentSessionId));
+        var name = NormalizeAggregateMetricName(request.Name, nameof(request.Name));
+        var unit = NormalizeAggregateMetricUnit(request.Unit, nameof(request.Unit));
+        var labels = NormalizeAggregateMetricLabels(name, request.Labels);
+
+        if (double.IsNaN(request.Value) || double.IsInfinity(request.Value) || request.Value < 0)
+        {
+            throw new ArgumentException("Aggregate metric values must be finite and non-negative.", nameof(request));
+        }
+
+        return (agentSessionId, name, unit, labels);
+    }
+
+    private static IReadOnlyDictionary<string, string> NormalizeAggregateMetricLabels(
+        string metricName,
+        IReadOnlyDictionary<string, string> labels)
+    {
+        ArgumentNullException.ThrowIfNull(labels);
+
+        var normalizedLabels = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var label in labels.OrderBy(static label => label.Key, StringComparer.Ordinal))
+        {
+            var key = NormalizeRequiredText(label.Key, nameof(labels));
+            var value = NormalizeRequiredText(label.Value, nameof(labels));
+
+            if (!IsAllowedAggregateMetricLabel(metricName, key))
+            {
+                throw new ArgumentException("Aggregate metric label is not supported.", nameof(labels));
+            }
+
+            if (ContainsSensitiveFragment(key) || ContainsSensitiveFragment(value))
+            {
+                throw new ArgumentException("Aggregate metric labels must not contain sensitive fragments.", nameof(labels));
+            }
+
+            if (value.Length > 128 || !IsSafeResourceId(value))
+            {
+                throw new ArgumentException("Aggregate metric label value is not allowed.", nameof(labels));
+            }
+
+            normalizedLabels.Add(key, value);
+        }
+
+        RequireAggregateLabel(normalizedLabels, "customer_organization_slug");
+        RequireAggregateLabel(normalizedLabels, "environment");
+        RequireAggregateLabel(normalizedLabels, "region");
+
+        return normalizedLabels;
+    }
+
+    private static bool IsAllowedAggregateMetricLabel(string metricName, string label)
+    {
+        if (label is "customer_organization_slug" or "environment" or "region" or "harness")
+        {
+            return true;
+        }
+
+        return metricName switch
+        {
+            "tokenobs_tokens_total" or "tokenobs_token_metric_states_total" => label is "model_provider" or "model" or "token_type" or "metric_status" or "metric_confidence",
+            "tokenobs_sessions_started_total" => false,
+            _ => false
+        };
+    }
+
+    private static void RequireAggregateLabel(
+        IReadOnlyDictionary<string, string> labels,
+        string labelName)
+    {
+        if (!labels.ContainsKey(labelName))
+        {
+            throw new ArgumentException($"Aggregate metric label '{labelName}' is required.", nameof(labels));
+        }
+    }
+
+    private static string NormalizeAggregateMetricExportFailureReason(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+
+        return normalized is "sink_failure" or "invalid_metric_shape"
+            ? normalized
+            : throw new ArgumentException("Aggregate metric export failure reason is not supported.", parameterName);
     }
 
     private static int TokenMetricSortOrder(TokenMetricName metricName)
