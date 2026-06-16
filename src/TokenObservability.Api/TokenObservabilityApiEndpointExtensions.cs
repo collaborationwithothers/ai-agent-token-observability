@@ -34,6 +34,7 @@ internal static class TokenObservabilityApiEndpointExtensions
         api.MapGet("/me", GetCurrentUser);
         api.MapGet("/audit-events", GetAuditEvents);
         api.MapGet("/ingestion-rejections", GetIngestionRejections);
+        api.MapGet("/sessions", GetSessions);
     }
 
     private static IResult GetHealth()
@@ -214,6 +215,94 @@ internal static class TokenObservabilityApiEndpointExtensions
         });
     }
 
+    private static async Task<IResult> GetSessions(
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        InMemoryTenantMetadataStore tenantMetadataStore)
+    {
+        var scopedResolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            ProductAuthorizationAction.SessionReadScoped,
+            new ProductScope(ProductScopeKind.Organization, ScopeId: null));
+        var selfOnly = false;
+        var resolution = scopedResolution;
+
+        if (!scopedResolution.IsAllowed)
+        {
+            var selfResolution = await authorizationContextResolver.ResolveAsync(
+                httpContext,
+                ProductAuthorizationAction.SessionReadOwn,
+                new ProductScope(ProductScopeKind.Self, ScopeId: null));
+
+            if (selfResolution.IsAllowed)
+            {
+                resolution = selfResolution;
+                selfOnly = true;
+            }
+        }
+
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, scopedResolution.Title, scopedResolution.StatusCode, scopedResolution.Code);
+        }
+
+        var customerOrganizationId = resolution.Context.CustomerOrganization.CustomerOrganizationId;
+        var sessions = await tenantMetadataStore.ListAgentSessionsAsync(customerOrganizationId);
+        var filteredSessions = ApplySessionFilters(httpContext, sessions);
+
+        if (selfOnly)
+        {
+            filteredSessions = filteredSessions.Where(session =>
+                session.ProductUserId == resolution.Context.ProductUser.ProductUserId);
+        }
+
+        var visibleSessions = filteredSessions.ToArray();
+        var items = new List<object>(visibleSessions.Length);
+
+        foreach (var session in visibleSessions)
+        {
+            var observations = await tenantMetadataStore.ListTokenObservationsAsync(
+                customerOrganizationId,
+                session.AgentSessionId);
+
+            items.Add(new
+            {
+                agentSessionId = session.AgentSessionId.ToString(),
+                customerOrganizationId = session.CustomerOrganizationId.ToString(),
+                productUserId = session.ProductUserId.ToString(),
+                harnessSetupProfileId = session.HarnessSetupProfileId,
+                harness = ToWireHarness(session.Harness),
+                providerSessionIdHash = session.ProviderSessionIdHash,
+                startedAtUtc = session.StartedAtUtc,
+                endedAtUtc = session.EndedAtUtc,
+                sessionStatus = ToWireSessionStatus(session.SessionStatus),
+                tokenSummary = new
+                {
+                    metricStatus = ToWireMetricStatus(session.TokenMetricStatus),
+                    metricConfidence = ToWireMetricConfidence(session.TokenMetricConfidence)
+                },
+                tokenObservations = observations.Select(static observation => new
+                {
+                    tokenObservationId = observation.TokenObservationId.ToString(),
+                    metricName = ToWireMetricName(observation.MetricName),
+                    value = observation.Value,
+                    metricStatus = ToWireMetricStatus(observation.MetricStatus),
+                    metricConfidence = ToWireMetricConfidence(observation.MetricConfidence),
+                    sourceKind = ToWireSourceKind(observation.SourceKind),
+                    sourceTelemetryEnvelopeId = observation.SourceTelemetryEnvelopeId?.ToString(),
+                    createdAtUtc = observation.CreatedAtUtc
+                }).ToArray()
+            });
+        }
+
+        return Results.Ok(new
+        {
+            items,
+            nextCursor = (string?)null,
+            totalEstimate = visibleSessions.Length
+        });
+    }
+
     private static IResult CreateProblem(HttpContext httpContext, string title, int statusCode, string code)
     {
         return Results.Problem(
@@ -327,6 +416,27 @@ internal static class TokenObservabilityApiEndpointExtensions
         return filteredRejections;
     }
 
+    private static IEnumerable<AgentSessionRecord> ApplySessionFilters(
+        HttpContext httpContext,
+        IEnumerable<AgentSessionRecord> sessions)
+    {
+        var filteredSessions = sessions;
+
+        if (TryReadQuery(httpContext, "harnessSetupProfileId", out var harnessSetupProfileId))
+        {
+            filteredSessions = filteredSessions.Where(session =>
+                StringComparer.Ordinal.Equals(session.HarnessSetupProfileId, harnessSetupProfileId));
+        }
+
+        if (TryReadQuery(httpContext, "metricStatus", out var metricStatus))
+        {
+            filteredSessions = filteredSessions.Where(session =>
+                StringComparer.Ordinal.Equals(ToWireMetricStatus(session.TokenMetricStatus), metricStatus));
+        }
+
+        return filteredSessions;
+    }
+
     private static bool TryReadQuery(HttpContext httpContext, string key, out string value)
     {
         value = httpContext.Request.Query[key].ToString().Trim();
@@ -336,6 +446,81 @@ internal static class TokenObservabilityApiEndpointExtensions
     private static string ToContractAction(ProductAuthorizationAction action)
     {
         return action.ToString();
+    }
+
+    private static string ToWireHarness(CodingAgentHarness harness)
+    {
+        return harness switch
+        {
+            CodingAgentHarness.CodexCli => "codex_cli",
+            _ => throw new ArgumentOutOfRangeException(nameof(harness), harness, null)
+        };
+    }
+
+    private static string ToWireSessionStatus(AgentSessionStatus status)
+    {
+        return status switch
+        {
+            AgentSessionStatus.Active => "active",
+            AgentSessionStatus.Completed => "completed",
+            AgentSessionStatus.Failed => "failed",
+            AgentSessionStatus.Partial => "partial",
+            AgentSessionStatus.Expired => "expired",
+            _ => throw new ArgumentOutOfRangeException(nameof(status), status, null)
+        };
+    }
+
+    private static string ToWireMetricName(TokenMetricName metricName)
+    {
+        return metricName switch
+        {
+            TokenMetricName.InputTokens => "input_tokens",
+            TokenMetricName.OutputTokens => "output_tokens",
+            TokenMetricName.CachedInputTokens => "cached_input_tokens",
+            TokenMetricName.ReasoningOutputTokens => "reasoning_output_tokens",
+            TokenMetricName.TotalTokens => "total_tokens",
+            _ => throw new ArgumentOutOfRangeException(nameof(metricName), metricName, null)
+        };
+    }
+
+    private static string ToWireMetricStatus(TokenMetricStatus metricStatus)
+    {
+        return metricStatus switch
+        {
+            TokenMetricStatus.Observed => "observed",
+            TokenMetricStatus.Derived => "derived",
+            TokenMetricStatus.Estimated => "estimated",
+            TokenMetricStatus.Unavailable => "unavailable",
+            TokenMetricStatus.NotApplicable => "not_applicable",
+            TokenMetricStatus.Mixed => "mixed",
+            _ => throw new ArgumentOutOfRangeException(nameof(metricStatus), metricStatus, null)
+        };
+    }
+
+    private static string ToWireMetricConfidence(TokenMetricConfidence metricConfidence)
+    {
+        return metricConfidence switch
+        {
+            TokenMetricConfidence.Observed => "observed",
+            TokenMetricConfidence.Deterministic => "deterministic",
+            TokenMetricConfidence.Estimated => "estimated",
+            TokenMetricConfidence.LlmInferred => "llm_inferred",
+            TokenMetricConfidence.Unavailable => "unavailable",
+            _ => throw new ArgumentOutOfRangeException(nameof(metricConfidence), metricConfidence, null)
+        };
+    }
+
+    private static string ToWireSourceKind(TokenObservationSourceKind sourceKind)
+    {
+        return sourceKind switch
+        {
+            TokenObservationSourceKind.CodexEvent => "codex_event",
+            TokenObservationSourceKind.OtlpMetric => "otel_metric",
+            TokenObservationSourceKind.DerivedSummary => "derived_summary",
+            TokenObservationSourceKind.Estimator => "estimator",
+            TokenObservationSourceKind.Missing => "missing",
+            _ => throw new ArgumentOutOfRangeException(nameof(sourceKind), sourceKind, null)
+        };
     }
 
     private sealed record ReadinessDependency(string Name, string Status);

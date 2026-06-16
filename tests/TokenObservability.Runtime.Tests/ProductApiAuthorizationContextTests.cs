@@ -512,6 +512,173 @@ public sealed class ProductApiAuthorizationContextTests
     }
 
     [Fact]
+    public async Task SessionsRoutePreservesTokenMetricQualityMarkers()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var adminClaims = CreateClaims(subject: "admin-subject", groupObjectIds: ["entra-admin-group"]);
+        var admin = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            adminClaims);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            admin.ProductUserId,
+            "entra-admin-group",
+            ProductRole.PlatformAdmin);
+        var credential = await IssueCredentialAsync(store, seed, "profile-contoso-codex");
+        var envelope = await store.RecordTelemetryEnvelopeAsync(new CreateTelemetryEnvelopeRecordRequest(
+            CustomerOrganizationId: seed.Organization.CustomerOrganizationId,
+            HarnessSetupProfileId: credential.Credential.HarnessSetupProfileId,
+            ScopedIngestionCredentialId: credential.Credential.ScopedIngestionCredentialId,
+            ProductUserId: credential.Credential.ProductUserId,
+            Harness: CodingAgentHarness.CodexCli,
+            SchemaVersion: "2026-06-01",
+            SignalType: "metrics",
+            SourceEventName: "codex.api_request",
+            SourceEventTimestampUtc: Now,
+            ConversationIdHash: "conversation-api-001",
+            ModelName: "gpt-5",
+            ContentPolicyDecision: "metadata_only",
+            RoutingDecision: "metadata_store",
+            MetricStatus: TokenMetricStatus.Mixed,
+            MetricConfidence: TokenMetricConfidence.Estimated,
+            DedupeKeyHash: "dedupe-api-001"));
+        var session = await store.UpsertAgentSessionAsync(new CreateAgentSessionRecordRequest(
+            CustomerOrganizationId: seed.Organization.CustomerOrganizationId,
+            ProductUserId: credential.Credential.ProductUserId,
+            HarnessSetupProfileId: credential.Credential.HarnessSetupProfileId,
+            Harness: CodingAgentHarness.CodexCli,
+            ProviderSessionIdHash: "conversation-api-001",
+            StartedAtUtc: Now,
+            EndedAtUtc: null,
+            SessionStatus: AgentSessionStatus.Active,
+            RepositoryEvidenceState: RepositoryEvidenceState.Unavailable,
+            ContentCaptureSummary: ContentCaptureSummary.MetadataOnly,
+            RecommendationStatus: RecommendationStatus.NotStarted,
+            TokenMetricStatus: TokenMetricStatus.Mixed,
+            TokenMetricConfidence: TokenMetricConfidence.Estimated));
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            ModelInvocationId: null,
+            TokenMetricName.InputTokens,
+            Value: 0,
+            TokenMetricStatus.Observed,
+            TokenMetricConfidence.Observed,
+            TokenObservationSourceKind.OtlpMetric,
+            envelope.TelemetryEnvelopeId));
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            ModelInvocationId: null,
+            TokenMetricName.CachedInputTokens,
+            Value: null,
+            TokenMetricStatus.Unavailable,
+            TokenMetricConfidence.Unavailable,
+            TokenObservationSourceKind.Missing,
+            envelope.TelemetryEnvelopeId));
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+        using var request = CreateAuthorizedRequest(HttpMethod.Get, "/api/v1/sessions", "contoso", adminClaims);
+
+        using var response = await client.SendAsync(request);
+
+        response.EnsureSuccessStatusCode();
+        using var body = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
+        var sessionJson = Assert.Single(body.RootElement.GetProperty("items").EnumerateArray());
+        Assert.Equal("mixed", sessionJson.GetProperty("tokenSummary").GetProperty("metricStatus").GetString());
+        Assert.Equal("estimated", sessionJson.GetProperty("tokenSummary").GetProperty("metricConfidence").GetString());
+        var tokenObservations = sessionJson.GetProperty("tokenObservations").EnumerateArray().ToArray();
+        var inputTokens = Assert.Single(
+            tokenObservations,
+            observation => observation.GetProperty("metricName").GetString() == "input_tokens");
+        Assert.Equal(0, inputTokens.GetProperty("value").GetInt64());
+        Assert.Equal("observed", inputTokens.GetProperty("metricStatus").GetString());
+        Assert.Equal("observed", inputTokens.GetProperty("metricConfidence").GetString());
+        var cachedTokens = Assert.Single(
+            tokenObservations,
+            observation => observation.GetProperty("metricName").GetString() == "cached_input_tokens");
+        Assert.True(cachedTokens.GetProperty("value").ValueKind == JsonValueKind.Null);
+        Assert.Equal("unavailable", cachedTokens.GetProperty("metricStatus").GetString());
+        Assert.Equal("unavailable", cachedTokens.GetProperty("metricConfidence").GetString());
+    }
+
+    [Fact]
+    public async Task SessionsRouteAllowsDeveloperSelfViewWithoutCrossUserLeakage()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var developerClaims = CreateClaims(subject: "developer-subject", groupObjectIds: ["developer-group"]);
+        var otherDeveloperClaims = CreateClaims(subject: "other-developer-subject", groupObjectIds: ["developer-group"]);
+        var developer = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            developerClaims);
+        var otherDeveloper = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            otherDeveloperClaims);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            developer.ProductUserId,
+            "developer-group",
+            ProductRole.Developer,
+            ProductScopeKind.Self);
+        var developerCredential = await IssueCredentialAsync(
+            store,
+            seed,
+            "profile-contoso-codex",
+            developer.ProductUserId);
+        var otherCredential = await IssueCredentialAsync(
+            store,
+            seed,
+            "profile-contoso-codex-other",
+            otherDeveloper.ProductUserId);
+        await SeedUnavailableSessionAsync(store, developerCredential.Credential, "developer-session-001");
+        await SeedUnavailableSessionAsync(store, otherCredential.Credential, "other-developer-session-001");
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+        using var request = CreateAuthorizedRequest(HttpMethod.Get, "/api/v1/sessions", "contoso", developerClaims);
+
+        using var response = await client.SendAsync(request);
+
+        response.EnsureSuccessStatusCode();
+        using var body = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
+        var session = Assert.Single(body.RootElement.GetProperty("items").EnumerateArray());
+        Assert.Equal(developer.ProductUserId.ToString(), session.GetProperty("productUserId").GetString());
+        Assert.DoesNotContain(otherDeveloper.ProductUserId.ToString(), body.RootElement.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SessionsRouteRejectsReadOnlyViewerWithoutSessionPermission()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var viewerClaims = CreateClaims(subject: "viewer-subject", groupObjectIds: ["viewer-group"]);
+        var viewer = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            viewerClaims);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            viewer.ProductUserId,
+            "viewer-group",
+            ProductRole.ReadOnlyViewer);
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+        using var request = CreateAuthorizedRequest(HttpMethod.Get, "/api/v1/sessions", "contoso", viewerClaims);
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        await AssertProblemCodeAsync(response, "authorization_denied");
+    }
+
+    [Fact]
     public async Task IngestionRejectionsRouteRejectsUnauthorizedCaller()
     {
         var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
@@ -779,7 +946,9 @@ public sealed class ProductApiAuthorizationContextTests
         TenantSeed seed,
         ProductUserId changedByProductUserId,
         string externalPrincipalId,
-        ProductRole role)
+        ProductRole role,
+        ProductScopeKind scopeKind = ProductScopeKind.Organization,
+        string? scopeId = null)
     {
         return store.SeedProductRoleMappingAsync(
             seed.Organization.CustomerOrganizationId,
@@ -788,8 +957,8 @@ public sealed class ProductApiAuthorizationContextTests
                 ExternalPrincipalType: ExternalPrincipalType.GroupObjectId,
                 ExternalPrincipalId: externalPrincipalId,
                 ProductRole: role,
-                ScopeKind: ProductScopeKind.Organization,
-                ScopeId: null,
+                ScopeKind: scopeKind,
+                ScopeId: scopeId,
                 EffectiveFromUtc: Now,
                 EffectiveToUtc: null,
                 ChangedByProductUserId: changedByProductUserId,
@@ -801,7 +970,8 @@ public sealed class ProductApiAuthorizationContextTests
     private static async Task<IssuedScopedIngestionCredential> IssueCredentialAsync(
         InMemoryTenantMetadataStore store,
         TenantSeed seed,
-        string harnessSetupProfileId)
+        string harnessSetupProfileId,
+        ProductUserId? productUserId = null)
     {
         var lifecycle = new ScopedIngestionCredentialLifecycleService(store, new StaticTenantMetadataClock(Now));
         var admin = await store.CreateProductUserAsync(
@@ -811,19 +981,20 @@ public sealed class ProductApiAuthorizationContextTests
                 ExternalSubjectId: $"admin-{Guid.NewGuid():N}",
                 DisplayLabel: "admin",
                 Email: "admin@example.test"));
-        var developer = await store.CreateProductUserAsync(
-            seed.Organization.CustomerOrganizationId,
-            seed.IdentityTenant.IdentityTenantId,
-            new CreateProductUserRequest(
-                ExternalSubjectId: $"developer-{Guid.NewGuid():N}",
-                DisplayLabel: "developer",
-                Email: "developer@example.test"));
+        var resolvedProductUserId = productUserId ?? (await store.CreateProductUserAsync(
+                seed.Organization.CustomerOrganizationId,
+                seed.IdentityTenant.IdentityTenantId,
+                new CreateProductUserRequest(
+                    ExternalSubjectId: $"developer-{Guid.NewGuid():N}",
+                    DisplayLabel: "developer",
+                    Email: "developer@example.test")))
+            .ProductUserId;
 
         return await lifecycle.CreateAsync(
             seed.Organization.CustomerOrganizationId,
             new IssueScopedIngestionCredentialRequest(
                 HarnessSetupProfileId: harnessSetupProfileId,
-                ProductUserId: developer.ProductUserId,
+                ProductUserId: resolvedProductUserId,
                 AllowedHarness: CodingAgentHarness.CodexCli,
                 AllowedScopes: [new ProductScope(ProductScopeKind.Organization, ScopeId: null)],
                 ExpiresAtUtc: Now.AddDays(30),
@@ -831,6 +1002,55 @@ public sealed class ProductApiAuthorizationContextTests
                 ActorEffectiveRole: ProductRole.PlatformAdmin,
                 CorrelationId: $"credential-create-{Guid.NewGuid():N}",
                 AuditEventId: $"audit-credential-create-{Guid.NewGuid():N}"));
+    }
+
+    private static async Task SeedUnavailableSessionAsync(
+        InMemoryTenantMetadataStore store,
+        ScopedIngestionCredential credential,
+        string providerSessionIdHash)
+    {
+        var envelope = await store.RecordTelemetryEnvelopeAsync(new CreateTelemetryEnvelopeRecordRequest(
+            CustomerOrganizationId: credential.CustomerOrganizationId,
+            HarnessSetupProfileId: credential.HarnessSetupProfileId,
+            ScopedIngestionCredentialId: credential.ScopedIngestionCredentialId,
+            ProductUserId: credential.ProductUserId,
+            Harness: credential.AllowedHarness,
+            SchemaVersion: "2026-06-01",
+            SignalType: "metrics",
+            SourceEventName: null,
+            SourceEventTimestampUtc: Now,
+            ConversationIdHash: providerSessionIdHash,
+            ModelName: null,
+            ContentPolicyDecision: "metadata_only",
+            RoutingDecision: "metadata_store",
+            MetricStatus: TokenMetricStatus.Unavailable,
+            MetricConfidence: TokenMetricConfidence.Unavailable,
+            DedupeKeyHash: $"dedupe-{providerSessionIdHash}"));
+        var session = await store.UpsertAgentSessionAsync(new CreateAgentSessionRecordRequest(
+            CustomerOrganizationId: credential.CustomerOrganizationId,
+            ProductUserId: credential.ProductUserId,
+            HarnessSetupProfileId: credential.HarnessSetupProfileId,
+            Harness: credential.AllowedHarness,
+            ProviderSessionIdHash: providerSessionIdHash,
+            StartedAtUtc: Now,
+            EndedAtUtc: null,
+            SessionStatus: AgentSessionStatus.Active,
+            RepositoryEvidenceState: RepositoryEvidenceState.Unavailable,
+            ContentCaptureSummary: ContentCaptureSummary.MetadataOnly,
+            RecommendationStatus: RecommendationStatus.NotStarted,
+            TokenMetricStatus: TokenMetricStatus.Unavailable,
+            TokenMetricConfidence: TokenMetricConfidence.Unavailable));
+
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            credential.CustomerOrganizationId,
+            session.AgentSessionId,
+            ModelInvocationId: null,
+            TokenMetricName.InputTokens,
+            Value: null,
+            TokenMetricStatus.Unavailable,
+            TokenMetricConfidence.Unavailable,
+            TokenObservationSourceKind.Missing,
+            envelope.TelemetryEnvelopeId));
     }
 
     private static Task<GovernanceAuditEvent> RecordRejectionAuditEventAsync(

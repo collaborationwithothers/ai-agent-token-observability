@@ -179,6 +179,110 @@ CREATE TABLE IF NOT EXISTS ingestion_rejection (
     )
 );
 
+CREATE TABLE IF NOT EXISTS telemetry_envelope (
+    telemetry_envelope_id uuid PRIMARY KEY,
+    customer_organization_id uuid NOT NULL,
+    harness_setup_profile_id text NOT NULL,
+    scoped_ingestion_credential_id uuid NOT NULL,
+    product_user_id uuid NOT NULL,
+    harness text NOT NULL,
+    schema_version text NOT NULL,
+    signal_type text NOT NULL,
+    source_event_name text NULL,
+    source_event_timestamp_utc timestamptz NULL,
+    received_at_utc timestamptz NOT NULL,
+    conversation_id_hash text NULL,
+    model_name text NULL,
+    content_policy_decision text NOT NULL,
+    routing_decision text NOT NULL,
+    metric_status text NOT NULL,
+    metric_confidence text NOT NULL,
+    dedupe_key_hash text NOT NULL,
+    CONSTRAINT fk_telemetry_envelope_customer_organization FOREIGN KEY (customer_organization_id) REFERENCES customer_organization (customer_organization_id),
+    CONSTRAINT fk_telemetry_envelope_scoped_credential FOREIGN KEY (customer_organization_id, scoped_ingestion_credential_id) REFERENCES scoped_ingestion_credential (customer_organization_id, scoped_ingestion_credential_id),
+    CONSTRAINT fk_telemetry_envelope_product_user FOREIGN KEY (customer_organization_id, product_user_id) REFERENCES product_user (customer_organization_id, product_user_id),
+    CONSTRAINT ck_telemetry_envelope_harness CHECK (harness IN ('codex_cli')),
+    CONSTRAINT ck_telemetry_envelope_signal_type CHECK (signal_type IN ('logs', 'traces', 'metrics')),
+    CONSTRAINT ck_telemetry_envelope_content_policy_decision CHECK (content_policy_decision IN ('metadata_only', 'capture_candidate', 'blocked', 'redaction_required')),
+    CONSTRAINT ck_telemetry_envelope_metric_status CHECK (metric_status IN ('observed', 'derived', 'estimated', 'unavailable', 'not_applicable', 'mixed')),
+    CONSTRAINT ck_telemetry_envelope_metric_confidence CHECK (metric_confidence IN ('observed', 'deterministic', 'estimated', 'llm_inferred', 'unavailable')),
+    CONSTRAINT ck_telemetry_envelope_metric_quality CHECK (
+        metric_status NOT IN ('unavailable', 'not_applicable')
+        OR metric_confidence = 'unavailable'
+    ),
+    CONSTRAINT uq_telemetry_envelope_customer_envelope_id UNIQUE (customer_organization_id, telemetry_envelope_id),
+    CONSTRAINT uq_telemetry_envelope_dedupe UNIQUE (customer_organization_id, dedupe_key_hash)
+);
+
+CREATE TABLE IF NOT EXISTS agent_session (
+    agent_session_id uuid PRIMARY KEY,
+    customer_organization_id uuid NOT NULL,
+    product_user_id uuid NOT NULL,
+    harness_setup_profile_id text NOT NULL,
+    harness text NOT NULL,
+    provider_session_id_hash text NULL,
+    started_at_utc timestamptz NULL,
+    ended_at_utc timestamptz NULL,
+    session_status text NOT NULL,
+    repository_evidence_state text NOT NULL,
+    content_capture_summary text NOT NULL,
+    recommendation_status text NOT NULL,
+    token_metric_status text NOT NULL,
+    token_metric_confidence text NOT NULL,
+    created_at_utc timestamptz NOT NULL,
+    updated_at_utc timestamptz NOT NULL,
+    CONSTRAINT fk_agent_session_customer_organization FOREIGN KEY (customer_organization_id) REFERENCES customer_organization (customer_organization_id),
+    CONSTRAINT fk_agent_session_product_user FOREIGN KEY (customer_organization_id, product_user_id) REFERENCES product_user (customer_organization_id, product_user_id),
+    CONSTRAINT ck_agent_session_harness CHECK (harness IN ('codex_cli')),
+    CONSTRAINT ck_agent_session_status CHECK (session_status IN ('active', 'completed', 'failed', 'partial', 'expired')),
+    CONSTRAINT ck_agent_session_repository_evidence_state CHECK (repository_evidence_state IN ('observed', 'correlated', 'inferred', 'unavailable', 'mixed')),
+    CONSTRAINT ck_agent_session_content_capture_summary CHECK (content_capture_summary IN ('none', 'metadata_only', 'captured', 'review_required', 'redaction_failed', 'mixed')),
+    CONSTRAINT ck_agent_session_recommendation_status CHECK (recommendation_status IN ('not_started', 'queued', 'generated', 'failed', 'disabled')),
+    CONSTRAINT ck_agent_session_token_metric_status CHECK (token_metric_status IN ('observed', 'derived', 'estimated', 'unavailable', 'not_applicable', 'mixed')),
+    CONSTRAINT ck_agent_session_token_metric_confidence CHECK (token_metric_confidence IN ('observed', 'deterministic', 'estimated', 'llm_inferred', 'unavailable')),
+    CONSTRAINT ck_agent_session_token_quality CHECK (
+        token_metric_status NOT IN ('unavailable', 'not_applicable')
+        OR token_metric_confidence = 'unavailable'
+    ),
+    CONSTRAINT ck_agent_session_window CHECK (ended_at_utc IS NULL OR started_at_utc IS NULL OR ended_at_utc >= started_at_utc),
+    CONSTRAINT ck_agent_session_timestamps CHECK (updated_at_utc >= created_at_utc),
+    CONSTRAINT uq_agent_session_customer_session_id UNIQUE (customer_organization_id, agent_session_id)
+);
+
+CREATE TABLE IF NOT EXISTS token_observation (
+    token_observation_id uuid PRIMARY KEY,
+    customer_organization_id uuid NOT NULL,
+    agent_session_id uuid NOT NULL,
+    model_invocation_id text NULL,
+    metric_name text NOT NULL,
+    value bigint NULL,
+    metric_status text NOT NULL,
+    metric_confidence text NOT NULL,
+    source_kind text NOT NULL,
+    source_telemetry_envelope_id uuid NULL,
+    created_at_utc timestamptz NOT NULL,
+    CONSTRAINT fk_token_observation_agent_session FOREIGN KEY (customer_organization_id, agent_session_id) REFERENCES agent_session (customer_organization_id, agent_session_id),
+    CONSTRAINT fk_token_observation_telemetry_envelope FOREIGN KEY (customer_organization_id, source_telemetry_envelope_id) REFERENCES telemetry_envelope (customer_organization_id, telemetry_envelope_id),
+    CONSTRAINT ck_token_observation_metric_name CHECK (metric_name IN ('input_tokens', 'output_tokens', 'cached_input_tokens', 'reasoning_output_tokens', 'total_tokens')),
+    CONSTRAINT ck_token_observation_value_nonnegative CHECK (value IS NULL OR value >= 0),
+    CONSTRAINT ck_token_observation_metric_status CHECK (metric_status IN ('observed', 'derived', 'estimated', 'unavailable', 'not_applicable', 'mixed')),
+    CONSTRAINT ck_token_observation_metric_confidence CHECK (metric_confidence IN ('observed', 'deterministic', 'estimated', 'llm_inferred', 'unavailable')),
+    CONSTRAINT ck_token_observation_source_kind CHECK (source_kind IN ('codex_event', 'otel_metric', 'derived_summary', 'estimator', 'missing')),
+    CONSTRAINT ck_token_observation_null_semantics CHECK (
+        (metric_status IN ('unavailable', 'not_applicable') AND value IS NULL)
+        OR (metric_status NOT IN ('unavailable', 'not_applicable') AND value IS NOT NULL)
+    ),
+    CONSTRAINT ck_token_observation_zero_semantics CHECK (
+        value IS NULL
+        OR value <> 0
+        OR (metric_status IN ('observed', 'derived') AND metric_confidence IN ('observed', 'deterministic'))
+    ),
+    CONSTRAINT ck_token_observation_missing_source_semantics CHECK (
+        source_kind <> 'missing'
+        OR metric_status IN ('unavailable', 'not_applicable')
+    )
+);
+
 CREATE INDEX IF NOT EXISTS ix_customer_organization_status
     ON customer_organization (status);
 
@@ -207,6 +311,12 @@ CREATE INDEX IF NOT EXISTS ix_ingestion_rejection_customer_received
 
 CREATE INDEX IF NOT EXISTS ix_ingestion_rejection_reason_received
     ON ingestion_rejection (reason_code, received_at_utc DESC);
+
+CREATE INDEX IF NOT EXISTS ix_agent_session_customer_user_started
+    ON agent_session (customer_organization_id, product_user_id, started_at_utc DESC);
+
+CREATE INDEX IF NOT EXISTS ix_token_observation_session_metric
+    ON token_observation (customer_organization_id, agent_session_id, metric_name);
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_product_role_mapping_active_principal_role_scope
     ON product_role_mapping (
