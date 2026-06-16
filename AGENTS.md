@@ -104,7 +104,7 @@ When Code Reviewer reports `CHANGES_REQUESTED`:
 - Track each finding as accepted, rejected with reason, fixed files, added tests, and validation command.
 - Rerun validation before requesting re-review.
 - In the re-review prompt, include the prior findings ledger and ask the reviewer to verify the fixes plus regressions in touched files.
-- Use a full-diff re-review only after all prior findings are closed or when the fix changes architecture, security, privacy, or tenant-boundary behavior.
+- Within the single allowed rereview pass, use a full-diff rereview only when the fix changes architecture, security, privacy, tenant-boundary behavior, persistence, Terraform deployment behavior, or product authorization. Otherwise restrict rereview to prior `Must Fix` findings, the fix delta, and direct regressions in touched files.
 
 ## Implementation Rules
 
