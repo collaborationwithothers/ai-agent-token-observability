@@ -120,6 +120,30 @@ variable "azure_dns_zone" {
   }
 }
 
+variable "private_link_origin" {
+  description = "Optional Front Door Private Link configuration for Container Apps managed environment origins."
+  type = object({
+    enabled                = bool
+    private_link_target_id = optional(string)
+    location               = optional(string)
+    request_message        = optional(string)
+    target_type            = optional(string)
+  })
+  default = {
+    enabled = false
+  }
+
+  validation {
+    condition = !var.private_link_origin.enabled || alltrue([
+      can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.App/managedEnvironments/[^/]+$", coalesce(try(var.private_link_origin.private_link_target_id, null), ""))),
+      contains(["managedEnvironments"], coalesce(try(var.private_link_origin.target_type, null), "managedEnvironments")),
+      length(coalesce(try(var.private_link_origin.request_message, null), "Access request for CDN FrontDoor Private Link Origin")) >= 1,
+      length(coalesce(try(var.private_link_origin.request_message, null), "Access request for CDN FrontDoor Private Link Origin")) <= 140
+    ])
+    error_message = "private_link_origin must target a Container Apps managed environment with target_type managedEnvironments and a 1 to 140 character request message when enabled."
+  }
+}
+
 variable "log_analytics_workspace_id" {
   description = "Log Analytics workspace ID for Front Door logs and metrics."
   type        = string

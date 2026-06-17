@@ -92,9 +92,9 @@ The validation must prove:
 Command contract:
 
 ```bash
-curl -I https://app.tokenobs.consultwithcloud.com/healthz
-curl -I https://api.tokenobs.consultwithcloud.com/healthz
-curl -I https://ingest.tokenobs.consultwithcloud.com/healthz
+curl -I https://app.tokenobs.consultwithcloud.com/
+curl -I https://api.tokenobs.consultwithcloud.com/health/ready
+curl -I https://ingest.tokenobs.consultwithcloud.com/health/ready
 ```
 
 Expected result:
@@ -109,27 +109,29 @@ The validation must prove:
 - The generated Azure Container Apps FQDN for each public product service is not reachable from the public internet in production.
 - Public network access is disabled on the Azure Container Apps environment for production.
 - Private endpoint connections required for the Front Door origin are approved.
+- Terraform app runtime output `direct_origin_validation_targets.public_network_access` is `Disabled` in `pp` and `pd`.
+- Terraform edge output `front_door_private_link_origin_approval_requests` identifies the Product Dashboard, Product API, and Product Ingestion Endpoint origins covered by the Container Apps managed environment Private Link approval.
 
 Command contract:
 
 ```bash
-for ACA_FQDN in \
-  "$DASHBOARD_ACA_FQDN" \
-  "$API_ACA_FQDN" \
-  "$INGEST_ACA_FQDN"
-do
-  curl -I --max-time 15 "https://$ACA_FQDN/healthz"
-done
+curl -I --max-time 15 "https://$DASHBOARD_ACA_FQDN/"
+curl -I --max-time 15 "https://$API_ACA_FQDN/health/ready"
+curl -I --max-time 15 "https://$INGEST_ACA_FQDN/health/ready"
 ```
 
 Expected production result:
 
 - Direct public requests to generated ACA FQDNs fail, time out, or return an explicit platform rejection.
 - Direct generated ACA FQDN access must not return the application health response from the public internet.
+- Any HTTP response served by the application, including `404`, proves the generated ACA FQDN is publicly reachable and is a failed direct-origin proof in `pp` or `pd`.
 
 Failure rule:
 
 - If a generated ACA FQDN returns a successful application response from the public internet in `pp` or `pd`, the release is not production-ready.
+- If a generated ACA FQDN returns any application-served HTTP response from the public internet in `pp` or `pd`, the release is not production-ready.
+- If the Container Apps environment public network access is not `Disabled` in `pp` or `pd`, the release is not production-ready.
+- If a Front Door Private Link origin approval remains pending or rejected, the release is not production-ready.
 
 ### 5. Origin Host Header Proof
 
@@ -138,12 +140,21 @@ The validation must prove:
 - Front Door origin host name uses the generated ACA FQDN.
 - Front Door origin host header uses the generated ACA FQDN unless a later tested design changes the TLS origin contract.
 - End-to-end HTTPS succeeds from Front Door to the ACA origin.
+- Front Door origin Private Link target is the Azure Container Apps managed environment.
+- The Private Link target type is `managedEnvironments`.
 
 Rationale:
 
 - Public hostnames are served by Front Door managed certificates.
 - ACA does not need product custom domains or product public certificates in the first release.
 - ACA origin TLS uses the generated ACA hostname and certificate.
+
+Required audit evidence:
+
+- Store the sanitized `front_door_private_link_origin_approval_requests` output with the deployment record.
+- Record the final approved state for one or more Azure-managed private endpoint connection requests on the Container Apps managed environment, correlated to the three Front Door origin outputs.
+- Record who approved each Private Link connection request and when approval completed.
+- Record the public direct-origin proof result without cookies, bearer tokens, request payloads, or response bodies.
 
 ### 6. Authentication Callback Proof
 

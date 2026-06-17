@@ -43,6 +43,11 @@ resource "azurerm_container_app_environment" "this" {
       condition     = !var.enable_zone_redundancy || var.container_app_environment_infrastructure_subnet_id != null
       error_message = "container_app_environment_infrastructure_subnet_id is required when enable_zone_redundancy is true."
     }
+
+    precondition {
+      condition     = !contains(["pp", "pd"], var.environment) || var.container_app_environment_public_network_access == "Disabled"
+      error_message = "pp and pd app_runtime deployments must disable Container Apps environment public network access so generated ACA FQDNs cannot bypass Front Door."
+    }
   }
 }
 

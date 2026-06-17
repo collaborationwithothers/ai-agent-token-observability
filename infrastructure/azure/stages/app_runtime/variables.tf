@@ -130,7 +130,7 @@ variable "container_app_environment_logs_destination" {
 }
 
 variable "container_app_environment_public_network_access" {
-  description = "Public network access for the Container Apps environment. Later edge issues can set this to Disabled when Private Link origins are wired."
+  description = "Public network access for the Container Apps environment. Must be Disabled in pp and pd so generated ACA FQDNs cannot bypass Front Door."
   type        = string
   default     = "Enabled"
 
