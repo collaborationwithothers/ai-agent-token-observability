@@ -150,9 +150,10 @@ variable "private_link_origin" {
 variable "log_analytics_workspace_id" {
   description = "Log Analytics workspace ID for Front Door logs and metrics."
   type        = string
+  default     = null
 
   validation {
-    condition     = can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.OperationalInsights/workspaces/[^/]+$", var.log_analytics_workspace_id))
-    error_message = "log_analytics_workspace_id must be a Log Analytics workspace resource ID."
+    condition     = var.log_analytics_workspace_id == null || can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.OperationalInsights/workspaces/[^/]+$", var.log_analytics_workspace_id))
+    error_message = "log_analytics_workspace_id must be a Log Analytics workspace resource ID when supplied."
   }
 }

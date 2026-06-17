@@ -271,9 +271,11 @@ resource "azurerm_dns_cname_record" "front_door_custom_domain" {
 }
 
 resource "azurerm_monitor_diagnostic_setting" "front_door_profile" {
+  for_each = var.log_analytics_workspace_id == null ? {} : { profile = var.log_analytics_workspace_id }
+
   name                           = "${var.name_prefix}-afd-diag"
   target_resource_id             = azurerm_cdn_frontdoor_profile.this.id
-  log_analytics_workspace_id     = var.log_analytics_workspace_id
+  log_analytics_workspace_id     = each.value
   log_analytics_destination_type = "Dedicated"
 
   enabled_log {

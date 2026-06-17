@@ -98,5 +98,5 @@ output "security_policy_id" {
 
 output "diagnostic_setting_id" {
   description = "Front Door profile diagnostic setting ID."
-  value       = azurerm_monitor_diagnostic_setting.front_door_profile.id
+  value       = try(azurerm_monitor_diagnostic_setting.front_door_profile["profile"].id, null)
 }

@@ -3,9 +3,6 @@ name: Safe Terraform Deletion Fixture
 on:
   workflow_dispatch:
     inputs:
-      expected_repository:
-        required: true
-        type: string
       environment:
         required: true
         type: choice
@@ -24,33 +21,13 @@ on:
       customer_organization_slug:
         required: true
         type: string
-      destroy_scope:
+      deletion_target:
         required: true
         type: choice
         options:
           - environment
-          - stage
-      terraform_stage:
-        required: true
-        type: choice
-        options:
           - edge
           - app_runtime
-      terraform_workspace:
-        required: true
-        type: string
-      apply_destroy:
-        required: true
-        type: boolean
-      reviewed_destroy_plan_run_id:
-        required: false
-        type: string
-      confirmation:
-        required: true
-        type: string
-      reason:
-        required: true
-        type: string
 
 permissions:
   actions: read
@@ -62,38 +39,33 @@ jobs:
     name: Guarded Terraform deletion plan
     if: >-
       ${{
-        inputs.apply_destroy == false &&
         github.event_name == 'workflow_dispatch' &&
         github.repository == 'collaborationwithothers/ai-agent-token-observability' &&
-        inputs.expected_repository == 'collaborationwithothers/ai-agent-token-observability' &&
         github.actor == 'haripraghash' &&
         github.ref == 'refs/heads/main'
       }}
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
-    environment: ${{ inputs.environment }}
+    outputs:
+      artifact_name: ${{ steps.guardrails.outputs.artifact_name }}
+      destroy_scope: ${{ steps.guardrails.outputs.destroy_scope }}
+      target_stages: ${{ steps.guardrails.outputs.target_stages }}
+      terraform_workspace: ${{ steps.guardrails.outputs.terraform_workspace }}
     steps:
       - name: Validate guardrails before privileged steps
+        id: guardrails
         env:
           REQUIRED_REPOSITORY: collaborationwithothers/ai-agent-token-observability
-          EXPECTED_REPOSITORY: ${{ inputs.expected_repository }}
           ENVIRONMENT: ${{ inputs.environment }}
           AZURE_REGION: ${{ inputs.azure_region }}
           CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
-          DESTROY_SCOPE: ${{ inputs.destroy_scope }}
-          TERRAFORM_STAGE: ${{ inputs.terraform_stage }}
-          REQUESTED_TERRAFORM_WORKSPACE: ${{ inputs.terraform_workspace }}
-          APPLY_DESTROY: ${{ inputs.apply_destroy }}
-          REVIEWED_DESTROY_PLAN_RUN_ID: ${{ inputs.reviewed_destroy_plan_run_id }}
-          CONFIRMATION: ${{ inputs.confirmation }}
-          REASON: ${{ inputs.reason }}
+          DELETION_TARGET: ${{ inputs.deletion_target }}
         run: |
           set -euo pipefail
           DISPOSABLE_STAGE_ORDER="edge app_runtime"
           RETAINED_STAGE_DENY_LIST="foundation public_dns"
           test "${GITHUB_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
-          test "${EXPECTED_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
           test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
           test "${GITHUB_ACTOR}" = "haripraghash"
           test "${GITHUB_REF}" = "refs/heads/main"
@@ -101,13 +73,21 @@ jobs:
           case "${ENVIRONMENT}" in dv|qa|pp|pd) ;; *) exit 1 ;; esac
           case "${AZURE_REGION}" in eastus|eastus2|westeurope) ;; *) exit 1 ;; esac
           case "${CUSTOMER_ORGANIZATION_SLUG}" in *[!a-z0-9-]*|""|-*|*-) exit 1 ;; esac
-          case "${DESTROY_SCOPE}" in environment|stage) ;; *) exit 1 ;; esac
-          test "${APPLY_DESTROY}" = "false"
-          test -n "${REASON}"
+          case "${DELETION_TARGET}" in environment|edge|app_runtime) ;; *) exit 1 ;; esac
           TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
           test "${TF_WORKSPACE}" != "default"
-          test "${REQUESTED_TERRAFORM_WORKSPACE}" = "${TF_WORKSPACE}"
-          test "${CONFIRMATION}" = "destroy ${TF_WORKSPACE} ${DESTROY_SCOPE}"
+          if [[ "${DELETION_TARGET}" == "environment" ]]; then
+            DESTROY_SCOPE="environment"
+            TARGET_STAGES="${DISPOSABLE_STAGE_ORDER}"
+          else
+            DESTROY_SCOPE="stage"
+            TARGET_STAGES="${DELETION_TARGET}"
+          fi
+          ARTIFACT_NAME="terraform-destroy-plans-${DESTROY_SCOPE}-${TF_WORKSPACE}"
+          echo "artifact_name=${ARTIFACT_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "destroy_scope=${DESTROY_SCOPE}" >> "${GITHUB_OUTPUT}"
+          echo "target_stages=${TARGET_STAGES}" >> "${GITHUB_OUTPUT}"
+          echo "terraform_workspace=${TF_WORKSPACE}" >> "${GITHUB_OUTPUT}"
 
       - name: Azure login
         uses: azure/login@v2
@@ -121,65 +101,55 @@ jobs:
           DESTROY_PLAN_FILE="${RUNNER_TEMP}/edge-destroy.tfplan"
           terraform -chdir="infrastructure/azure/stages/edge" plan -destroy -out="${DESTROY_PLAN_FILE}"
 
+      - name: Upload deletion plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.guardrails.outputs.artifact_name }}
+          path: ${{ runner.temp }}/terraform-destroy-plans
+
   destroy-apply:
     name: Guarded Terraform deletion apply
+    needs: destroy-plan
     if: >-
       ${{
-        inputs.apply_destroy == true &&
+        needs.destroy-plan.result == 'success' &&
         github.event_name == 'workflow_dispatch' &&
         github.repository == 'collaborationwithothers/ai-agent-token-observability' &&
-        inputs.expected_repository == 'collaborationwithothers/ai-agent-token-observability' &&
         github.actor == 'haripraghash' &&
         github.ref == 'refs/heads/main'
       }}
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
-    environment: ${{ inputs.environment }}
+    environment:
+      name: terraform-deletion-approval
     steps:
       - name: Validate guardrails before privileged steps
         env:
           REQUIRED_REPOSITORY: collaborationwithothers/ai-agent-token-observability
-          EXPECTED_REPOSITORY: ${{ inputs.expected_repository }}
           ENVIRONMENT: ${{ inputs.environment }}
           AZURE_REGION: ${{ inputs.azure_region }}
           CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
-          DESTROY_SCOPE: ${{ inputs.destroy_scope }}
-          TERRAFORM_STAGE: ${{ inputs.terraform_stage }}
-          REQUESTED_TERRAFORM_WORKSPACE: ${{ inputs.terraform_workspace }}
-          APPLY_DESTROY: ${{ inputs.apply_destroy }}
-          REVIEWED_DESTROY_PLAN_RUN_ID: ${{ inputs.reviewed_destroy_plan_run_id }}
-          CONFIRMATION: ${{ inputs.confirmation }}
-          REASON: ${{ inputs.reason }}
+          DELETION_TARGET: ${{ inputs.deletion_target }}
+          DESTROY_SCOPE: ${{ needs.destroy-plan.outputs.destroy_scope }}
+          TARGET_STAGES: ${{ needs.destroy-plan.outputs.target_stages }}
+          TF_WORKSPACE: ${{ needs.destroy-plan.outputs.terraform_workspace }}
         run: |
           set -euo pipefail
-          DISPOSABLE_STAGE_ORDER="edge app_runtime"
-          RETAINED_STAGE_DENY_LIST="foundation public_dns"
           test "${GITHUB_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
-          test "${EXPECTED_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
           test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
           test "${GITHUB_ACTOR}" = "haripraghash"
           test "${GITHUB_REF}" = "refs/heads/main"
           case "${GITHUB_REF_NAME}:${ENVIRONMENT}" in main:dv|main:qa|main:pp|main:pd) ;; *) exit 1 ;; esac
-          case "${ENVIRONMENT}" in dv|qa|pp|pd) ;; *) exit 1 ;; esac
-          case "${AZURE_REGION}" in eastus|eastus2|westeurope) ;; *) exit 1 ;; esac
-          case "${CUSTOMER_ORGANIZATION_SLUG}" in *[!a-z0-9-]*|""|-*|*-) exit 1 ;; esac
           case "${DESTROY_SCOPE}" in environment|stage) ;; *) exit 1 ;; esac
-          test "${APPLY_DESTROY}" = "true"
-          case "${REVIEWED_DESTROY_PLAN_RUN_ID}" in *[!0-9]*|"") exit 1 ;; esac
-          test -n "${REASON}"
-          TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
+          test "${TF_WORKSPACE}" = "${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
           test "${TF_WORKSPACE}" != "default"
-          test "${REQUESTED_TERRAFORM_WORKSPACE}" = "${TF_WORKSPACE}"
-          test "${CONFIRMATION}" = "destroy ${TF_WORKSPACE} ${DESTROY_SCOPE}"
+          test -n "${TARGET_STAGES}"
 
-      - name: Download reviewed deletion plan artifact
+      - name: Download approved deletion plan artifact
         uses: actions/download-artifact@v5
         with:
-          name: terraform-destroy-plans-${{ inputs.destroy_scope }}-${{ inputs.terraform_workspace }}
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.reviewed_destroy_plan_run_id }}
+          name: ${{ needs.destroy-plan.outputs.artifact_name }}
           path: ${{ runner.temp }}/terraform-destroy-plans
 
       - name: Azure login
