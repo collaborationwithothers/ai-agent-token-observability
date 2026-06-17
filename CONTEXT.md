@@ -313,7 +313,7 @@ The deployment strategy where the Azure Production MVP runs active in a single r
 _Avoid_: Active-active MVP, regionless deployment
 
 **Guarded Terraform Apply**:
-A manual GitHub Actions deployment path that may run Terraform apply only after repository, actor, environment, region, workspace, branch, confirmation, OIDC, least-privilege, and environment-protection checks pass.
+A manual GitHub Actions deployment path that may run normal Terraform apply only after repository, actor, environment, region, workspace, branch, confirmation, OIDC, least-privilege, and environment-protection checks pass. Retained public DNS apply is the only confirmation-input exception and must use its fixed stage, owner workspace, protected apply environment, same-run saved plan artifact, Cloudflare delegation output, and public NS verification controls.
 _Avoid_: Unguarded apply, PR-triggered deployment
 
 **Public Repository Workflow Guardrail**:

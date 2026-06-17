@@ -325,7 +325,8 @@ Deployment-capable GitHub Actions must follow Public Repository Workflow Guardra
 - Derived workspace validation.
 - Least-privilege `GITHUB_TOKEN` permissions.
 - Azure OIDC with least privilege.
-- Manual confirmation for apply.
+- Manual confirmation for normal deploy apply.
+- Retained public DNS apply may omit the confirmation input only when fixed to `public_dns` in `pd_eastus2_internal`, protected by the public DNS apply environment, limited to same-run saved plan apply, and paired with public NS verification.
 - Environment protection for `pp` and `pd`.
 - Guardrail validation script and tests.
 

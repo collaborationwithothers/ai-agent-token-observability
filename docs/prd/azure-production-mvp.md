@@ -129,6 +129,7 @@ The MVP must show:
 - Terraform workspace names follow `{environment}_{region}_{customerOrganizationSlug}`.
 - Terraform modules use Azure Verified Modules where suitable modules exist.
 - Deployment-capable workflows are manual-only and guarded by repository, actor, branch, environment, region, workspace, OIDC, permissions, and confirmation checks.
+- The retained public DNS workflow is the only apply-capable exception to the confirmation input. Its replacement controls are a fixed `public_dns` stage, the single owner workspace `pd_eastus2_internal`, protected public DNS apply environment, same-run saved plan artifact, Cloudflare delegation output only, and public NS verification.
 - A committed workflow guardrail validator and tests detect unsafe workflow triggers or missing deployment guards.
 - Public product hostnames serve through Azure Front Door managed certificates.
 - Front Door origin health succeeds through Private Link to Azure Container Apps.
