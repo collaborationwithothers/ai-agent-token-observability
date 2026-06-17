@@ -95,3 +95,36 @@ variable "public_ingress_hostnames" {
   type        = map(string)
   default     = {}
 }
+
+variable "foundation_resource_group_name" {
+  description = "Optional override for the retained foundation resource group name."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.foundation_resource_group_name == null || can(regex("^[A-Za-z0-9._() -]{1,90}$", var.foundation_resource_group_name))
+    error_message = "foundation_resource_group_name must be a valid Azure resource group name when supplied."
+  }
+}
+
+variable "container_registry_name" {
+  description = "Optional override for the shared Azure Container Registry name. Must be globally unique."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.container_registry_name == null || can(regex("^[A-Za-z0-9]{5,50}$", var.container_registry_name))
+    error_message = "container_registry_name must be 5 to 50 alphanumeric characters when supplied."
+  }
+}
+
+variable "container_registry_sku" {
+  description = "SKU for the shared Azure Container Registry."
+  type        = string
+  default     = "Standard"
+
+  validation {
+    condition     = contains(["Basic", "Standard", "Premium"], var.container_registry_sku)
+    error_message = "container_registry_sku must be Basic, Standard, or Premium."
+  }
+}

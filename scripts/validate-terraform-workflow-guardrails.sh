@@ -103,12 +103,13 @@ IMAGE_PUBLISH_PATTERNS = (
     r"\baz\s+acr\s+login\b",
     r"docker/build-push-action",
     r"\bdocker\s+push\b",
-    r"ACR_LOGIN_SERVER|acr_login_server",
+    r"ACR_LOGIN_SERVER|acr_login_server|container_registry_login_server",
 )
 
 IMAGE_PUBLISH_REQUIRED_PATTERNS = {
-    "ACR login server input": r"(?m)^\s*acr_login_server\s*:",
     "ACR login server guard": r"ACR_LOGIN_SERVER.*azurecr\.io|azurecr\.io.*ACR_LOGIN_SERVER",
+    "foundation Terraform state initialization": r"infrastructure/azure/stages/foundation",
+    "foundation container registry login server output": r"terraform\s+-chdir=.*foundation.*output\s+-raw\s+container_registry_login_server|terraform\s+output\s+-raw\s+container_registry_login_server",
     "Product Dashboard image": r"product-dashboard",
     "Product API image": r"product-api",
     "Product Ingestion image": r"product-ingestion",
@@ -261,11 +262,16 @@ def image_publish_required_errors(content: str) -> list[str]:
         errors.append("ACR image publish workflow must not grant packages write")
     if re.search(r"ghcr\.io|GHCR", content, re.IGNORECASE):
         errors.append("ACR image publish workflow must not reference GHCR")
+    if re.search(r"(?m)^\s*acr_login_server\s*:", content):
+        errors.append("ACR image publish workflow must not expose acr_login_server as a dispatch input")
 
     azure_login_line = first_line(content, "azure/login")
+    foundation_output_line = first_line(content, "container_registry_login_server")
     acr_login_line = first_line(content, "az acr login")
     if azure_login_line is not None and acr_login_line is not None and acr_login_line < azure_login_line:
         errors.append("ACR login must run after Azure login")
+    if foundation_output_line is not None and acr_login_line is not None and foundation_output_line > acr_login_line:
+        errors.append("foundation container registry output must be read before ACR login")
 
     return errors
 

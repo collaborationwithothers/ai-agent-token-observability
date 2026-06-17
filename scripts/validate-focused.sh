@@ -77,6 +77,7 @@ case "$profile" in
     ;;
   terraform)
     check_comments_not_staged
+    scripts/validate-terraform-foundation-acr.sh
     scripts/validate-terraform-workflow-guardrails.sh
     scripts/validate-edge-origin-workflow.sh
     git diff --check
