@@ -180,7 +180,7 @@ Milestone 2 child issues:
 
 ### 3. Azure Runtime And Edge Proof
 
-Goal: deploy the production runtime shape and prove public ingress cannot bypass the edge.
+Goal: deploy the full Azure Production MVP infrastructure stage tree and prove public ingress cannot bypass the edge.
 
 Parent tracking issue: [#34](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/34).
 
@@ -188,24 +188,35 @@ GitHub milestone: [3. Azure Runtime And Edge Proof](https://github.com/collabora
 
 Includes:
 
-- Runtime container image definitions and guarded ACR publish workflow.
+- Manual Terraform remote state foundation runbook.
+- Foundation stage completion.
+- Network private data plane stage.
+- Observability foundation stage.
+- Data platform stage.
+- AI services stage.
 - Container Apps environment and three long-running Container Apps.
 - Shared jobs image and explicit job command wiring.
+- Runtime container image definitions and guarded ACR publish workflow.
+- App runtime image digest selection for Terraform deploy.
+- Cross-stage Terraform output wiring and deploy contract.
 - Guarded Terraform apply workflow from reviewed plan artifacts.
 - Azure Front Door Premium WAF.
 - Azure Front Door managed certificates for `app`, `api`, and `ingest`.
 - Azure Front Door Private Link origins to Azure Container Apps.
 - Public network access disabled for ACA origins in production.
 - Azure DNS records under `tokenobs.consultwithcloud.com`.
+- Azure Managed Grafana workspace wiring.
 - Edge Origin Validation workflow or proof procedure.
 - Infrastructure deletion workflow for disposable stages.
 
 Exit criteria:
 
+- Manual Terraform remote state foundation runbook exists and defines safe backend setup evidence.
+- Required Terraform stages are implemented for foundation, retained public DNS, network private data plane, observability foundation, data platform, AI services, app runtime, Managed Grafana, and edge.
 - Front Door hostnames work.
 - Direct public generated ACA FQDN access does not reach the app in `pp` or `pd`.
 - Auth callbacks use public Front Door hostnames.
-- Runtime images are built and published through a guarded workflow before Terraform app runtime deployment consumes them.
+- Runtime images are built and published through a guarded workflow before Terraform app runtime deployment consumes digest-pinned image references.
 - Normal Terraform apply uses reviewed saved plan artifacts and does not use `terraform apply -auto-approve`.
 - Guarded deletion workflow cannot delete retained shared resources.
 
@@ -217,18 +228,27 @@ Milestone 3 child issues:
 
 | Issue | Child issue | Outcome | Dependencies |
 | --- | --- | --- | --- |
+| [#138](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/138) | Manual Terraform remote state foundation runbook | Operators have the manual remote state setup and evidence runbook required before Azure-backed Terraform workflows run | #21, #22, #23 |
+| [#139](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/139) | Foundation stage completion | Foundation stage owns shared foundation resources, ACR, Key Vault, identity or identity references, and downstream non-secret outputs | #21, #22, #23, #138 |
+| [#140](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/140) | Network private data plane Terraform stage | VNet, subnets, private DNS, private endpoints, and network boundaries are deployable for downstream stages | #21, #22, #23, #138, #139 |
+| [#141](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/141) | Observability foundation Terraform stage | Log Analytics, Application Insights, Azure Monitor workspace or managed Prometheus foundation exists for app diagnostics, Grafana, SLOs, and alerts | #21, #22, #23, #138, #139, #140 |
+| [#142](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/142) | Data platform Terraform stage | PostgreSQL, product Blob Storage, backup settings, lifecycle foundations, private access, and safe outputs are deployable | #21, #22, #23, #39, #138, #139, #140, #141 |
+| [#143](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/143) | AI services Terraform stage | Azure AI service dependencies, model deployment aliases, managed identity access, private access, diagnostics, and safe outputs are deployable | #21, #22, #23, #138, #139, #140, #141 |
 | [#54](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/54) | Container Apps runtime environment and long-running services | ACA environment and Product Dashboard, Product API, and Product Ingestion Endpoint apps are provisioned | #19, #21, #22, #23, #41, #48 |
 | [#55](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/55) | Shared jobs image and explicit Container Apps job commands | ACA jobs runtime shape uses one shared jobs image with explicit job commands | #19, #21, #22, #23, #39, #43 |
 | [#125](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/125) | Runtime container image definitions and ACR publish workflow | Runtime images have repository-owned build definitions and a guarded ACR publish workflow with immutable SHA tags and digest outputs | #19, #21, #22, #23, #54, #55 |
+| [#144](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/144) | App runtime image digest selection for Terraform deploy | Operators can choose a successful ACR image publish run through a CLI helper, and Terraform deploy consumes the derived digest-pinned image artifact | #22, #23, #54, #55, #125, #126 |
 | [#56](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/56) | Azure Front Door Premium WAF routes and rate limits | Front Door Premium WAF routes public traffic to product endpoints | #21, #22, #23, #41, #48, #54 |
 | [#57](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/57) | Front Door managed certificates and product hostnames | Front Door managed certificates bind product hostnames for first release | #21, #23, #54, #56 |
 | [#58](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/58) | Front Door Private Link origins and ACA public access lock down | Front Door reaches ACA through Private Link and direct ACA public bypass fails | #21, #22, #23, #41, #54, #56 |
 | [#59](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/59) | Azure DNS records for delegated tokenobs subdomain | Azure DNS records under `tokenobs.consultwithcloud.com` support app, api, and ingest hostnames | #21, #23, #56, #57 |
 | [#60](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/60) | Edge origin validation workflow | Manual guarded workflow proves Front Door works and direct ACA origin bypass fails | #22, #23, #41, #54, #56, #58, #59 |
-| [#126](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/126) | Guarded Terraform apply workflow from reviewed plan artifact | Manual guarded apply workflow applies the exact reviewed Terraform plan artifact for normal infrastructure changes | #21, #22, #23, #54, #56, #57, #58, #59, #125 |
+| [#126](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/126) | Guarded Terraform apply workflow from reviewed saved plan artifacts | Manual guarded deploy workflow applies exact same-run saved plan artifacts for normal infrastructure changes after protected environment approval | #21, #22, #23, #54, #56, #57, #58, #59, #125 |
 | [#61](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/61) | Guarded infrastructure deletion workflow for disposable stages | Manual guarded deletion workflow creates destroy plans and applies approved same-run destroy plan artifacts while retaining shared resources | #21, #22, #23, #54, #56, #59 |
+| [#62](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/62) | Azure Managed Grafana workspace and data source wiring | Managed Grafana consumes observability foundation outputs and approved aggregate metrics data sources without exposing raw session or content data | #21, #22, #23, #26, #52, #54, #141 |
+| [#145](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/145) | Cross-stage Terraform output wiring and deploy contract | Completed stages are wired through explicit remote-state outputs and deploy-script inputs so full-stage deployment does not require manual variable reconstruction | #139, #140, #141, #142, #143, #144, #62, #54, #56, #57, #58, #59 |
 
-Image build and publish, normal Terraform apply, Terraform deletion, and edge origin validation are separate workflow paths. The existing Terraform plan workflow produces reviewed plan artifacts; it does not publish images and it does not apply normal infrastructure changes.
+Image build and publish, normal Terraform deploy, Terraform deletion, retained public DNS, and edge origin validation are separate workflow paths. The normal Terraform deploy workflow produces reviewed saved plan artifacts and applies only those artifacts after protected environment approval; it does not publish images.
 
 ### 4. Observability And Grafana
 
@@ -242,10 +262,11 @@ Milestone 4 child issues:
 
 Dependency rule: Milestone 4 implementation issues must not start until their listed metric, infrastructure, identity, and Product Dashboard dependencies are complete.
 
+Infrastructure prerequisite: [#62](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/62) is tracked under Milestone 3 because it provisions the Managed Grafana workspace and data source wiring as part of the full Azure infrastructure stage tree.
+
 | Issue | Workstream | Required outcome | Depends on |
 | --- | --- | --- | --- |
 | [#26](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/26) | Aggregate token timeline and model operations metrics | Product emits aggregate metrics needed by Grafana without session, developer, or raw content labels | #39, #48, #50, #51, #52 |
-| [#62](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/62) | Azure Managed Grafana workspace and data source wiring | Managed Grafana is provisioned and wired to approved aggregate metrics data sources only | #21, #22, #23, #26, #52, #54 |
 | [#63](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/63) | Grafana provider authentication proof gate | Terraform dashboard management proves Entra or workload identity first, with service-account-token fallback only if proof fails | #21, #23, #24, #62 |
 | [#64](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/64) | Repo-versioned Grafana dashboard JSON deployment | First-release dashboard JSON artifacts deploy through Terraform from repo source | #26, #52, #62, #63 |
 | [#65](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/65) | Grafana RBAC with environment-scoped Entra groups | Grafana built-in roles map to environment-scoped Entra groups and remain separate from Product API authorization | #40, #42, #62 |
@@ -255,7 +276,7 @@ Includes:
 
 - Aggregate Metrics Contract implementation.
 - Azure Monitor workspace or managed Prometheus integration.
-- Azure Managed Grafana workspace.
+- Azure Managed Grafana dashboards and data source use of the Milestone 3 workspace foundation.
 - Grafana Provider Authentication Proof Gate.
 - Service-account-token fallback only if Entra OIDC provider proof fails.
 - Repo-versioned dashboard JSON artifacts.
