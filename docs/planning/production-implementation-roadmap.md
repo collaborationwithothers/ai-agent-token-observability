@@ -53,7 +53,7 @@ Includes:
 - Public repository GitHub Actions guardrail validator and unsafe workflow fixtures.
 - Terraform stage skeletons with backend disabled validation.
 - Terraform workspace validation contract.
-- Manual-only workflow templates with repository, actor, branch, environment, region, workspace, OIDC, permissions, and confirmation gates.
+- Manual-only workflow templates with repository, actor, branch, environment, region, workspace, OIDC, permissions, and confirmation gates for normal deploys. Retained public DNS is the documented confirmation-input exception and is guarded by a fixed owner workspace, protected apply environment, same-run saved plan artifact, delegation output, and public NS verification.
 - Initial issue labels and milestones.
 
 Exit criteria:

@@ -241,7 +241,7 @@ Deployment-capable GitHub Actions workflows must follow the Public Repository Wo
 - Environment protection for higher environments.
 - Guardrail validation script and tests.
 
-Guarded Terraform Apply may run from GitHub Actions only after repository, actor, environment, region, workspace, branch, confirmation, OIDC, least-privilege, and environment-protection checks pass.
+Guarded Terraform Apply may run from GitHub Actions only after repository, actor, environment, region, workspace, branch, confirmation, OIDC, least-privilege, and environment-protection checks pass. The retained public DNS apply workflow is the only confirmation-input exception, and only because it is fixed to `public_dns` in `pd_eastus2_internal`, uses protected environment approval, applies a same-run saved plan artifact, emits Cloudflare delegation output only, and verifies public NS delegation.
 
 ## MVP Boundary To Be Defined Separately
 
