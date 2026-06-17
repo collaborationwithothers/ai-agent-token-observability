@@ -69,7 +69,20 @@ variable "waf_rate_limits" {
 
 variable "public_ingress_hostnames" {
   description = "First-release product hostnames by app, api, and ingest key."
-  type        = map(string)
+  type = object({
+    app    = string
+    api    = string
+    ingest = string
+  })
+
+  validation {
+    condition = alltrue([
+      can(regex("^[a-z0-9][a-z0-9.-]*[a-z0-9]$", var.public_ingress_hostnames.app)),
+      can(regex("^[a-z0-9][a-z0-9.-]*[a-z0-9]$", var.public_ingress_hostnames.api)),
+      can(regex("^[a-z0-9][a-z0-9.-]*[a-z0-9]$", var.public_ingress_hostnames.ingest))
+    ])
+    error_message = "public_ingress_hostnames must include valid app, api, and ingest hostnames."
+  }
 }
 
 variable "container_app_fqdns" {
@@ -84,6 +97,26 @@ variable "container_app_fqdns" {
       alltrue([for fqdn in values(var.container_app_fqdns) : can(regex("^[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9]$", fqdn))])
     ])
     error_message = "container_app_fqdns must include product_dashboard, product_api, and product_ingestion_endpoint FQDNs."
+  }
+}
+
+variable "azure_dns_zone" {
+  description = "Optional delegated Azure DNS zone used to create Front Door custom domain validation TXT and CNAME records."
+  type = object({
+    id                  = optional(string)
+    name                = optional(string)
+    resource_group_name = optional(string)
+    manage_records      = optional(bool, false)
+  })
+  default = null
+
+  validation {
+    condition = var.azure_dns_zone == null || !try(var.azure_dns_zone.manage_records, false) || alltrue([
+      can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.Network/dnsZones/[^/]+$", coalesce(try(var.azure_dns_zone.id, null), ""))),
+      coalesce(try(var.azure_dns_zone.name, null), "") != "",
+      coalesce(try(var.azure_dns_zone.resource_group_name, null), "") != ""
+    ])
+    error_message = "azure_dns_zone must include id, name, and resource_group_name when manage_records is true."
   }
 }
 

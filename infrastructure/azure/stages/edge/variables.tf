@@ -92,7 +92,11 @@ variable "enable_zone_redundancy" {
 
 variable "public_ingress_hostnames" {
   description = "Public ingress hostnames used by stages that expose product traffic."
-  type        = map(string)
+  type = object({
+    app    = string
+    api    = string
+    ingest = string
+  })
   default = {
     app    = "app.tokenobs.consultwithcloud.com"
     api    = "api.tokenobs.consultwithcloud.com"
@@ -107,6 +111,26 @@ variable "public_ingress_hostnames" {
       alltrue([for hostname in values(var.public_ingress_hostnames) : can(regex("^[a-z0-9][a-z0-9.-]*[a-z0-9]$", hostname))])
     ])
     error_message = "public_ingress_hostnames must include valid app, api, and ingest hostnames."
+  }
+}
+
+variable "azure_dns_zone" {
+  description = "Optional delegated Azure DNS zone for product hostname TXT validation and CNAME records."
+  type = object({
+    id                  = optional(string)
+    name                = optional(string)
+    resource_group_name = optional(string)
+    manage_records      = optional(bool, false)
+  })
+  default = null
+
+  validation {
+    condition = var.azure_dns_zone == null || !try(var.azure_dns_zone.manage_records, false) || alltrue([
+      can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.Network/dnsZones/[^/]+$", coalesce(try(var.azure_dns_zone.id, null), ""))),
+      coalesce(try(var.azure_dns_zone.name, null), "") != "",
+      coalesce(try(var.azure_dns_zone.resource_group_name, null), "") != ""
+    ])
+    error_message = "azure_dns_zone must include id, name, and resource_group_name when manage_records is true."
   }
 }
 

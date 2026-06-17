@@ -23,6 +23,38 @@ output "route_ids" {
   value       = { for key, route in azurerm_cdn_frontdoor_route.this : key => route.id }
 }
 
+output "custom_domain_ids" {
+  description = "Front Door managed custom domain IDs by product service key."
+  value       = { for key, domain in azurerm_cdn_frontdoor_custom_domain.this : key => domain.id }
+}
+
+output "custom_domain_hostnames" {
+  description = "Front Door managed custom domain hostnames by product service key."
+  value       = { for key, domain in azurerm_cdn_frontdoor_custom_domain.this : key => domain.host_name }
+}
+
+output "managed_certificate_validation_records" {
+  description = "DNS TXT validation records required by Azure Front Door managed certificates."
+  value = {
+    for key, domain in azurerm_cdn_frontdoor_custom_domain.this : key => {
+      name  = "_dnsauth.${split(".", domain.host_name)[0]}"
+      type  = "TXT"
+      value = domain.validation_token
+    }
+  }
+}
+
+output "custom_domain_cname_records" {
+  description = "DNS CNAME records required to route public product hostnames to Front Door endpoints."
+  value = {
+    for key, domain in azurerm_cdn_frontdoor_custom_domain.this : key => {
+      name  = split(".", domain.host_name)[0]
+      type  = "CNAME"
+      value = azurerm_cdn_frontdoor_endpoint.this[key].host_name
+    }
+  }
+}
+
 output "origin_group_ids" {
   description = "Front Door origin group IDs by product service key."
   value       = { for key, origin_group in azurerm_cdn_frontdoor_origin_group.this : key => origin_group.id }
