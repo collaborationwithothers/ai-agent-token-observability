@@ -876,26 +876,101 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
     }
 
     [Fact]
-    public async Task CodexOtlpEndpointRejectsContentBearingLogsBeforeMetadataStorage()
+    public async Task CodexOtlpEndpointRecordsPolicyHiddenCandidateMetadataByDefault()
     {
         var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
         var seed = await CreateTenantAsync(store);
         var issued = await IssueCredentialAsync(store, seed);
-        var payload = CreateLogPayloadWithBody("prompt text that must not be fingerprinted");
-        var forbiddenPayloadHash = Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
+        const string rawPrompt = "prompt text that must not be fingerprinted";
+        var payload = CreateLogPayloadWithBody($"aito.content.prompt:{rawPrompt}");
         using var factory = CreateFactory(store);
         using var client = factory.CreateClient();
         using var request = CreateOtlpRequest("/v1/logs", issued.Secret, payload);
 
         using var response = await client.SendAsync(request);
 
-        await AssertOtlpRejectionAsync(response, HttpStatusCode.Forbidden, "policy_context_missing", forbiddenPayloadHash);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var envelope = Assert.Single(await store.ListTelemetryEnvelopesAsync(seed.Organization.CustomerOrganizationId));
+        Assert.Single(await store.ListAgentSessionsAsync(seed.Organization.CustomerOrganizationId));
+        Assert.Empty(await store.ListIngestionRejectionsAsync(seed.Organization.CustomerOrganizationId));
+        var metadata = Assert.Single(await store.ListContentCandidateMetadataAsync(seed.Organization.CustomerOrganizationId));
+        Assert.Equal("content-capture-default-disabled", metadata.PolicyVersionId);
+        Assert.Equal(issued.Credential.ScopedIngestionCredentialId, metadata.ScopedIngestionCredentialId);
+        Assert.Equal(SetupProfileId, metadata.HarnessSetupProfileId);
+        Assert.Equal($"{envelope.TelemetryEnvelopeId}:otlp.log.body", metadata.TelemetryReference);
+        Assert.Equal(ContentClass.PromptSnippet, metadata.ContentClass);
+        Assert.Equal(rawPrompt.Length, metadata.OriginalLength);
+        Assert.Equal(ContentCapturePolicyDecision.PolicyDenied, metadata.PolicyDecision);
+        Assert.Equal(ContentCandidateEvidenceState.PolicyHidden, metadata.EvidenceState);
+        Assert.Equal(ContentRedactionStatus.NotRequired, metadata.RedactionStatus);
+        Assert.DoesNotContain(rawPrompt, metadata.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
 
-        Assert.Empty(await store.ListTelemetryEnvelopesAsync(seed.Organization.CustomerOrganizationId));
-        Assert.Empty(await store.ListAgentSessionsAsync(seed.Organization.CustomerOrganizationId));
-        var rejection = Assert.Single(await store.ListIngestionRejectionsAsync(seed.Organization.CustomerOrganizationId));
-        Assert.Equal("policy_context_missing", rejection.ReasonCode);
-        Assert.DoesNotContain(forbiddenPayloadHash, rejection.ToString(), StringComparison.Ordinal);
+    [Fact]
+    public async Task CodexOtlpEndpointUsesActiveScopedPolicyForHarnessEmittedCandidate()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store);
+        var issued = await IssueCredentialAsync(store, seed);
+        await store.SetActiveContentCapturePolicyAsync(new SetActiveContentCapturePolicyRequest(
+            new ContentCapturePolicy(
+                seed.Organization.CustomerOrganizationId,
+                "content-policy-active-001",
+                CaptureEnabledByDefault: false,
+                Rules:
+                [
+                    new ContentCapturePolicyRule(
+                        AllowCapture: true,
+                        Harness: CodingAgentHarness.CodexCli,
+                        HarnessSetupProfileId: SetupProfileId,
+                        ProductUserId: issued.Credential.ProductUserId,
+                        ContentClass: ContentClass.PromptSnippet,
+                        RetentionClass: ContentRetentionClass.MetadataOnly,
+                        RecommendationUse: RecommendationUse.Disabled)
+                ]),
+            issued.Credential.ProductUserId,
+            ProductRole.PlatformAdmin,
+            CorrelationId: "content-policy-activation-001",
+            ContentCapturePolicyChangeKind.Activated));
+        const string rawPrompt = "policy allowed prompt candidate still waits for redaction";
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+        using var request = CreateOtlpRequest("/v1/logs", issued.Secret, CreateLogPayloadWithBody($"aito.content.prompt:{rawPrompt}"));
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var metadata = Assert.Single(await store.ListContentCandidateMetadataAsync(seed.Organization.CustomerOrganizationId));
+        Assert.Equal("content-policy-active-001", metadata.PolicyVersionId);
+        Assert.Equal(ContentCapturePolicyDecision.PolicyDenied, metadata.PolicyDecision);
+        Assert.Equal(ContentCandidateEvidenceState.PolicyHidden, metadata.EvidenceState);
+        Assert.Equal(ContentRedactionStatus.NotRequired, metadata.RedactionStatus);
+        Assert.Equal(rawPrompt.Length, metadata.OriginalLength);
+        Assert.DoesNotContain(rawPrompt, metadata.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task CodexOtlpEndpointRecordsExtractionFailureMetadataWithoutRawContent()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store);
+        var issued = await IssueCredentialAsync(store, seed);
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+        using var request = CreateOtlpRequest("/v1/logs", issued.Secret, CreateLogPayloadWithBody("aito.content.prompt:"));
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Empty(await store.ListIngestionRejectionsAsync(seed.Organization.CustomerOrganizationId));
+        var metadata = Assert.Single(await store.ListContentCandidateMetadataAsync(seed.Organization.CustomerOrganizationId));
+        Assert.Equal("content-capture-default-disabled", metadata.PolicyVersionId);
+        Assert.Equal("otlp.log.body", metadata.TelemetryReference.Split(':').Last());
+        Assert.Equal(ContentClass.PromptSnippet, metadata.ContentClass);
+        Assert.Equal(0, metadata.OriginalLength);
+        Assert.Equal(ContentCapturePolicyDecision.PolicyDenied, metadata.PolicyDecision);
+        Assert.Equal(ContentCandidateEvidenceState.RedactionFailed, metadata.EvidenceState);
+        Assert.Equal(ContentRedactionStatus.Failed, metadata.RedactionStatus);
     }
 
     [Fact]
@@ -1720,11 +1795,38 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
         return export.ToArray();
     }
 
+    private static byte[] CreateLogPayloadWithNonStringBody(uint value)
+    {
+        using var logRecord = new MemoryStream();
+        WriteLengthDelimitedField(logRecord, fieldNumber: 3, Encoding.UTF8.GetBytes("info"));
+
+        using var anyValue = new MemoryStream();
+        WriteVarintField(anyValue, fieldNumber: 2, value);
+        WriteLengthDelimitedField(logRecord, fieldNumber: 5, anyValue.ToArray());
+
+        using var scopeLogs = new MemoryStream();
+        WriteLengthDelimitedField(scopeLogs, fieldNumber: 2, logRecord.ToArray());
+
+        using var resourceLogs = new MemoryStream();
+        WriteLengthDelimitedField(resourceLogs, fieldNumber: 2, scopeLogs.ToArray());
+
+        using var export = new MemoryStream();
+        WriteLengthDelimitedField(export, fieldNumber: 1, resourceLogs.ToArray());
+
+        return export.ToArray();
+    }
+
     private static void WriteLengthDelimitedField(Stream stream, int fieldNumber, byte[] value)
     {
         WriteVarint(stream, (uint)((fieldNumber << 3) | 2));
         WriteVarint(stream, (uint)value.Length);
         stream.Write(value);
+    }
+
+    private static void WriteVarintField(Stream stream, int fieldNumber, uint value)
+    {
+        WriteVarint(stream, (uint)(fieldNumber << 3));
+        WriteVarint(stream, value);
     }
 
     private static void WriteVarint(Stream stream, uint value)

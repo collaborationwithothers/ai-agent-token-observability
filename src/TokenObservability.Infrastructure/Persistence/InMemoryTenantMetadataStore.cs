@@ -52,7 +52,10 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         "requested_scope_id",
         "requested_scope_kind",
         "scope_id",
-        "scope_kind"
+        "scope_kind",
+        "policy_kind",
+        "policy_version_id",
+        "change_kind"
     };
 
     private readonly Dictionary<CustomerOrganizationId, CustomerOrganization> customerOrganizations = [];
@@ -65,6 +68,8 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
     private readonly Dictionary<ScopedIngestionCredentialId, ScopedIngestionCredential> scopedIngestionCredentials = [];
     private readonly Dictionary<IngestionRejectionId, IngestionRejectionRecord> ingestionRejections = [];
     private readonly Dictionary<string, TelemetryEnvelopeRecord> telemetryEnvelopes = [];
+    private readonly Dictionary<string, ContentCandidateMetadata> contentCandidateMetadata = [];
+    private readonly Dictionary<CustomerOrganizationId, ContentCapturePolicy> activeContentCapturePolicies = [];
     private readonly Dictionary<TelemetryEnvelopeDedupeLookupKey, string> telemetryEnvelopeDedupeIndex = [];
     private readonly Dictionary<string, AgentSessionRecord> agentSessions = [];
     private readonly Dictionary<AgentSessionLookupKey, string> agentSessionLookupIndex = [];
@@ -764,6 +769,218 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
                     .OrderBy(envelope => envelope.ReceivedAtUtc)
                     .ThenBy(envelope => envelope.TelemetryEnvelopeId, StringComparer.Ordinal)
                     .ToArray());
+        }
+    }
+
+    public Task<ContentCandidateMetadata> RecordContentCandidateMetadataAsync(
+        CreateContentCandidateMetadataRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        if (request.CustomerOrganizationId == CustomerOrganizationId.Empty)
+        {
+            throw new ArgumentException("Customer organization identifier must not be empty.", nameof(request));
+        }
+
+        if (request.ScopedIngestionCredentialId == ScopedIngestionCredentialId.Empty)
+        {
+            throw new ArgumentException("Scoped ingestion credential identifier must not be empty.", nameof(request));
+        }
+
+        if (request.OriginalLength < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(request), "Original content length must not be negative.");
+        }
+
+        var policyVersionId = NormalizeRequiredText(request.PolicyVersionId, nameof(request.PolicyVersionId));
+        var harnessSetupProfileId = NormalizeHarnessSetupProfileId(
+            request.HarnessSetupProfileId,
+            nameof(request.HarnessSetupProfileId));
+        var sessionId = NormalizeRequiredText(request.SessionId, nameof(request.SessionId));
+        var telemetryReference = NormalizeRequiredText(request.TelemetryReference, nameof(request.TelemetryReference));
+        RejectSensitiveText(policyVersionId);
+        RejectSensitiveText(sessionId);
+        RejectSensitiveText(telemetryReference);
+        var now = clock.UtcNow.ToUniversalTime();
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+            RequireScopedIngestionCredentialForCustomerOrganization(
+                request.CustomerOrganizationId,
+                request.ScopedIngestionCredentialId);
+
+            var metadata = new ContentCandidateMetadata(
+                ContentCandidateMetadataId: $"content-candidate-{Guid.NewGuid():N}",
+                request.CustomerOrganizationId,
+                policyVersionId,
+                request.ScopedIngestionCredentialId,
+                harnessSetupProfileId,
+                sessionId,
+                telemetryReference,
+                request.ContentClass,
+                request.OriginalLength,
+                request.PolicyDecision,
+                request.EvidenceState,
+                request.RedactionStatus,
+                request.RetentionClass,
+                request.RecommendationUse,
+                now);
+
+            contentCandidateMetadata.Add(metadata.ContentCandidateMetadataId, metadata);
+            return Task.FromResult(metadata);
+        }
+    }
+
+    public Task<IReadOnlyList<ContentCandidateMetadata>> ListContentCandidateMetadataAsync(
+        CustomerOrganizationId customerOrganizationId)
+    {
+        lock (gate)
+        {
+            return Task.FromResult<IReadOnlyList<ContentCandidateMetadata>>(
+                contentCandidateMetadata.Values
+                    .Where(metadata => metadata.CustomerOrganizationId == customerOrganizationId)
+                    .OrderBy(metadata => metadata.CreatedAtUtc)
+                    .ThenBy(metadata => metadata.ContentCandidateMetadataId, StringComparer.Ordinal)
+                    .ToArray());
+        }
+    }
+
+    public Task<ContentCandidateMetadata> RecordContentCandidateExtractionFailureAsync(
+        CreateContentCandidateExtractionFailureRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        return RecordContentCandidateMetadataAsync(new CreateContentCandidateMetadataRequest(
+            request.CustomerOrganizationId,
+            request.PolicyVersionId,
+            request.ScopedIngestionCredentialId,
+            request.HarnessSetupProfileId,
+            request.SessionId,
+            request.TelemetryReference,
+            request.ContentClass,
+            OriginalLength: 0,
+            ContentCapturePolicyDecision.PolicyDenied,
+            ContentCandidateEvidenceState.RedactionFailed,
+            ContentRedactionStatus.Failed,
+            request.RetentionClass,
+            request.RecommendationUse));
+    }
+
+    public Task<ContentCapturePolicy> SetActiveContentCapturePolicyAsync(SetActiveContentCapturePolicyRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(request.Policy);
+
+        if (request.Policy.CustomerOrganizationId == CustomerOrganizationId.Empty)
+        {
+            throw new ArgumentException("Customer organization identifier must not be empty.", nameof(request));
+        }
+
+        if (request.ActorProductUserId == ProductUserId.Empty)
+        {
+            throw new ArgumentException("Actor product user identifier must not be empty.", nameof(request));
+        }
+
+        var policyVersionId = NormalizeRequiredText(request.Policy.PolicyVersionId, nameof(request.Policy.PolicyVersionId));
+        var correlationId = NormalizeRequiredText(request.CorrelationId, nameof(request.CorrelationId));
+        RejectSensitiveText(policyVersionId);
+        RejectSensitiveText(correlationId);
+        var normalizedPolicy = request.Policy with { PolicyVersionId = policyVersionId };
+        var now = clock.UtcNow.ToUniversalTime();
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.Policy.CustomerOrganizationId);
+            RequireProductUserForCustomerOrganization(request.Policy.CustomerOrganizationId, request.ActorProductUserId);
+            activeContentCapturePolicies[request.Policy.CustomerOrganizationId] = normalizedPolicy;
+            CreateGovernanceAuditEventUnderLock(
+                $"audit-content-capture-policy-{Guid.NewGuid():N}",
+                request.Policy.CustomerOrganizationId,
+                request.ActorProductUserId,
+                request.EffectiveRole,
+                ProductAuthorizationAction.TenantUpdate,
+                "content_capture_policy",
+                policyVersionId,
+                "updated",
+                null,
+                correlationId,
+                new Dictionary<string, string>
+                {
+                    ["result"] = "updated",
+                    ["policy_kind"] = "content_capture",
+                    ["policy_version_id"] = policyVersionId,
+                    ["change_kind"] = ToWirePolicyChangeKind(request.ChangeKind)
+                },
+                now);
+            return Task.FromResult(normalizedPolicy);
+        }
+    }
+
+    public Task<ContentCapturePolicy> GetActiveContentCapturePolicyAsync(
+        CustomerOrganizationId customerOrganizationId,
+        string harnessSetupProfileId)
+    {
+        _ = NormalizeHarnessSetupProfileId(harnessSetupProfileId, nameof(harnessSetupProfileId));
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(customerOrganizationId);
+
+            return Task.FromResult(
+                activeContentCapturePolicies.TryGetValue(customerOrganizationId, out var policy)
+                    ? policy
+                    : ContentCapturePolicy.Disabled(
+                        customerOrganizationId,
+                        "content-capture-default-disabled"));
+        }
+    }
+
+    public Task<GovernanceAuditEvent> RecordContentCapturePolicyChangeAsync(
+        CreateContentCapturePolicyChangeRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        if (request.CustomerOrganizationId == CustomerOrganizationId.Empty)
+        {
+            throw new ArgumentException("Customer organization identifier must not be empty.", nameof(request));
+        }
+
+        if (request.ActorProductUserId == ProductUserId.Empty)
+        {
+            throw new ArgumentException("Actor product user identifier must not be empty.", nameof(request));
+        }
+
+        var policyVersionId = NormalizeRequiredText(request.PolicyVersionId, nameof(request.PolicyVersionId));
+        var correlationId = NormalizeRequiredText(request.CorrelationId, nameof(request.CorrelationId));
+        RejectSensitiveText(policyVersionId);
+        RejectSensitiveText(correlationId);
+        var now = clock.UtcNow.ToUniversalTime();
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+            RequireProductUserForCustomerOrganization(request.CustomerOrganizationId, request.ActorProductUserId);
+
+            return Task.FromResult(CreateGovernanceAuditEventUnderLock(
+                $"audit-content-capture-policy-{Guid.NewGuid():N}",
+                request.CustomerOrganizationId,
+                request.ActorProductUserId,
+                request.EffectiveRole,
+                ProductAuthorizationAction.TenantUpdate,
+                "content_capture_policy",
+                policyVersionId,
+                "updated",
+                null,
+                correlationId,
+                new Dictionary<string, string>
+                {
+                    ["result"] = "updated",
+                    ["policy_kind"] = "content_capture",
+                    ["policy_version_id"] = policyVersionId,
+                    ["change_kind"] = ToWirePolicyChangeKind(request.ChangeKind)
+                },
+                now));
         }
     }
 
@@ -2261,6 +2478,26 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
                 value.Contains(fragment, StringComparison.OrdinalIgnoreCase));
     }
 
+    private static void RejectSensitiveText(string value)
+    {
+        if (ContainsSensitiveFragment(value))
+        {
+            throw new ArgumentException("Metadata must not store captured content or secrets.", nameof(value));
+        }
+    }
+
+    private static string ToWirePolicyChangeKind(ContentCapturePolicyChangeKind changeKind)
+    {
+        return changeKind switch
+        {
+            ContentCapturePolicyChangeKind.Created => "created",
+            ContentCapturePolicyChangeKind.Activated => "activated",
+            ContentCapturePolicyChangeKind.Updated => "updated",
+            ContentCapturePolicyChangeKind.Disabled => "disabled",
+            _ => throw new ArgumentOutOfRangeException(nameof(changeKind), changeKind, "Policy change kind is not supported.")
+        };
+    }
+
     private static string NormalizeHash(string value, string parameterName)
     {
         var normalized = NormalizeRequiredText(value, parameterName);
@@ -2407,6 +2644,9 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
             "scope_kind" or "requested_scope_kind" => Enum.TryParse<ProductScopeKind>(value, ignoreCase: false, out _),
             "scope_id" or "requested_scope_id" => IsSafeResourceId(value),
             "denial_reason" => Enum.TryParse<ProductAuthorizationDenialReason>(value, ignoreCase: false, out _),
+            "policy_kind" => value is "content_capture",
+            "policy_version_id" => IsSafeResourceId(value),
+            "change_kind" => value is "created" or "activated" or "updated" or "disabled",
             _ => false
         };
 

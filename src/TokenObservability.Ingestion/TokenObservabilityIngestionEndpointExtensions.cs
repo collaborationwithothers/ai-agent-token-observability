@@ -16,6 +16,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
 {
     private const string SupportedSchemaVersion = "2026-06-01";
     private const string SupportedContentCaptureMode = "metadata-only";
+    private const string PromptSnippetCandidatePrefix = "aito.content.prompt:";
     private const long MaximumPayloadBytes = 1024 * 1024;
     private static readonly TokenMetricName[] TokenMetricNames =
     [
@@ -361,6 +362,8 @@ internal static class TokenObservabilityIngestionEndpointExtensions
             aggregateMetricsExporter,
             credential,
             signalType,
+            payloadValidation.ContentCandidates,
+            payloadValidation.ExtractionFailures,
             correlationId);
         await RouteAcceptedIngestionDiagnosticAsync(
             tenantMetadataStore,
@@ -378,6 +381,8 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         AggregateMetricsExporter aggregateMetricsExporter,
         ScopedIngestionCredential credential,
         string signalType,
+        IReadOnlyList<EmittedContentCandidate> contentCandidates,
+        IReadOnlyList<ContentCandidateExtractionFailure> extractionFailures,
         string correlationId)
     {
         var envelopeSignalType = ToEnvelopeSignalType(signalType);
@@ -460,6 +465,15 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         var sessions = await tenantMetadataStore.ListAgentSessionsAsync(credential.CustomerOrganizationId);
         var session = sessions.Single(candidate =>
             candidate.SourceTelemetryEnvelopeIds.Contains(envelope.TelemetryEnvelopeId, StringComparer.Ordinal));
+
+        await RecordContentCandidateMetadataAsync(
+            tenantMetadataStore,
+            credential,
+            envelope,
+            session,
+            contentCandidates,
+            extractionFailures);
+
         var existingObservations = await tenantMetadataStore.ListTokenObservationsAsync(
             credential.CustomerOrganizationId,
             session.AgentSessionId);
@@ -494,6 +508,83 @@ internal static class TokenObservabilityIngestionEndpointExtensions
             envelope.TelemetryEnvelopeId);
 
         return new AcceptedTelemetryRoutingResult(envelope, session, aggregateMetricExportResult);
+    }
+
+    private static async Task RecordContentCandidateMetadataAsync(
+        InMemoryTenantMetadataStore tenantMetadataStore,
+        ScopedIngestionCredential credential,
+        TelemetryEnvelopeRecord envelope,
+        AgentSessionRecord session,
+        IReadOnlyList<EmittedContentCandidate> contentCandidates,
+        IReadOnlyList<ContentCandidateExtractionFailure> extractionFailures)
+    {
+        var policy = await tenantMetadataStore.GetActiveContentCapturePolicyAsync(
+            credential.CustomerOrganizationId,
+            credential.HarnessSetupProfileId);
+        var context = new ContentCapturePolicyContext(
+            credential.CustomerOrganizationId,
+            credential.AllowedHarness,
+            credential.HarnessSetupProfileId,
+            SetupProfileContentCaptureEnabled: false,
+            credential.ProductUserId,
+            ProductRole: null,
+            TeamId: null,
+            RepositoryId: ResolveRepositoryScopeId(credential),
+            ContentRetentionClass.MetadataOnly,
+            RecommendationUse.Disabled);
+
+        foreach (var candidate in contentCandidates)
+        {
+            var evaluation = ContentCapturePolicyEvaluator.Evaluate(
+                policy,
+                context,
+                credential.ScopedIngestionCredentialId,
+                session.AgentSessionId,
+                candidate);
+
+            if (evaluation.Metadata is null)
+            {
+                continue;
+            }
+
+            await tenantMetadataStore.RecordContentCandidateMetadataAsync(new CreateContentCandidateMetadataRequest(
+                evaluation.Metadata.CustomerOrganizationId,
+                evaluation.Metadata.PolicyVersionId,
+                evaluation.Metadata.ScopedIngestionCredentialId,
+                evaluation.Metadata.HarnessSetupProfileId,
+                evaluation.Metadata.SessionId,
+                $"{envelope.TelemetryEnvelopeId}:{evaluation.Metadata.TelemetryReference}",
+                evaluation.Metadata.ContentClass,
+                evaluation.Metadata.OriginalLength,
+                evaluation.Metadata.PolicyDecision,
+                evaluation.Metadata.EvidenceState,
+                evaluation.Metadata.RedactionStatus,
+                evaluation.Metadata.RetentionClass,
+                evaluation.Metadata.RecommendationUse));
+        }
+
+        foreach (var extractionFailure in extractionFailures)
+        {
+            await tenantMetadataStore.RecordContentCandidateExtractionFailureAsync(
+                new CreateContentCandidateExtractionFailureRequest(
+                    credential.CustomerOrganizationId,
+                    policy.PolicyVersionId,
+                    credential.ScopedIngestionCredentialId,
+                    credential.HarnessSetupProfileId,
+                    session.AgentSessionId,
+                    $"{envelope.TelemetryEnvelopeId}:{extractionFailure.TelemetryReference}",
+                    extractionFailure.ContentClass,
+                    ContentRetentionClass.MetadataOnly,
+                    RecommendationUse.Disabled));
+        }
+    }
+
+    private static string? ResolveRepositoryScopeId(ScopedIngestionCredential credential)
+    {
+        return credential.AllowedScopes
+            .Where(scope => scope.Kind == ProductScopeKind.Repository && !string.IsNullOrWhiteSpace(scope.ScopeId))
+            .Select(scope => scope.ScopeId)
+            .FirstOrDefault();
     }
 
     private static IResult CreateCredentialProblem(
@@ -566,7 +657,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 "malformed_otlp");
         }
 
-        if (!TryCreateMetadataFingerprint(payload, signalType, out _))
+        if (!TryCreateMetadataFingerprint(payload, signalType, out _, out var contentCandidates, out var extractionFailures))
         {
             return PayloadValidationResult.Invalid(
                 "Content-bearing OTLP payload cannot be safely classified.",
@@ -574,18 +665,22 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 "policy_context_missing");
         }
 
-        return PayloadValidationResult.Valid();
+        return PayloadValidationResult.Valid(contentCandidates, extractionFailures);
     }
 
     private static bool TryCreateMetadataFingerprint(
         ReadOnlySpan<byte> payload,
         string signalType,
-        out string metadataFingerprint)
+        out string metadataFingerprint,
+        out IReadOnlyList<EmittedContentCandidate> contentCandidates,
+        out IReadOnlyList<ContentCandidateExtractionFailure> extractionFailures)
     {
         var metadata = new StringBuilder(signalType);
+        var candidates = new List<EmittedContentCandidate>();
+        var failures = new List<ContentCandidateExtractionFailure>();
         var success = signalType switch
         {
-            "logs" => TryAppendLogMetadata(payload, metadata),
+            "logs" => TryAppendLogMetadata(payload, metadata, candidates, failures),
             "metrics" => TryAppendMetricMetadata(payload, metadata),
             "traces" => TryAppendTraceMetadata(payload, metadata),
             _ => false
@@ -594,10 +689,16 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         metadataFingerprint = success
             ? Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(metadata.ToString()))).ToLowerInvariant()
             : string.Empty;
+        contentCandidates = success ? candidates : [];
+        extractionFailures = success ? failures : [];
         return success;
     }
 
-    private static bool TryAppendLogMetadata(ReadOnlySpan<byte> payload, StringBuilder metadata)
+    private static bool TryAppendLogMetadata(
+        ReadOnlySpan<byte> payload,
+        StringBuilder metadata,
+        ICollection<EmittedContentCandidate> contentCandidates,
+        ICollection<ContentCandidateExtractionFailure> extractionFailures)
     {
         return WalkPayloadFields(payload, (fieldNumber, wireType, value) =>
             fieldNumber != 1 ||
@@ -605,10 +706,14 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 resourceFieldNumber != 2 ||
                 (resourceWireType == 2 && WalkPayloadFields(resourceValue, (scopeFieldNumber, scopeWireType, scopeValue) =>
                     scopeFieldNumber != 2 ||
-                    (scopeWireType == 2 && AppendLogRecordMetadata(scopeValue, metadata)))))));
+                    (scopeWireType == 2 && AppendLogRecordMetadata(scopeValue, metadata, contentCandidates, extractionFailures)))))));
     }
 
-    private static bool AppendLogRecordMetadata(ReadOnlySpan<byte> logRecord, StringBuilder metadata)
+    private static bool AppendLogRecordMetadata(
+        ReadOnlySpan<byte> logRecord,
+        StringBuilder metadata,
+        ICollection<EmittedContentCandidate> contentCandidates,
+        ICollection<ContentCandidateExtractionFailure> extractionFailures)
     {
         return WalkPayloadFields(logRecord, (fieldNumber, wireType, value) =>
         {
@@ -623,13 +728,73 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 return true;
             }
 
-            if (fieldNumber is 5 or 6)
+            if (fieldNumber == 5)
             {
-                return false;
+                AppendLogBodyCandidate(value, metadata, contentCandidates, extractionFailures);
+                return true;
+            }
+
+            if (fieldNumber == 6)
+            {
+                return true;
             }
 
             return wireType != 2;
         });
+    }
+
+    private static void AppendLogBodyCandidate(
+        ReadOnlySpan<byte> body,
+        StringBuilder metadata,
+        ICollection<EmittedContentCandidate> contentCandidates,
+        ICollection<ContentCandidateExtractionFailure> extractionFailures)
+    {
+        if (TryReadStringAnyValue(body, out var bodyText))
+        {
+            metadata.Append("|log.body.length=").Append(bodyText.Length);
+            if (bodyText.StartsWith(PromptSnippetCandidatePrefix, StringComparison.Ordinal))
+            {
+                var candidateText = bodyText[PromptSnippetCandidatePrefix.Length..];
+                if (candidateText.Length == 0)
+                {
+                    extractionFailures.Add(new ContentCandidateExtractionFailure(
+                        ContentClass.PromptSnippet,
+                        "otlp.log.body"));
+                    return;
+                }
+
+                contentCandidates.Add(new EmittedContentCandidate(
+                    ContentClass.PromptSnippet,
+                    "otlp.log.body",
+                    candidateText));
+            }
+
+            return;
+        }
+    }
+
+    private static bool TryReadStringAnyValue(ReadOnlySpan<byte> anyValue, out string value)
+    {
+        var decodedValue = string.Empty;
+
+        var success = WalkPayloadFields(anyValue, (fieldNumber, wireType, fieldValue) =>
+        {
+            if (fieldNumber != 1)
+            {
+                return true;
+            }
+
+            if (wireType != 2)
+            {
+                return false;
+            }
+
+            decodedValue = Encoding.UTF8.GetString(fieldValue);
+            return true;
+        }) && decodedValue.Length > 0;
+
+        value = decodedValue;
+        return success;
     }
 
     private static bool TryAppendMetricMetadata(ReadOnlySpan<byte> payload, StringBuilder metadata)
@@ -1403,22 +1568,32 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         bool IsValid,
         string Title,
         int StatusCode,
-        string Code)
+        string Code,
+        IReadOnlyList<EmittedContentCandidate> ContentCandidates,
+        IReadOnlyList<ContentCandidateExtractionFailure> ExtractionFailures)
     {
-        public static PayloadValidationResult Valid()
+        public static PayloadValidationResult Valid(
+            IReadOnlyList<EmittedContentCandidate> contentCandidates,
+            IReadOnlyList<ContentCandidateExtractionFailure> extractionFailures)
         {
             return new PayloadValidationResult(
                 true,
                 Title: string.Empty,
                 StatusCodes.Status200OK,
-                Code: string.Empty);
+                Code: string.Empty,
+                contentCandidates,
+                extractionFailures);
         }
 
         public static PayloadValidationResult Invalid(string title, int statusCode, string code)
         {
-            return new PayloadValidationResult(false, title, statusCode, code);
+            return new PayloadValidationResult(false, title, statusCode, code, [], []);
         }
     }
+
+    private sealed record ContentCandidateExtractionFailure(
+        ContentClass ContentClass,
+        string TelemetryReference);
 
     private sealed record AcceptedTelemetryRoutingResult(
         TelemetryEnvelopeRecord Envelope,
