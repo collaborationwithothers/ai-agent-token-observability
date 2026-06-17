@@ -115,6 +115,18 @@ If a subagent wait or close attempt fails once, stop waiting on that subagent an
 
 For Code Reviewer, request one full review after focused validation. If it reports `CHANGES_REQUESTED`, fix the findings, rerun validation, and request one targeted rereview using the prior findings ledger.
 
+### Token And Time Budget
+
+Treat validation output, Terraform plans, and subagent reviews as budgeted resources. Do not stream large command output into the conversation when targeted evidence is enough.
+
+- Confirm the actual worktree before the first edit. If the wrong checkout was edited, stop and correct the workspace before doing more implementation work.
+- Prefer focused validation during iteration. Run `scripts/validate-pr.sh` once after reviewer approval and before PR creation or PR update, unless a risky fix invalidates the prior full validation.
+- For Terraform changes, prefer machine-checkable evidence such as `terraform show -json` with `jq` assertions, targeted `terraform plan` summaries, or narrow grep checks. Do not paste or rely on full plan text unless the full plan is the artifact under review.
+- Cap noisy command output with tool output limits. Rerun a command with narrower filters instead of increasing output when only a few facts are needed.
+- Do not run broad source searches, full file reads, full validation, or reviewer passes to discover acceptance criteria. Use the Issue Start Packet and relevant source-of-truth docs first.
+- If Code Reviewer output appears stale, verify the current branch diff locally before spawning another reviewer.
+- Do not spawn explorer or implementation subagents for sequential issue work unless the user explicitly asks for them or the work is truly parallel and independent.
+
 ### Planning And Implementation Agents
 
 Project-scoped custom agents live under `.codex/agents/`.
