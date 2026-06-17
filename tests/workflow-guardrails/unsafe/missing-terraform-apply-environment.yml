@@ -1,0 +1,94 @@
+name: Unsafe Terraform Deploy Fixture
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        options: [dv, qa, pp, pd]
+      azure_region:
+        required: true
+        type: choice
+        options: [eastus, eastus2, westeurope]
+      customer_organization_slug:
+        required: true
+        type: string
+      confirmation:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  plan:
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        github.repository == 'collaborationwithothers/ai-agent-token-observability' &&
+        github.actor == 'haripraghash' &&
+        github.ref == 'refs/heads/main'
+      }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    outputs:
+      artifact_name: ${{ steps.guardrails.outputs.artifact_name }}
+      target_stages: ${{ steps.guardrails.outputs.target_stages }}
+      terraform_workspace: ${{ steps.guardrails.outputs.terraform_workspace }}
+    steps:
+      - name: Validate guardrails before privileged steps
+        id: guardrails
+        env:
+          REQUIRED_REPOSITORY: collaborationwithothers/ai-agent-token-observability
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+        run: |
+          ENVIRONMENT_STAGE_ORDER="foundation network_private_data_plane observability_foundation data_platform ai_services app_runtime managed_grafana edge"
+          EXCLUDED_SHARED_STAGES="public_dns"
+          test "${GITHUB_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
+          test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
+          test "${GITHUB_ACTOR}" = "haripraghash"
+          test "${GITHUB_REF}" = "refs/heads/main"
+          case "${GITHUB_REF_NAME}:${ENVIRONMENT}" in main:dv|main:qa|main:pp|main:pd) ;; *) exit 1 ;; esac
+          case "${ENVIRONMENT}" in dv|qa|pp|pd) ;; *) exit 1 ;; esac
+          case "${AZURE_REGION}" in eastus|eastus2|westeurope) ;; *) exit 1 ;; esac
+          case "${CUSTOMER_ORGANIZATION_SLUG}" in *[!a-z0-9-]*|""|-*|*-) exit 1 ;; esac
+          TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
+          test "${TF_WORKSPACE}" != "default"
+          echo "artifact_name=terraform-plans-${TF_WORKSPACE}" >> "${GITHUB_OUTPUT}"
+          echo "target_stages=${ENVIRONMENT_STAGE_ORDER}" >> "${GITHUB_OUTPUT}"
+          echo "terraform_workspace=${TF_WORKSPACE}" >> "${GITHUB_OUTPUT}"
+          echo "Excluded shared stages: ${EXCLUDED_SHARED_STAGES}" >> "${GITHUB_STEP_SUMMARY}"
+      - uses: azure/login@v2
+      - run: terraform -chdir="infrastructure/azure/stages/app_runtime" plan -input=false -out="${PLAN_FILE}"
+      - uses: actions/upload-artifact@v4
+
+  apply:
+    needs: plan
+    if: >-
+      ${{
+        needs.plan.result == 'success' &&
+        github.event_name == 'workflow_dispatch' &&
+        github.repository == 'collaborationwithothers/ai-agent-token-observability' &&
+        github.actor == 'haripraghash' &&
+        github.ref == 'refs/heads/main'
+      }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Validate guardrails before privileged steps
+        run: |
+          test "${GITHUB_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
+          test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
+          test "${GITHUB_ACTOR}" = "haripraghash"
+          test "${GITHUB_REF}" = "refs/heads/main"
+          case "${GITHUB_REF_NAME}:${ENVIRONMENT}" in main:dv|main:qa|main:pp|main:pd) ;; *) exit 1 ;; esac
+      - uses: actions/download-artifact@v5
+      - uses: azure/login@v2
+      - run: terraform -chdir="infrastructure/azure/stages/app_runtime" apply -input=false "${PLAN_FILE}"

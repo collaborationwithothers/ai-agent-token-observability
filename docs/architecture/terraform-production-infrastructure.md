@@ -8,10 +8,9 @@ It turns the agreed Terraform principles into implementation-ready stage boundar
 
 The repository now contains the Terraform stage tree and the first deployment-adjacent workflow set. Current workflow coverage is split as follows:
 
-- `.github/workflows/terraform-plan.yml` creates guarded Terraform plan artifacts.
+- `.github/workflows/terraform-plan.yml` selects a normal Terraform deploy scope, plans each selected stage, waits for `terraform-apply` environment approval, and applies the exact reviewed saved plan artifact for that stage before planning the next dependent stage.
 - `.github/workflows/terraform-destroy-plan.yml` creates guarded destroy plans and applies approved same-run destroy plan artifacts for disposable stages.
 - `.github/workflows/edge-origin-validation.yml` validates Front Door hostnames and direct Azure Container Apps origin isolation.
-- A guarded Terraform apply workflow for normal non-destroy infrastructure changes is still missing.
 - Runtime container image build definitions and the guarded ACR publish workflow are still missing.
 
 Image build and publish is a separate production path from Terraform plan and apply. Terraform stages consume reviewed image references or digests; they do not build or publish container images.
@@ -350,7 +349,7 @@ Deployment-capable GitHub Actions must be designed for a public repository.
 
 Infrastructure deletion is defined separately in [../operations/infrastructure-deletion.md](../operations/infrastructure-deletion.md). Deletion must use guarded Terraform destroy plans by stage and workspace, not tag-based Azure deletion.
 
-The existing Terraform plan workflow is not a deployment apply workflow. It produces plan artifacts for review. The future normal apply workflow must download the reviewed plan artifact by run ID, verify stage and workspace, and apply that saved plan file.
+The normal Terraform deploy workflow produces a saved plan artifact for each selected stage, waits on the `terraform-apply` GitHub environment, downloads the approved same-run artifact, verifies stage and workspace, and applies only that saved plan file. In an all-stage deploy, the workflow plans, reviews, and applies one stage before moving to the next dependent stage, so downstream stages can read remote state outputs produced earlier in the same run.
 
 Runtime image publishing is also separate from Terraform plan. The image publish workflow builds the Product Dashboard, Product API, Product Ingestion Endpoint, and shared Product Jobs images, publishes them to Azure Container Registry with immutable commit SHA tags, and emits digest-pinned app runtime Terraform inputs.
 
@@ -374,8 +373,7 @@ Required workflow inputs:
 - `environment`
 - `azure_region`
 - `customer_organization_slug`
-- `stage`
-- `plan_or_apply`
+- optional `terraform_stage`
 - `confirmation`
 
 Required validations before Azure login:
@@ -387,9 +385,10 @@ Required validations before Azure login:
 - `environment` is one of `dv`, `qa`, `pp`, or `pd`.
 - `azure_region` is in the allowed region list.
 - `customer_organization_slug` is in the allowed deployment scope list.
-- `stage` is in the allow-list of stage directories.
+- If supplied, `terraform_stage` is in the allow-list of normal deploy stage directories.
+- `public_dns` is not accepted by the normal deploy workflow because it is retained shared DNS infrastructure owned from `pd_eastus2_internal`.
 - Derived workspace equals `{environment}_{azureRegion}_{customerOrganizationSlug}`.
-- `confirmation` exactly matches the requested operation for apply.
+- `confirmation` exactly matches `deploy {workspace}` for an all-stage deploy or `deploy {stage} {workspace}` for a single-stage deploy.
 
 Required GitHub permissions:
 
@@ -405,11 +404,13 @@ Rules:
 - `GITHUB_TOKEN` permissions must remain least privilege.
 - Workflow scripts must not interpolate untrusted context directly into shell commands.
 - Forked PRs must never receive Azure credentials or deployment-capable tokens.
-- Apply jobs for `pp` and `pd` must use GitHub environments with required reviewers.
+- Apply jobs must use the `terraform-apply` GitHub environment with required reviewers.
 - Managed Azure VNet runners may be used for private resource validation and Terraform operations, but they do not replace public repository workflow guards or Front Door origin isolation.
-- Plan and apply must be separate jobs or separate workflow modes with explicit apply confirmation.
-- Apply must use the exact plan artifact from the guarded plan job where feasible.
+- Plan and apply must be separate jobs for each selected stage.
+- Apply must use the exact plan artifact from the guarded plan job for the same stage and same run.
 - `terraform apply -auto-approve` is forbidden in production workflows.
+- When no `terraform_stage` is supplied, normal deploy targets environment-scoped stages one by one in dependency order: `foundation`, `network_private_data_plane`, `observability_foundation`, `data_platform`, `ai_services`, `app_runtime`, `managed_grafana`, and `edge`. Each stage's apply must complete before the next dependent stage is planned.
+- `public_dns` must be planned and applied separately as retained shared infrastructure before `edge` depends on its delegated Azure DNS zone output.
 
 Guardrail validator:
 
@@ -417,6 +418,7 @@ Guardrail validator:
 - The validator must fail if an Azure-changing workflow has forbidden triggers.
 - The validator must fail if an Azure-changing workflow lacks repository, actor, environment, region, workspace, branch, OIDC, permissions, and confirmation checks.
 - The validator must fail if `terraform apply -auto-approve` appears in deployment-capable workflows.
+- The validator must fail if the normal Terraform deploy workflow can apply without the `terraform-apply` environment, without downloading the saved plan artifact, or with `public_dns` in normal target stages.
 - The validator must have tests with unsafe workflow fixtures.
 
 Recommended validator path:
@@ -452,14 +454,14 @@ terraform workspace show
 terraform apply "$PLAN_FILE"
 ```
 
-The remote apply flow is a contract for the missing guarded apply workflow. The currently committed normal Terraform workflow stops at a saved plan artifact.
+The remote apply flow is implemented by guarded per-stage apply jobs in `.github/workflows/terraform-plan.yml`. Each apply job must run after its matching plan job, wait for `terraform-apply` environment approval, download the same-run plan artifact, select the derived workspace, and apply the saved plan file. In all-stage mode, the next stage plan job depends on the previous stage apply job.
 
 Rules:
 
 - Always run `terraform validate` before `terraform plan`.
 - Never plan or apply from the default workspace.
 - Never apply without displaying the selected workspace.
-- Never apply without an approved plan artifact for `pp` or `pd`.
+- Never apply without an approved plan artifact.
 - Never apply a newly generated plan in the apply job when a reviewed saved plan artifact is required.
 - Do not use `terraform apply -auto-approve` in guarded production workflows.
 
