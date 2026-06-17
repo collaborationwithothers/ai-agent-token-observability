@@ -15,6 +15,7 @@ dotnet test AiAgentTokenObservability.slnx --no-restore
 dotnet format AiAgentTokenObservability.slnx --verify-no-changes --no-restore
 npm --prefix web/token-observability-dashboard ci
 npm --prefix web/token-observability-dashboard run build
+scripts/validate-terraform-foundation-acr.sh
 scripts/validate-terraform-workflow-guardrails.sh
 scripts/validate-edge-origin-workflow.sh
 git diff --check

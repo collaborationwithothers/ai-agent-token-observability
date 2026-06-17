@@ -1,6 +1,6 @@
 # Foundation Stage
 
-Responsibility: Resource groups, shared tags, deployment identities, Key Vault, and role assignment foundations.
+Responsibility: Resource groups, shared tags, deployment identities, Key Vault, role assignment foundations, and shared container image infrastructure.
 
 Backend key: `foundation.tfstate`
 
@@ -20,4 +20,4 @@ terraform plan -input=false -lock=false \
   -var='tags={environment="dv",region="eastus2",product="token-observability",owner="platform",data_classification="internal",managed_by="terraform"}'
 ```
 
-This stage is a skeleton only. It does not deploy Azure resources yet.
+This retained shared stage deploys the Azure Container Registry used by the guarded image publish workflow. It is intentionally excluded from the Terraform deletion workflow's disposable stage order so published images survive environment-stage cleanup.

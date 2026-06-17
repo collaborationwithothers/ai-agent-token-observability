@@ -20,9 +20,6 @@ on:
       terraform_workspace:
         required: true
         type: string
-      acr_login_server:
-        required: true
-        type: string
       confirmation:
         required: true
         type: string
@@ -54,7 +51,6 @@ jobs:
           AZURE_REGION: ${{ inputs.azure_region }}
           CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
           REQUESTED_TERRAFORM_WORKSPACE: ${{ inputs.terraform_workspace }}
-          ACR_LOGIN_SERVER: ${{ inputs.acr_login_server }}
           CONFIRMATION: ${{ inputs.confirmation }}
         run: |
           test "${GITHUB_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
@@ -66,30 +62,35 @@ jobs:
           case "${ENVIRONMENT}" in dv|qa|pp|pd) ;; *) exit 1 ;; esac
           case "${AZURE_REGION}" in eastus|eastus2|westeurope) ;; *) exit 1 ;; esac
           case "${CUSTOMER_ORGANIZATION_SLUG}" in *[!a-z0-9-]*|""|-*|*-) exit 1 ;; esac
-          case "${ACR_LOGIN_SERVER}" in *.azurecr.io) ;; *) exit 1 ;; esac
           TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
           test "${TF_WORKSPACE}" != "default"
           test "${REQUESTED_TERRAFORM_WORKSPACE}" = "${TF_WORKSPACE}"
           test "${CONFIRMATION}" = "publish images ${TF_WORKSPACE}"
       - uses: actions/checkout@v4
       - uses: azure/login@v2
+      - name: Resolve foundation ACR login server
+        run: |
+          terraform -chdir="infrastructure/azure/stages/foundation" init
+          ACR_LOGIN_SERVER="$(terraform -chdir="infrastructure/azure/stages/foundation" output -raw container_registry_login_server)"
+          case "${ACR_LOGIN_SERVER}" in *.azurecr.io) ;; *) exit 1 ;; esac
+          echo "ACR_LOGIN_SERVER=${ACR_LOGIN_SERVER}" >> "${GITHUB_ENV}"
       - run: az acr login --name "${ACR_LOGIN_SERVER%.azurecr.io}"
       - uses: docker/build-push-action@v7
         with:
           push: true
-          tags: ${{ inputs.acr_login_server }}/product-dashboard:${{ github.sha }}
+          tags: ${{ env.ACR_LOGIN_SERVER }}/product-dashboard:${{ github.sha }}
       - uses: docker/build-push-action@v7
         with:
           push: true
-          tags: ${{ inputs.acr_login_server }}/product-api:${{ github.sha }}
+          tags: ${{ env.ACR_LOGIN_SERVER }}/product-api:${{ github.sha }}
       - uses: docker/build-push-action@v7
         with:
           push: true
-          tags: ${{ inputs.acr_login_server }}/product-ingestion:${{ github.sha }}
+          tags: ${{ env.ACR_LOGIN_SERVER }}/product-ingestion:${{ github.sha }}
       - uses: docker/build-push-action@v7
         with:
           push: true
-          tags: ${{ inputs.acr_login_server }}/product-jobs:${{ github.sha }}
+          tags: ${{ env.ACR_LOGIN_SERVER }}/product-jobs:${{ github.sha }}
       - run: |
           mkdir -p image-digests
           touch image-digests/app-runtime-images.auto.tfvars.json
