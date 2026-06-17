@@ -313,6 +313,13 @@ def is_terraform_plan_workflow(path: pathlib.Path, content: str) -> bool:
     ) is not None
 
 
+def is_public_dns_workflow(path: pathlib.Path, content: str) -> bool:
+    return path.name == "terraform-public-dns.yml" or re.search(
+        r"(?m)^name:\s*(?:(?:Safe|Unsafe)\s+)?Terraform Public DNS(?:\s+Fixture)?\s*$",
+        content,
+    ) is not None
+
+
 def terraform_plan_required_errors(content: str) -> list[str]:
     errors: list[str] = []
     dispatch_inputs = dispatch_input_names(content)
@@ -356,6 +363,59 @@ def terraform_plan_required_errors(content: str) -> list[str]:
     return errors
 
 
+def public_dns_required_errors(content: str) -> list[str]:
+    errors: list[str] = []
+    dispatch_inputs = dispatch_input_names(content)
+    required_inputs = {
+        "operation",
+        "environment",
+        "azure_region",
+        "customer_organization_slug",
+        "confirmation",
+    }
+    for input_name in sorted(required_inputs - dispatch_inputs):
+        errors.append(f"retained public DNS workflow missing {input_name} dispatch input")
+
+    required_patterns = {
+        "plan/apply operation": r"plan_apply",
+        "delegation verification operation": r"verify_delegation",
+        "retained stage constant": r"RETAINED_TERRAFORM_STAGE=.*public_dns|TERRAFORM_STAGE=.*public_dns",
+        "retained workspace constant": r"RETAINED_WORKSPACE=.*pd_eastus2_internal|TF_WORKSPACE.*pd_eastus2_internal|pd_eastus2_internal.*TF_WORKSPACE",
+        "pd-only environment gate": r"case\s+\"\$\{ENVIRONMENT\}\".*pd|test\s+\"\$\{ENVIRONMENT\}\"\s*=\s*\"pd\"",
+        "eastus2-only region gate": r"case\s+\"\$\{AZURE_REGION\}\".*eastus2|test\s+\"\$\{AZURE_REGION\}\"\s*=\s*\"eastus2\"",
+        "internal-only customer gate": r"case\s+\"\$\{CUSTOMER_ORGANIZATION_SLUG\}\".*internal|test\s+\"\$\{CUSTOMER_ORGANIZATION_SLUG\}\"\s*=\s*\"internal\"",
+        "apply confirmation": r"apply\s+\$\{?RETAINED_TERRAFORM_STAGE\}?\s+\$\{TF_WORKSPACE\}|apply public_dns \${TF_WORKSPACE}|apply public_dns pd_eastus2_internal",
+        "verify confirmation": r"verify\s+\$\{?RETAINED_TERRAFORM_STAGE\}?\s+\$\{TF_WORKSPACE\}|verify public_dns \${TF_WORKSPACE}|verify public_dns pd_eastus2_internal",
+        "saved public DNS plan": r"terraform\s+-chdir=.*public_dns.*plan.*-out=.*PLAN_FILE|terraform\s+-chdir=.*STAGE_DIR.*plan.*-out=.*PLAN_FILE",
+        "approved public DNS apply": r"terraform\s+-chdir=.*public_dns.*apply\s+-input=false\s+.*PLAN_FILE|terraform\s+-chdir=.*STAGE_DIR.*apply\s+-input=false\s+.*PLAN_FILE",
+        "same-run public DNS artifact download": r"actions/download-artifact",
+        "public DNS approval environment": r"(?m)^\s*name\s*:\s*terraform-public-dns-apply\s*$",
+        "Cloudflare delegation output": r"cloudflare_delegation_ns_records",
+        "public NS verification": r"dig\s+\+short\s+NS\s+tokenobs\.consultwithcloud\.com",
+        "expected NS output": r"product_dns_zone_name_servers",
+    }
+    for name, pattern in required_patterns.items():
+        if re.search(pattern, content, re.IGNORECASE | re.MULTILINE | re.DOTALL) is None:
+            errors.append(f"missing {name}")
+
+    forbidden_patterns = {
+        "Cloudflare API credentials": r"CLOUDFLARE_API|CLOUDFLARE_TOKEN|cloudflare_api_token|cloudflare_zone_api_token",
+        "Cloudflare Terraform provider": r"cloudflare/cloudflare|provider\s+\"cloudflare\"",
+        "certificate private key material": r"PEM|PFX|ACME_ACCOUNT|PRIVATE_KEY|letsencrypt|lego",
+        "public DNS destroy plan": r"terraform\s+-chdir=.*public_dns.*plan\s+-destroy|plan\s+-destroy.*public_dns",
+    }
+    for name, pattern in forbidden_patterns.items():
+        if re.search(pattern, content, re.IGNORECASE | re.MULTILINE | re.DOTALL):
+            errors.append(f"retained public DNS workflow must not contain {name}")
+
+    if re.search(r"(?m)^\s*-\s*(dv|qa|pp)\s*$", content):
+        errors.append("retained public DNS workflow must not expose non-pd environments")
+    if re.search(r"(?m)^\s*-\s*(eastus|westeurope)\s*$", content):
+        errors.append("retained public DNS workflow must not expose non-eastus2 regions")
+
+    return errors
+
+
 def validate_file(path: pathlib.Path) -> list[str]:
     content = path.read_text(encoding="utf-8")
     if not is_deployment_capable(content):
@@ -367,6 +427,8 @@ def validate_file(path: pathlib.Path) -> list[str]:
     errors.extend(required_gate_errors(content))
     if is_terraform_plan_workflow(path, content):
         errors.extend(terraform_plan_required_errors(content))
+    if is_public_dns_workflow(path, content):
+        errors.extend(public_dns_required_errors(content))
     if is_destroy_capable(content):
         errors.extend(destroy_required_errors(content))
     if is_image_publish_capable(content):

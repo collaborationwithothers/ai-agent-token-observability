@@ -6,7 +6,7 @@ Status: Deferred. This runbook is not part of the first release after the decisi
 
 This document defines a deferred BYOC certificate renewal workflow for public product hostnames under `tokenobs.consultwithcloud.com`.
 
-If the deferred BYOC option is adopted, the workflow renews the Let's Encrypt wildcard certificate, proves control through Azure DNS DNS-01 validation, imports the renewed certificate into shared Key Vault, and keeps Azure Front Door custom domains using the current certificate version.
+If the deferred BYOC option is adopted, the workflow renews the Let's Encrypt wildcard certificate, proves control through Azure DNS DNS-01 validation, imports the renewed certificate into retained per-environment Key Vault, and keeps Azure Front Door custom domains using the current certificate version.
 
 ## Decision
 
@@ -51,7 +51,7 @@ tokenobs.consultwithcloud.com
 Certificate store:
 
 ```text
-Shared Azure Key Vault
+Retained per-environment Azure Key Vault
 ```
 
 Consumer:
@@ -69,7 +69,7 @@ The GitHub Actions renewal workflow must:
 - Create the required DNS-01 TXT records in Azure DNS.
 - Wait for DNS propagation or explicitly verify TXT visibility before finalizing ACME validation.
 - Remove temporary ACME TXT records after validation where the ACME client supports cleanup.
-- Import the renewed certificate with private key into shared Key Vault.
+- Import the renewed certificate with private key into retained per-environment Key Vault.
 - Preserve enough certificate version history for rollback.
 - Ensure Azure Front Door can use the current Key Vault certificate version.
 - Emit an audit trail with workflow run ID, actor, certificate name, Key Vault certificate version, and result.
@@ -115,7 +115,7 @@ Azure identity requirements:
 
 - Federated credential scoped to this repository and workflow.
 - Least-privilege access to write TXT records in the Azure DNS zone `tokenobs.consultwithcloud.com`.
-- Least-privilege access to import or update certificates in the shared certificate Key Vault.
+- Least-privilege access to import or update certificates in the retained per-environment certificate Key Vault.
 - No Contributor role at subscription scope.
 - No Cloudflare credentials.
 
@@ -206,7 +206,7 @@ Rules:
 
 ACME account material:
 
-- ACME account material is stored in shared Key Vault as a secret named `letsencrypt-lego-account-archive`.
+- ACME account material is stored in retained per-environment Key Vault as a secret named `letsencrypt-lego-account-archive`.
 - The secret contains a base64-encoded archive of the `lego` account directory only.
 - The workflow restores the archive into `$LEGO_PATH` before running `lego`.
 - After successful ACME issuance, the workflow updates the Key Vault secret with the new account archive.
@@ -226,7 +226,14 @@ The ACME client must support DNS-01 automation against Azure DNS without Cloudfl
 
 ## Key Vault Import
 
-The workflow imports the wildcard certificate into shared Key Vault as the product TLS certificate.
+The workflow imports the wildcard certificate into the retained per-environment Key Vault as the product TLS certificate.
+
+Terraform ownership boundary:
+
+- Terraform may own the retained Key Vault, RBAC assignments, and non-secret resource identifiers.
+- Terraform must not import or model the wildcard certificate contents.
+- Certificate private key material, PEM, PFX, ACME account state, and imported certificate contents must not be passed through Terraform variables, Terraform resources, Terraform outputs, plan artifacts, or state.
+- The renewal workflow owns certificate import and rotation if the deferred BYOC option is adopted later.
 
 Rules:
 
@@ -238,7 +245,7 @@ Rules:
 - Imported certificate versions must not be immediately deleted.
 - Private key material must be held only in ephemeral workflow storage and must be masked where possible.
 - Temporary certificate, private key, chain, and PFX files must be deleted before the workflow job ends.
-- The shared Key Vault must be a Retained Shared Resource.
+- The retained per-environment Key Vault must be a Retained Shared Resource.
 - The deletion workflow must not delete this Key Vault or certificate versions.
 
 PEM import command contract:
@@ -427,7 +434,7 @@ These criteria apply only if the BYOC wildcard certificate option is adopted lat
 - Renewal writes DNS-01 TXT records only in Azure DNS for `tokenobs.consultwithcloud.com`.
 - Renewal uses `lego` with the Azure DNS provider.
 - Renewal uses the documented `lego run` command contract and restores ACME account state from Key Vault.
-- Renewal imports a wildcard certificate for `*.tokenobs.consultwithcloud.com` into shared Key Vault.
+- Renewal imports a wildcard certificate for `*.tokenobs.consultwithcloud.com` into retained per-environment Key Vault.
 - Renewal proves direct PEM import first, with PFX conversion allowed only as a documented fallback.
 - Renewal proves non-production Key Vault import with Let's Encrypt staging before production renewal.
 - PFX fallback, if used, generates an ephemeral masked password and cleans up generated files before job end.

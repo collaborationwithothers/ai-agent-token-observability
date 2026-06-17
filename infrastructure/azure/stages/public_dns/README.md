@@ -26,12 +26,14 @@ terraform plan -input=false -lock=false \
   -var='tags={environment="pd",region="eastus2",product="token-observability",owner="platform",data_classification="internal",managed_by="terraform"}'
 ```
 
-Guarded plan workflow path:
+Guarded workflow path:
 
-1. Plan and apply the `public_dns` stage from the single owner workspace `pd_eastus2_internal` before the `edge` stage needs managed certificate validation records.
-2. Copy `product_dns_zone` from this stage output into the edge stage `azure_dns_zone` input.
-3. Create the Cloudflare parent-zone NS delegation manually or through an approved Cloudflare workflow outside this repo, using `cloudflare_delegation_ns_records`.
-4. Keep this stage out of disposable environment deletion. The DNS zone has `prevent_destroy = true` and is not offered by the deletion workflow.
+1. Run `.github/workflows/terraform-public-dns.yml` with `operation=plan_apply`, `environment=pd`, `azure_region=eastus2`, `customer_organization_slug=internal`, and confirmation `apply public_dns pd_eastus2_internal`.
+2. The workflow plans and applies only this retained stage from the single owner workspace `pd_eastus2_internal`. It is separate from normal environment deploy because `public_dns` is shared infrastructure.
+3. Copy `product_dns_zone` from this stage output into the edge stage `azure_dns_zone` input.
+4. Create the Cloudflare parent-zone NS delegation manually, using the `cloudflare_delegation_ns_records` workflow summary output. This repository does not use Cloudflare API credentials.
+5. Run `.github/workflows/terraform-public-dns.yml` with `operation=verify_delegation` and confirmation `verify public_dns pd_eastus2_internal` after the manual Cloudflare change. The verification compares public `dig NS tokenobs.consultwithcloud.com` results with `product_dns_zone_name_servers`.
+6. Keep this stage out of disposable environment deletion. The DNS zone has `prevent_destroy = true` and is not offered by the deletion workflow.
 
 Edge DNS record workflow:
 
