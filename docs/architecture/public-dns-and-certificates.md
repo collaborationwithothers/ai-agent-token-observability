@@ -181,6 +181,12 @@ Terraform should not manage:
 - Cloudflare apex-zone records unrelated to delegation.
 - The initial Cloudflare NS delegation if the product repo is not granted Cloudflare API access.
 
+Terraform stage ownership:
+
+- The retained `public_dns` stage owns the Azure DNS zone `tokenobs.consultwithcloud.com` from the single owner workspace `pd_eastus2_internal` and outputs the Azure name servers that Cloudflare must delegate from the apex zone.
+- The disposable `edge` stage owns Front Door custom domains plus the `_dnsauth`, `app`, `api`, and `ingest` records inside the delegated Azure DNS zone when its `azure_dns_zone.manage_records` input is true.
+- The initial Cloudflare NS delegation remains outside this repo's Terraform state unless a later issue explicitly grants and governs Cloudflare API access.
+
 ## Shared Resource Behavior
 
 The following resources are shared foundation resources and must be retained by infrastructure deletion workflows:

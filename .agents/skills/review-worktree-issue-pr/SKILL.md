@@ -81,6 +81,16 @@ scripts/validate-pr.sh
 gh pr view PR_NUMBER --json closingIssuesReferences
 ```
 
+## Budget Controls
+
+- Treat full validation, Terraform plans, and subagent reviews as expensive. Use them deliberately and keep their output narrow.
+- Before the first edit, confirm `git worktree list --porcelain` and `git status --short --branch` for the target worktree. If edits land in the wrong checkout, stop and fix the workspace before continuing.
+- During implementation, run the narrowest useful `scripts/validate-focused.sh PROFILE`. Reserve `scripts/validate-pr.sh` for after reviewer approval and before PR creation or PR update, unless a risky fix invalidates the prior full validation.
+- For Terraform changes, avoid streaming full plan output by default. Prefer `terraform show -json` with `jq` assertions, targeted plan summaries, or narrow grep checks. Use full plan text only when the full plan is the artifact being reviewed.
+- Cap noisy command output. If the first output is too broad, rerun with narrower filters instead of expanding the transcript.
+- Do not use Code Reviewer, broad source searches, or full file reads to discover acceptance criteria. Use the Issue Start Packet and the smallest relevant source-of-truth document set.
+- If reviewer output appears stale, verify the current branch diff locally before requesting another reviewer pass.
+
 ## Subagent Rules
 
 - Use implementation subagents only when the user explicitly asks for them or the work is truly parallel.

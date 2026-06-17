@@ -13,13 +13,14 @@ Stages keep inactive backend examples so validation can run without Azure deploy
 ## Stage Order
 
 1. `foundation`
-2. `network_private_data_plane`
-3. `observability_foundation`
-4. `data_platform`
-5. `ai_services`
-6. `app_runtime`
-7. `managed_grafana`
-8. `edge`
+2. `public_dns`
+3. `network_private_data_plane`
+4. `observability_foundation`
+5. `data_platform`
+6. `ai_services`
+7. `app_runtime`
+8. `managed_grafana`
+9. `edge`
 
 ## Workspace Contract
 
@@ -52,7 +53,7 @@ Run from `infrastructure/azure`:
 terraform fmt -check -recursive
 ```
 
-Run from each stage directory:
+Run from each disposable environment stage directory:
 
 ```bash
 terraform init -backend=false
@@ -65,3 +66,5 @@ terraform plan -input=false -lock=false \
   -var="resource_instance=core" \
   -var='tags={environment="dv",region="eastus2",product="token-observability",owner="platform",data_classification="internal",managed_by="terraform"}'
 ```
+
+The retained `public_dns` stage is intentionally pinned to the single owner workspace `pd_eastus2_internal` so the delegated shared product DNS zone has one Terraform workspace owner. Use the stage-specific example in `stages/public_dns/README.md` for that stage.

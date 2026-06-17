@@ -13,8 +13,8 @@ variable "azure_region" {
   type        = string
 
   validation {
-    condition     = contains(var.allowed_regions, var.azure_region)
-    error_message = "azure_region must be included in allowed_regions."
+    condition     = can(regex("^[a-z0-9]+$", var.azure_region))
+    error_message = "azure_region must be a lowercase Azure region name."
   }
 }
 
@@ -23,8 +23,8 @@ variable "customer_organization_slug" {
   type        = string
 
   validation {
-    condition     = contains(var.allowed_customer_organization_slugs, var.customer_organization_slug) && can(regex("^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$", var.customer_organization_slug))
-    error_message = "customer_organization_slug must be allowed and lowercase URL-safe."
+    condition     = can(regex("^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$", var.customer_organization_slug))
+    error_message = "customer_organization_slug must be lowercase URL-safe."
   }
 }
 
@@ -34,8 +34,8 @@ variable "terraform_workspace_name" {
   default     = null
 
   validation {
-    condition     = var.terraform_workspace_name == null || var.terraform_workspace_name == "${var.environment}_${var.azure_region}_${var.customer_organization_slug}"
-    error_message = "terraform_workspace_name must match {environment}_{azureRegion}_{customerOrganizationSlug}."
+    condition     = var.terraform_workspace_name == null || var.terraform_workspace_name != "default"
+    error_message = "terraform_workspace_name must not be default."
   }
 }
 
@@ -108,9 +108,12 @@ variable "public_ingress_hostnames" {
       contains(keys(var.public_ingress_hostnames), "app"),
       contains(keys(var.public_ingress_hostnames), "api"),
       contains(keys(var.public_ingress_hostnames), "ingest"),
-      alltrue([for hostname in values(var.public_ingress_hostnames) : can(regex("^[a-z0-9][a-z0-9.-]*[a-z0-9]$", hostname))])
+      alltrue([for hostname in values(var.public_ingress_hostnames) : can(regex("^[a-z0-9][a-z0-9.-]*[a-z0-9]$", hostname))]),
+      var.public_ingress_hostnames.app == "app.tokenobs.consultwithcloud.com",
+      var.public_ingress_hostnames.api == "api.tokenobs.consultwithcloud.com",
+      var.public_ingress_hostnames.ingest == "ingest.tokenobs.consultwithcloud.com"
     ])
-    error_message = "public_ingress_hostnames must include valid app, api, and ingest hostnames."
+    error_message = "public_ingress_hostnames must be the first-release app, api, and ingest hostnames under tokenobs.consultwithcloud.com."
   }
 }
 
@@ -126,11 +129,11 @@ variable "azure_dns_zone" {
 
   validation {
     condition = var.azure_dns_zone == null || !try(var.azure_dns_zone.manage_records, false) || alltrue([
-      can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.Network/dnsZones/[^/]+$", coalesce(try(var.azure_dns_zone.id, null), ""))),
-      coalesce(try(var.azure_dns_zone.name, null), "") != "",
+      can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.Network/dnsZones/tokenobs\\.consultwithcloud\\.com$", coalesce(try(var.azure_dns_zone.id, null), ""))),
+      coalesce(try(var.azure_dns_zone.name, null), "") == "tokenobs.consultwithcloud.com",
       coalesce(try(var.azure_dns_zone.resource_group_name, null), "") != ""
     ])
-    error_message = "azure_dns_zone must include id, name, and resource_group_name when manage_records is true."
+    error_message = "azure_dns_zone must be the delegated tokenobs.consultwithcloud.com Azure DNS zone when manage_records is true."
   }
 }
 

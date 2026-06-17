@@ -37,6 +37,8 @@ locals {
     for key, endpoint in azurerm_cdn_frontdoor_endpoint.this : key => endpoint.host_name
   }
 
+  public_dns_zone_name = coalesce(try(var.azure_dns_zone.name, null), "tokenobs.consultwithcloud.com")
+
   app_rate_limit_hosts = compact([
     lookup(var.public_ingress_hostnames, "app", ""),
     lookup(var.public_ingress_hostnames, "api", ""),

@@ -37,6 +37,7 @@ The deletion workflow must never destroy these resources:
 | Terraform remote state container | Required for stage state |
 | Shared Key Vault if provisioned | Holds application secrets and future BYOC certificate material if that deferred option is later adopted |
 | Azure DNS zone `tokenobs.consultwithcloud.com` | Delegated product DNS zone |
+| Public DNS Terraform stage `public_dns` | Owns the retained delegated product DNS zone |
 | Cloudflare apex delegation records | Outside Terraform ownership for this repo |
 | Azure Container Registry | Shared image source and rollback boundary |
 | Shared deployment identities | Required for future deploy, destroy, and operations workflows |
@@ -65,6 +66,7 @@ foundation
 Rules:
 
 - `foundation` may be destroyed only if it does not contain any retained shared resource.
+- `public_dns` is intentionally excluded from the disposable destroy order.
 - If `foundation` contains shared Key Vault, ACR, deployment identities, or DNS ownership, split those resources into a retained shared-foundation stage before implementing deletion.
 - The deletion workflow must refuse to destroy any stage that contains a retained shared resource.
 - Stages must document whether they are disposable or retained.
