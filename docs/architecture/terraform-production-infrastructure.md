@@ -80,7 +80,9 @@ The remote state storage account and blob container are created manually before 
 
 There is no Terraform stage that creates the production remote state storage account.
 
-Recommended operator-owned runbook path:
+Operator-owned setup is defined in [Manual Terraform Remote State Foundation](../operations/manual-terraform-remote-state.md).
+
+Runbook path:
 
 ```text
 docs/operations/manual-terraform-remote-state.md
