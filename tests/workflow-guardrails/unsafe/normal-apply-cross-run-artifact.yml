@@ -1,4 +1,4 @@
-name: Safe Terraform Deploy Fixture
+name: Unsafe Terraform Deploy Fixture
 
 on:
   workflow_dispatch:
@@ -6,23 +6,13 @@ on:
       environment:
         required: true
         type: choice
-        options:
-          - dv
-          - qa
-          - pp
-          - pd
+        options: [dv, qa, pp, pd]
       azure_region:
         required: true
         type: choice
-        options:
-          - eastus
-          - eastus2
-          - westeurope
+        options: [eastus, eastus2, westeurope]
       customer_organization_slug:
         required: true
-        type: string
-      terraform_stage:
-        required: false
         type: string
       confirmation:
         required: true
@@ -47,7 +37,6 @@ jobs:
     outputs:
       deployment_scope: ${{ steps.guardrails.outputs.deployment_scope }}
       terraform_workspace: ${{ steps.guardrails.outputs.terraform_workspace }}
-      deploy_foundation: ${{ steps.guardrails.outputs.deploy_foundation }}
       deploy_app_runtime: ${{ steps.guardrails.outputs.deploy_app_runtime }}
     steps:
       - name: Validate guardrails before privileged steps
@@ -57,8 +46,6 @@ jobs:
           ENVIRONMENT: ${{ inputs.environment }}
           AZURE_REGION: ${{ inputs.azure_region }}
           CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
-          TERRAFORM_STAGE_INPUT: ${{ inputs.terraform_stage }}
-          CONFIRMATION: ${{ inputs.confirmation }}
         run: |
           set -euo pipefail
           ENVIRONMENT_STAGE_ORDER="foundation network_private_data_plane observability_foundation data_platform ai_services app_runtime managed_grafana edge"
@@ -73,36 +60,22 @@ jobs:
           case "${CUSTOMER_ORGANIZATION_SLUG}" in *[!a-z0-9-]*|""|-*|*-) exit 1 ;; esac
           TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
           test "${TF_WORKSPACE}" != "default"
-          case "${TERRAFORM_STAGE_INPUT}" in ""|foundation|app_runtime) ;; public_dns) exit 1 ;; *) exit 1 ;; esac
-          DEPLOYMENT_SCOPE="stage"
-          DEPLOY_FOUNDATION=false
-          DEPLOY_APP_RUNTIME=true
-          test "${CONFIRMATION}" = "deploy app_runtime ${TF_WORKSPACE}"
-          echo "deployment_scope=${DEPLOYMENT_SCOPE}" >> "${GITHUB_OUTPUT}"
+          echo "deployment_scope=stage" >> "${GITHUB_OUTPUT}"
           echo "terraform_workspace=${TF_WORKSPACE}" >> "${GITHUB_OUTPUT}"
-          echo "deploy_foundation=${DEPLOY_FOUNDATION}" >> "${GITHUB_OUTPUT}"
-          echo "deploy_app_runtime=${DEPLOY_APP_RUNTIME}" >> "${GITHUB_OUTPUT}"
+          echo "deploy_app_runtime=true" >> "${GITHUB_OUTPUT}"
           echo "Excluded shared stages: ${EXCLUDED_SHARED_STAGES}" >> "${GITHUB_STEP_SUMMARY}"
 
   plan-app-runtime:
-    needs: [select, apply-foundation]
-    if: ${{ always() && needs.select.outputs.deploy_app_runtime == 'true' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-foundation.result == 'success') }}
+    needs: select
+    if: ${{ needs.select.outputs.deploy_app_runtime == 'true' }}
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
     steps:
       - uses: actions/checkout@v4
       - uses: azure/login@v2
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      - name: Terraform plan
-        run: TERRAFORM_STAGE="app_runtime" bash scripts/terraform-stage-deploy.sh plan
+      - run: TERRAFORM_STAGE="app_runtime" bash scripts/terraform-stage-deploy.sh plan
       - uses: actions/upload-artifact@v4
-        with:
-          name: terraform-plan-app_runtime-${{ needs.select.outputs.terraform_workspace }}
-          path: ${{ runner.temp }}/terraform-plans/app_runtime
 
   apply-app-runtime:
     needs: [select, plan-app-runtime]
@@ -118,18 +91,6 @@ jobs:
         with:
           name: terraform-plan-app_runtime-${{ needs.select.outputs.terraform_workspace }}
           path: ${{ runner.temp }}/terraform-plans/app_runtime
+          run-id: 12345
       - uses: azure/login@v2
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      - name: Terraform apply
-        run: TERRAFORM_STAGE="app_runtime" bash scripts/terraform-stage-deploy.sh apply
-
-  apply-foundation:
-    if: ${{ false }}
-    runs-on:
-      group: consultwithcloud-azure
-      labels: [gh-linux]
-    steps:
-      - run: echo skipped
+      - run: TERRAFORM_STAGE="app_runtime" bash scripts/terraform-stage-deploy.sh apply

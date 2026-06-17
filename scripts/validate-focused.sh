@@ -80,6 +80,7 @@ case "$profile" in
     scripts/validate-terraform-foundation-acr.sh
     scripts/validate-terraform-workflow-guardrails.sh
     scripts/validate-edge-origin-workflow.sh
+    bash -n scripts/terraform-stage-deploy.sh
     git diff --check
     ;;
   docs)

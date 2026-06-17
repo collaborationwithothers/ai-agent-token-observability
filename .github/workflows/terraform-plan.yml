@@ -1,4 +1,4 @@
-name: Terraform Plan
+name: Terraform Deploy
 
 on:
   workflow_dispatch:
@@ -25,21 +25,11 @@ on:
         required: true
         type: string
       terraform_stage:
-        description: Terraform stage to plan.
-        required: true
-        type: choice
-        options:
-          - foundation
-          - public_dns
-          - network_private_data_plane
-          - observability_foundation
-          - data_platform
-          - ai_services
-          - app_runtime
-          - managed_grafana
-          - edge
+        description: Optional Terraform stage. Leave blank to deploy all environment-scoped stages.
+        required: false
+        type: string
       confirmation:
-        description: Type plan stage, for example plan app_runtime.
+        description: Type deploy WORKSPACE for all stages or deploy STAGE WORKSPACE for one stage.
         required: true
         type: string
 
@@ -48,8 +38,8 @@ permissions:
   id-token: write
 
 jobs:
-  plan:
-    name: Guarded Terraform plan
+  select:
+    name: Select Terraform deployment scope
     if: >-
       ${{
         github.event_name == 'workflow_dispatch' &&
@@ -60,7 +50,17 @@ jobs:
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
-    environment: ${{ inputs.environment }}
+    outputs:
+      deployment_scope: ${{ steps.guardrails.outputs.deployment_scope }}
+      terraform_workspace: ${{ steps.guardrails.outputs.terraform_workspace }}
+      deploy_foundation: ${{ steps.guardrails.outputs.deploy_foundation }}
+      deploy_network_private_data_plane: ${{ steps.guardrails.outputs.deploy_network_private_data_plane }}
+      deploy_observability_foundation: ${{ steps.guardrails.outputs.deploy_observability_foundation }}
+      deploy_data_platform: ${{ steps.guardrails.outputs.deploy_data_platform }}
+      deploy_ai_services: ${{ steps.guardrails.outputs.deploy_ai_services }}
+      deploy_app_runtime: ${{ steps.guardrails.outputs.deploy_app_runtime }}
+      deploy_managed_grafana: ${{ steps.guardrails.outputs.deploy_managed_grafana }}
+      deploy_edge: ${{ steps.guardrails.outputs.deploy_edge }}
     steps:
       - name: Validate guardrails before privileged steps
         id: guardrails
@@ -69,10 +69,13 @@ jobs:
           ENVIRONMENT: ${{ inputs.environment }}
           AZURE_REGION: ${{ inputs.azure_region }}
           CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
-          TERRAFORM_STAGE: ${{ inputs.terraform_stage }}
+          TERRAFORM_STAGE_INPUT: ${{ inputs.terraform_stage }}
           CONFIRMATION: ${{ inputs.confirmation }}
         run: |
           set -euo pipefail
+
+          ENVIRONMENT_STAGE_ORDER="foundation network_private_data_plane observability_foundation data_platform ai_services app_runtime managed_grafana edge"
+          EXCLUDED_SHARED_STAGES="public_dns"
 
           test "${GITHUB_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
           test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
@@ -82,67 +85,700 @@ jobs:
           case "${ENVIRONMENT}" in dv|qa|pp|pd) ;; *) exit 1 ;; esac
           case "${AZURE_REGION}" in eastus|eastus2|westeurope) ;; *) exit 1 ;; esac
           case "${CUSTOMER_ORGANIZATION_SLUG}" in *[!a-z0-9-]*|""|-*|*-) exit 1 ;; esac
+
           TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
-          case "${TERRAFORM_STAGE}" in foundation|public_dns|network_private_data_plane|observability_foundation|data_platform|ai_services|app_runtime|managed_grafana|edge) ;; *) exit 1 ;; esac
-          if [[ "${TERRAFORM_STAGE}" == "public_dns" ]]; then
-            test "${TF_WORKSPACE}" = "pd_eastus2_internal"
+          test "${TF_WORKSPACE}" != "default"
+
+          TERRAFORM_STAGE="$(printf '%s' "${TERRAFORM_STAGE_INPUT}" | tr -d '[:space:]')"
+          if [[ -z "${TERRAFORM_STAGE}" ]]; then
+            DEPLOYMENT_SCOPE="environment"
+            EXPECTED_CONFIRMATION="deploy ${TF_WORKSPACE}"
+            DEPLOY_FOUNDATION=true
+            DEPLOY_NETWORK_PRIVATE_DATA_PLANE=true
+            DEPLOY_OBSERVABILITY_FOUNDATION=true
+            DEPLOY_DATA_PLATFORM=true
+            DEPLOY_AI_SERVICES=true
+            DEPLOY_APP_RUNTIME=true
+            DEPLOY_MANAGED_GRAFANA=true
+            DEPLOY_EDGE=true
+          else
+            case "${TERRAFORM_STAGE}" in
+              foundation|network_private_data_plane|observability_foundation|data_platform|ai_services|app_runtime|managed_grafana|edge) ;;
+              public_dns)
+                echo "public_dns is retained shared DNS infrastructure and is not deployed by this workflow." >&2
+                exit 1
+                ;;
+              *)
+                echo "Unsupported Terraform stage: ${TERRAFORM_STAGE}" >&2
+                exit 1
+                ;;
+            esac
+            DEPLOYMENT_SCOPE="stage"
+            EXPECTED_CONFIRMATION="deploy ${TERRAFORM_STAGE} ${TF_WORKSPACE}"
+            DEPLOY_FOUNDATION=false
+            DEPLOY_NETWORK_PRIVATE_DATA_PLANE=false
+            DEPLOY_OBSERVABILITY_FOUNDATION=false
+            DEPLOY_DATA_PLATFORM=false
+            DEPLOY_AI_SERVICES=false
+            DEPLOY_APP_RUNTIME=false
+            DEPLOY_MANAGED_GRAFANA=false
+            DEPLOY_EDGE=false
+            case "${TERRAFORM_STAGE}" in
+              foundation) DEPLOY_FOUNDATION=true ;;
+              network_private_data_plane) DEPLOY_NETWORK_PRIVATE_DATA_PLANE=true ;;
+              observability_foundation) DEPLOY_OBSERVABILITY_FOUNDATION=true ;;
+              data_platform) DEPLOY_DATA_PLATFORM=true ;;
+              ai_services) DEPLOY_AI_SERVICES=true ;;
+              app_runtime) DEPLOY_APP_RUNTIME=true ;;
+              managed_grafana) DEPLOY_MANAGED_GRAFANA=true ;;
+              edge) DEPLOY_EDGE=true ;;
+            esac
           fi
 
-          test "${TF_WORKSPACE}" != "default"
-          test "${CONFIRMATION}" = "plan ${TERRAFORM_STAGE}"
-          echo "terraform_workspace=${TF_WORKSPACE}" >> "${GITHUB_OUTPUT}"
+          test "${CONFIRMATION}" = "${EXPECTED_CONFIRMATION}"
 
-      - name: Checkout
-        uses: actions/checkout@v4
+          {
+            echo "deployment_scope=${DEPLOYMENT_SCOPE}"
+            echo "terraform_workspace=${TF_WORKSPACE}"
+            echo "deploy_foundation=${DEPLOY_FOUNDATION}"
+            echo "deploy_network_private_data_plane=${DEPLOY_NETWORK_PRIVATE_DATA_PLANE}"
+            echo "deploy_observability_foundation=${DEPLOY_OBSERVABILITY_FOUNDATION}"
+            echo "deploy_data_platform=${DEPLOY_DATA_PLATFORM}"
+            echo "deploy_ai_services=${DEPLOY_AI_SERVICES}"
+            echo "deploy_app_runtime=${DEPLOY_APP_RUNTIME}"
+            echo "deploy_managed_grafana=${DEPLOY_MANAGED_GRAFANA}"
+            echo "deploy_edge=${DEPLOY_EDGE}"
+          } >> "${GITHUB_OUTPUT}"
 
-      - name: Azure login
-        uses: azure/login@v2
+          {
+            echo "## Terraform Deployment Scope"
+            echo
+            echo "Workspace: ${TF_WORKSPACE}"
+            echo "Deployment scope: ${DEPLOYMENT_SCOPE}"
+            echo "Environment stage order: ${ENVIRONMENT_STAGE_ORDER}"
+            echo "Excluded shared stages: ${EXCLUDED_SHARED_STAGES}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  plan-foundation:
+    name: Plan foundation
+    needs: select
+    if: ${{ needs.select.outputs.deploy_foundation == 'true' }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.14.7
-
+          terraform_wrapper: false
       - name: Terraform plan
         env:
           ENVIRONMENT: ${{ inputs.environment }}
           AZURE_REGION: ${{ inputs.azure_region }}
           CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
-          TERRAFORM_STAGE: ${{ inputs.terraform_stage }}
-          TF_WORKSPACE: ${{ steps.guardrails.outputs.terraform_workspace }}
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          PLAN_ARTIFACT_DIR: ${{ runner.temp }}/terraform-plans
+          TF_STATE_RESOURCE_GROUP_NAME: ${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}
+          TF_STATE_STORAGE_ACCOUNT_NAME: ${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}
+          TF_STATE_CONTAINER_NAME: ${{ vars.TF_STATE_CONTAINER_NAME }}
         run: |
           set -euo pipefail
-
-          STAGE_DIR="infrastructure/azure/stages/${TERRAFORM_STAGE}"
-          PLAN_FILE="${TERRAFORM_STAGE}-${TF_WORKSPACE}.tfplan"
-
-          test -d "${STAGE_DIR}"
-          cp "${STAGE_DIR}/backend.azurerm.tf.example" "${STAGE_DIR}/backend.generated.tf"
-
-          terraform -chdir="${STAGE_DIR}" init -input=false \
-            -backend-config="resource_group_name=${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}" \
-            -backend-config="storage_account_name=${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}" \
-            -backend-config="container_name=${{ vars.TF_STATE_CONTAINER_NAME }}" \
-            -backend-config="key=${TERRAFORM_STAGE}.tfstate" \
-            -backend-config="use_azuread_auth=true"
-
-          terraform -chdir="${STAGE_DIR}" workspace select "${TF_WORKSPACE}" || terraform -chdir="${STAGE_DIR}" workspace new "${TF_WORKSPACE}"
-          terraform -chdir="${STAGE_DIR}" validate
-          terraform -chdir="${STAGE_DIR}" plan -input=false -out="${PLAN_FILE}" \
-            -var="environment=${ENVIRONMENT}" \
-            -var="azure_region=${AZURE_REGION}" \
-            -var="customer_organization_slug=${CUSTOMER_ORGANIZATION_SLUG}" \
-            -var="terraform_workspace_name=${TF_WORKSPACE}" \
-            -var="resource_instance=core" \
-            -var="tags={environment=\"${ENVIRONMENT}\",region=\"${AZURE_REGION}\",product=\"token-observability\",owner=\"platform\",data_classification=\"internal\",managed_by=\"terraform\"}"
-
-      - name: Upload plan artifact
-        uses: actions/upload-artifact@v4
+          TERRAFORM_STAGE="foundation" bash scripts/terraform-stage-deploy.sh plan
+          printf 'Planned `%s` for workspace `%s`.\n' "foundation" "${TF_WORKSPACE}" >> "${GITHUB_STEP_SUMMARY}"
+      - uses: actions/upload-artifact@v4
         with:
-          name: terraform-plan-${{ inputs.terraform_stage }}-${{ steps.guardrails.outputs.terraform_workspace }}
-          path: infrastructure/azure/stages/${{ inputs.terraform_stage }}/*.tfplan
+          name: terraform-plan-foundation-${{ needs.select.outputs.terraform_workspace }}
+          path: ${{ runner.temp }}/terraform-plans/foundation
           if-no-files-found: error
+          retention-days: 14
+
+  apply-foundation:
+    name: Apply foundation
+    needs: [select, plan-foundation]
+    if: ${{ needs.plan-foundation.result == 'success' }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    environment:
+      name: terraform-apply
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v5
+        with:
+          name: terraform-plan-foundation-${{ needs.select.outputs.terraform_workspace }}
+          path: ${{ runner.temp }}/terraform-plans/foundation
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.7
+          terraform_wrapper: false
+      - name: Terraform apply
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          PLAN_ARTIFACT_DIR: ${{ runner.temp }}/terraform-plans
+          TF_STATE_RESOURCE_GROUP_NAME: ${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}
+          TF_STATE_STORAGE_ACCOUNT_NAME: ${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}
+          TF_STATE_CONTAINER_NAME: ${{ vars.TF_STATE_CONTAINER_NAME }}
+        run: |
+          set -euo pipefail
+          TERRAFORM_STAGE="foundation" bash scripts/terraform-stage-deploy.sh apply
+          printf 'Applied `%s` for workspace `%s`.\n' "foundation" "${TF_WORKSPACE}" >> "${GITHUB_STEP_SUMMARY}"
+
+  plan-network-private-data-plane:
+    name: Plan network_private_data_plane
+    needs: [select, apply-foundation]
+    if: ${{ always() && needs.select.outputs.deploy_network_private_data_plane == 'true' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-foundation.result == 'success') }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.7
+          terraform_wrapper: false
+      - name: Terraform plan
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          PLAN_ARTIFACT_DIR: ${{ runner.temp }}/terraform-plans
+          TF_STATE_RESOURCE_GROUP_NAME: ${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}
+          TF_STATE_STORAGE_ACCOUNT_NAME: ${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}
+          TF_STATE_CONTAINER_NAME: ${{ vars.TF_STATE_CONTAINER_NAME }}
+        run: |
+          set -euo pipefail
+          TERRAFORM_STAGE="network_private_data_plane" bash scripts/terraform-stage-deploy.sh plan
+          printf 'Planned `%s` for workspace `%s`.\n' "network_private_data_plane" "${TF_WORKSPACE}" >> "${GITHUB_STEP_SUMMARY}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-network_private_data_plane-${{ needs.select.outputs.terraform_workspace }}
+          path: ${{ runner.temp }}/terraform-plans/network_private_data_plane
+          if-no-files-found: error
+          retention-days: 14
+
+  apply-network-private-data-plane:
+    name: Apply network_private_data_plane
+    needs: [select, plan-network-private-data-plane]
+    if: ${{ needs.plan-network-private-data-plane.result == 'success' }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    environment:
+      name: terraform-apply
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v5
+        with:
+          name: terraform-plan-network_private_data_plane-${{ needs.select.outputs.terraform_workspace }}
+          path: ${{ runner.temp }}/terraform-plans/network_private_data_plane
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.7
+          terraform_wrapper: false
+      - name: Terraform apply
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          PLAN_ARTIFACT_DIR: ${{ runner.temp }}/terraform-plans
+          TF_STATE_RESOURCE_GROUP_NAME: ${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}
+          TF_STATE_STORAGE_ACCOUNT_NAME: ${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}
+          TF_STATE_CONTAINER_NAME: ${{ vars.TF_STATE_CONTAINER_NAME }}
+        run: |
+          set -euo pipefail
+          TERRAFORM_STAGE="network_private_data_plane" bash scripts/terraform-stage-deploy.sh apply
+          printf 'Applied `%s` for workspace `%s`.\n' "network_private_data_plane" "${TF_WORKSPACE}" >> "${GITHUB_STEP_SUMMARY}"
+
+  plan-observability-foundation:
+    name: Plan observability_foundation
+    needs: [select, apply-network-private-data-plane]
+    if: ${{ always() && needs.select.outputs.deploy_observability_foundation == 'true' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-network-private-data-plane.result == 'success') }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.7
+          terraform_wrapper: false
+      - name: Terraform plan
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          PLAN_ARTIFACT_DIR: ${{ runner.temp }}/terraform-plans
+          TF_STATE_RESOURCE_GROUP_NAME: ${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}
+          TF_STATE_STORAGE_ACCOUNT_NAME: ${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}
+          TF_STATE_CONTAINER_NAME: ${{ vars.TF_STATE_CONTAINER_NAME }}
+        run: |
+          set -euo pipefail
+          TERRAFORM_STAGE="observability_foundation" bash scripts/terraform-stage-deploy.sh plan
+          printf 'Planned `%s` for workspace `%s`.\n' "observability_foundation" "${TF_WORKSPACE}" >> "${GITHUB_STEP_SUMMARY}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-observability_foundation-${{ needs.select.outputs.terraform_workspace }}
+          path: ${{ runner.temp }}/terraform-plans/observability_foundation
+          if-no-files-found: error
+          retention-days: 14
+
+  apply-observability-foundation:
+    name: Apply observability_foundation
+    needs: [select, plan-observability-foundation]
+    if: ${{ needs.plan-observability-foundation.result == 'success' }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    environment:
+      name: terraform-apply
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v5
+        with:
+          name: terraform-plan-observability_foundation-${{ needs.select.outputs.terraform_workspace }}
+          path: ${{ runner.temp }}/terraform-plans/observability_foundation
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.7
+          terraform_wrapper: false
+      - name: Terraform apply
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          PLAN_ARTIFACT_DIR: ${{ runner.temp }}/terraform-plans
+          TF_STATE_RESOURCE_GROUP_NAME: ${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}
+          TF_STATE_STORAGE_ACCOUNT_NAME: ${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}
+          TF_STATE_CONTAINER_NAME: ${{ vars.TF_STATE_CONTAINER_NAME }}
+        run: |
+          set -euo pipefail
+          TERRAFORM_STAGE="observability_foundation" bash scripts/terraform-stage-deploy.sh apply
+          printf 'Applied `%s` for workspace `%s`.\n' "observability_foundation" "${TF_WORKSPACE}" >> "${GITHUB_STEP_SUMMARY}"
+
+  plan-data-platform:
+    name: Plan data_platform
+    needs: [select, apply-observability-foundation]
+    if: ${{ always() && needs.select.outputs.deploy_data_platform == 'true' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-observability-foundation.result == 'success') }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.7
+          terraform_wrapper: false
+      - name: Terraform plan
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          PLAN_ARTIFACT_DIR: ${{ runner.temp }}/terraform-plans
+          TF_STATE_RESOURCE_GROUP_NAME: ${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}
+          TF_STATE_STORAGE_ACCOUNT_NAME: ${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}
+          TF_STATE_CONTAINER_NAME: ${{ vars.TF_STATE_CONTAINER_NAME }}
+        run: |
+          set -euo pipefail
+          TERRAFORM_STAGE="data_platform" bash scripts/terraform-stage-deploy.sh plan
+          printf 'Planned `%s` for workspace `%s`.\n' "data_platform" "${TF_WORKSPACE}" >> "${GITHUB_STEP_SUMMARY}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-data_platform-${{ needs.select.outputs.terraform_workspace }}
+          path: ${{ runner.temp }}/terraform-plans/data_platform
+          if-no-files-found: error
+          retention-days: 14
+
+  apply-data-platform:
+    name: Apply data_platform
+    needs: [select, plan-data-platform]
+    if: ${{ needs.plan-data-platform.result == 'success' }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    environment:
+      name: terraform-apply
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v5
+        with:
+          name: terraform-plan-data_platform-${{ needs.select.outputs.terraform_workspace }}
+          path: ${{ runner.temp }}/terraform-plans/data_platform
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.7
+          terraform_wrapper: false
+      - name: Terraform apply
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          PLAN_ARTIFACT_DIR: ${{ runner.temp }}/terraform-plans
+          TF_STATE_RESOURCE_GROUP_NAME: ${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}
+          TF_STATE_STORAGE_ACCOUNT_NAME: ${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}
+          TF_STATE_CONTAINER_NAME: ${{ vars.TF_STATE_CONTAINER_NAME }}
+        run: |
+          set -euo pipefail
+          TERRAFORM_STAGE="data_platform" bash scripts/terraform-stage-deploy.sh apply
+          printf 'Applied `%s` for workspace `%s`.\n' "data_platform" "${TF_WORKSPACE}" >> "${GITHUB_STEP_SUMMARY}"
+
+  plan-ai-services:
+    name: Plan ai_services
+    needs: [select, apply-data-platform]
+    if: ${{ always() && needs.select.outputs.deploy_ai_services == 'true' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-data-platform.result == 'success') }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.7
+          terraform_wrapper: false
+      - name: Terraform plan
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          PLAN_ARTIFACT_DIR: ${{ runner.temp }}/terraform-plans
+          TF_STATE_RESOURCE_GROUP_NAME: ${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}
+          TF_STATE_STORAGE_ACCOUNT_NAME: ${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}
+          TF_STATE_CONTAINER_NAME: ${{ vars.TF_STATE_CONTAINER_NAME }}
+        run: |
+          set -euo pipefail
+          TERRAFORM_STAGE="ai_services" bash scripts/terraform-stage-deploy.sh plan
+          printf 'Planned `%s` for workspace `%s`.\n' "ai_services" "${TF_WORKSPACE}" >> "${GITHUB_STEP_SUMMARY}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-ai_services-${{ needs.select.outputs.terraform_workspace }}
+          path: ${{ runner.temp }}/terraform-plans/ai_services
+          if-no-files-found: error
+          retention-days: 14
+
+  apply-ai-services:
+    name: Apply ai_services
+    needs: [select, plan-ai-services]
+    if: ${{ needs.plan-ai-services.result == 'success' }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    environment:
+      name: terraform-apply
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v5
+        with:
+          name: terraform-plan-ai_services-${{ needs.select.outputs.terraform_workspace }}
+          path: ${{ runner.temp }}/terraform-plans/ai_services
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.7
+          terraform_wrapper: false
+      - name: Terraform apply
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          PLAN_ARTIFACT_DIR: ${{ runner.temp }}/terraform-plans
+          TF_STATE_RESOURCE_GROUP_NAME: ${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}
+          TF_STATE_STORAGE_ACCOUNT_NAME: ${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}
+          TF_STATE_CONTAINER_NAME: ${{ vars.TF_STATE_CONTAINER_NAME }}
+        run: |
+          set -euo pipefail
+          TERRAFORM_STAGE="ai_services" bash scripts/terraform-stage-deploy.sh apply
+          printf 'Applied `%s` for workspace `%s`.\n' "ai_services" "${TF_WORKSPACE}" >> "${GITHUB_STEP_SUMMARY}"
+
+  plan-app-runtime:
+    name: Plan app_runtime
+    needs: [select, apply-ai-services]
+    if: ${{ always() && needs.select.outputs.deploy_app_runtime == 'true' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-ai-services.result == 'success') }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.7
+          terraform_wrapper: false
+      - name: Terraform plan
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          PLAN_ARTIFACT_DIR: ${{ runner.temp }}/terraform-plans
+          TF_STATE_RESOURCE_GROUP_NAME: ${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}
+          TF_STATE_STORAGE_ACCOUNT_NAME: ${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}
+          TF_STATE_CONTAINER_NAME: ${{ vars.TF_STATE_CONTAINER_NAME }}
+        run: |
+          set -euo pipefail
+          TERRAFORM_STAGE="app_runtime" bash scripts/terraform-stage-deploy.sh plan
+          printf 'Planned `%s` for workspace `%s`.\n' "app_runtime" "${TF_WORKSPACE}" >> "${GITHUB_STEP_SUMMARY}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-app_runtime-${{ needs.select.outputs.terraform_workspace }}
+          path: ${{ runner.temp }}/terraform-plans/app_runtime
+          if-no-files-found: error
+          retention-days: 14
+
+  apply-app-runtime:
+    name: Apply app_runtime
+    needs: [select, plan-app-runtime]
+    if: ${{ needs.plan-app-runtime.result == 'success' }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    environment:
+      name: terraform-apply
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v5
+        with:
+          name: terraform-plan-app_runtime-${{ needs.select.outputs.terraform_workspace }}
+          path: ${{ runner.temp }}/terraform-plans/app_runtime
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.7
+          terraform_wrapper: false
+      - name: Terraform apply
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          PLAN_ARTIFACT_DIR: ${{ runner.temp }}/terraform-plans
+          TF_STATE_RESOURCE_GROUP_NAME: ${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}
+          TF_STATE_STORAGE_ACCOUNT_NAME: ${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}
+          TF_STATE_CONTAINER_NAME: ${{ vars.TF_STATE_CONTAINER_NAME }}
+        run: |
+          set -euo pipefail
+          TERRAFORM_STAGE="app_runtime" bash scripts/terraform-stage-deploy.sh apply
+          printf 'Applied `%s` for workspace `%s`.\n' "app_runtime" "${TF_WORKSPACE}" >> "${GITHUB_STEP_SUMMARY}"
+
+  plan-managed-grafana:
+    name: Plan managed_grafana
+    needs: [select, apply-app-runtime]
+    if: ${{ always() && needs.select.outputs.deploy_managed_grafana == 'true' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-app-runtime.result == 'success') }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.7
+          terraform_wrapper: false
+      - name: Terraform plan
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          PLAN_ARTIFACT_DIR: ${{ runner.temp }}/terraform-plans
+          TF_STATE_RESOURCE_GROUP_NAME: ${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}
+          TF_STATE_STORAGE_ACCOUNT_NAME: ${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}
+          TF_STATE_CONTAINER_NAME: ${{ vars.TF_STATE_CONTAINER_NAME }}
+        run: |
+          set -euo pipefail
+          TERRAFORM_STAGE="managed_grafana" bash scripts/terraform-stage-deploy.sh plan
+          printf 'Planned `%s` for workspace `%s`.\n' "managed_grafana" "${TF_WORKSPACE}" >> "${GITHUB_STEP_SUMMARY}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-managed_grafana-${{ needs.select.outputs.terraform_workspace }}
+          path: ${{ runner.temp }}/terraform-plans/managed_grafana
+          if-no-files-found: error
+          retention-days: 14
+
+  apply-managed-grafana:
+    name: Apply managed_grafana
+    needs: [select, plan-managed-grafana]
+    if: ${{ needs.plan-managed-grafana.result == 'success' }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    environment:
+      name: terraform-apply
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v5
+        with:
+          name: terraform-plan-managed_grafana-${{ needs.select.outputs.terraform_workspace }}
+          path: ${{ runner.temp }}/terraform-plans/managed_grafana
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.7
+          terraform_wrapper: false
+      - name: Terraform apply
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          PLAN_ARTIFACT_DIR: ${{ runner.temp }}/terraform-plans
+          TF_STATE_RESOURCE_GROUP_NAME: ${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}
+          TF_STATE_STORAGE_ACCOUNT_NAME: ${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}
+          TF_STATE_CONTAINER_NAME: ${{ vars.TF_STATE_CONTAINER_NAME }}
+        run: |
+          set -euo pipefail
+          TERRAFORM_STAGE="managed_grafana" bash scripts/terraform-stage-deploy.sh apply
+          printf 'Applied `%s` for workspace `%s`.\n' "managed_grafana" "${TF_WORKSPACE}" >> "${GITHUB_STEP_SUMMARY}"
+
+  plan-edge:
+    name: Plan edge
+    needs: [select, apply-managed-grafana]
+    if: ${{ always() && needs.select.outputs.deploy_edge == 'true' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-managed-grafana.result == 'success') }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.7
+          terraform_wrapper: false
+      - name: Terraform plan
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          PLAN_ARTIFACT_DIR: ${{ runner.temp }}/terraform-plans
+          TF_STATE_RESOURCE_GROUP_NAME: ${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}
+          TF_STATE_STORAGE_ACCOUNT_NAME: ${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}
+          TF_STATE_CONTAINER_NAME: ${{ vars.TF_STATE_CONTAINER_NAME }}
+        run: |
+          set -euo pipefail
+          TERRAFORM_STAGE="edge" bash scripts/terraform-stage-deploy.sh plan
+          printf 'Planned `%s` for workspace `%s`.\n' "edge" "${TF_WORKSPACE}" >> "${GITHUB_STEP_SUMMARY}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-edge-${{ needs.select.outputs.terraform_workspace }}
+          path: ${{ runner.temp }}/terraform-plans/edge
+          if-no-files-found: error
+          retention-days: 14
+
+  apply-edge:
+    name: Apply edge
+    needs: [select, plan-edge]
+    if: ${{ needs.plan-edge.result == 'success' }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    environment:
+      name: terraform-apply
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v5
+        with:
+          name: terraform-plan-edge-${{ needs.select.outputs.terraform_workspace }}
+          path: ${{ runner.temp }}/terraform-plans/edge
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.7
+          terraform_wrapper: false
+      - name: Terraform apply
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          PLAN_ARTIFACT_DIR: ${{ runner.temp }}/terraform-plans
+          TF_STATE_RESOURCE_GROUP_NAME: ${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}
+          TF_STATE_STORAGE_ACCOUNT_NAME: ${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}
+          TF_STATE_CONTAINER_NAME: ${{ vars.TF_STATE_CONTAINER_NAME }}
+        run: |
+          set -euo pipefail
+          TERRAFORM_STAGE="edge" bash scripts/terraform-stage-deploy.sh apply
+          printf 'Applied `%s` for workspace `%s`.\n' "edge" "${TF_WORKSPACE}" >> "${GITHUB_STEP_SUMMARY}"

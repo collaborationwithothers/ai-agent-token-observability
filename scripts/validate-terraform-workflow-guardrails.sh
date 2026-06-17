@@ -308,7 +308,7 @@ def dispatch_input_names(content: str) -> set[str]:
 
 def is_terraform_plan_workflow(path: pathlib.Path, content: str) -> bool:
     return path.name == "terraform-plan.yml" or re.search(
-        r"(?m)^name:\s*(?:Safe\s+)?Terraform Plan(?:\s+Fixture)?\s*$",
+        r"(?m)^name:\s*(?:(?:Safe|Unsafe)\s+)?Terraform (?:Plan|Deploy)(?:\s+Fixture)?\s*$",
         content,
     ) is not None
 
@@ -322,8 +322,37 @@ def terraform_plan_required_errors(content: str) -> list[str]:
         errors.append("Terraform plan workflow must not validate a user-entered Terraform workspace")
     if "inputs.terraform_workspace" in content:
         errors.append("Terraform plan workflow must not read inputs.terraform_workspace")
-    if re.search(r"terraform_workspace.*GITHUB_OUTPUT|GITHUB_OUTPUT.*terraform_workspace", content, re.IGNORECASE) is None:
+    if re.search(r"terraform_workspace\s*=\s*.*TF_WORKSPACE|terraform_workspace.*GITHUB_OUTPUT|GITHUB_OUTPUT.*terraform_workspace", content, re.IGNORECASE) is None:
         errors.append("Terraform plan workflow must publish the derived workspace as a step output")
+    required_patterns = {
+        "environment-scoped stage order": r"ENVIRONMENT_STAGE_ORDER=.*foundation.*network_private_data_plane.*observability_foundation.*data_platform.*ai_services.*app_runtime.*managed_grafana.*edge",
+        "public DNS exclusion": r"public_dns.*retained shared DNS infrastructure|retained public_dns stage is excluded|EXCLUDED_SHARED_STAGES=.*public_dns",
+        "derived deployment scope": r"deployment_scope.*GITHUB_OUTPUT|GITHUB_OUTPUT.*deployment_scope|deployment_scope\s*=\s*.*DEPLOYMENT_SCOPE",
+        "derived stage selection": r"deploy_foundation.*GITHUB_OUTPUT|GITHUB_OUTPUT.*deploy_foundation|deploy_foundation\s*=\s*.*DEPLOY_FOUNDATION",
+        "stage plan script": r"terraform-stage-deploy\.sh\s+plan",
+        "plan artifact upload": r"actions/upload-artifact",
+        "same-run plan dependency": r"needs\s*:\s*\[\s*select\s*,\s*plan|needs\s*:\s*plan-",
+        "approved apply artifact download": r"actions/download-artifact",
+        "terraform apply approval environment": r"(?m)^\s*name\s*:\s*terraform-apply\s*$",
+        "saved plan apply": r"terraform-stage-deploy\.sh\s+apply",
+    }
+    for name, pattern in required_patterns.items():
+        if re.search(pattern, content, re.IGNORECASE | re.MULTILINE | re.DOTALL) is None:
+            errors.append(f"missing {name}")
+    if re.search(r"terraform\s+-chdir=.*apply\s+-input=false(?:\s|$)(?!.*PLAN_FILE)", content, re.IGNORECASE):
+        errors.append("Terraform apply must use an approved saved plan file")
+    forbidden_download_inputs = {
+        "run-id": r"(?m)^\s*run-id\s*:",
+        "repository": r"(?m)^\s*repository\s*:",
+        "github-token": r"(?m)^\s*github-token\s*:",
+    }
+    for name, pattern in forbidden_download_inputs.items():
+        if re.search(pattern, content, re.IGNORECASE | re.MULTILINE):
+            errors.append(f"Terraform deploy workflow must not set download-artifact {name}")
+    if re.search(r"(?m)^\s*-\s*public_dns\s*$", content):
+        errors.append("Terraform deploy workflow must not expose public_dns as a normal stage option")
+    if re.search(r"TARGET_STAGES=.*public_dns", content):
+        errors.append("Terraform deploy workflow must not include public_dns in normal target stages")
     return errors
 
 

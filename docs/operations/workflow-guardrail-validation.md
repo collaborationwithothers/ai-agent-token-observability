@@ -34,6 +34,8 @@ The validator fails deployment-capable workflows that:
 - Lack a job-level `if` gate for `github.event_name`, `github.repository`, `github.actor`, and `github.ref`.
 - Lack least-privilege `contents: read` and `id-token: write` permissions.
 - Lack repository, actor, branch, environment, region, customer slug, workspace derivation, and protected-environment gates.
+- Normal Terraform deploy workflows do not derive selected stages, upload saved plan artifacts, download same-run artifacts for apply, gate apply through the `terraform-apply` GitHub environment, or apply only saved plan files.
+- Normal Terraform deploy workflows expose or include the retained `public_dns` stage instead of leaving shared DNS to its separate lifecycle.
 - Deletion workflows do not gate apply through the `terraform-deletion-approval` GitHub environment.
 - Run Azure login or Terraform before the guardrail validation step.
 - Use forbidden destructive patterns such as `terraform apply -auto-approve`, `terraform destroy -auto-approve`, direct `terraform destroy`, resource group deletion, or tag-based resource deletion.
