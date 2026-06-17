@@ -6,7 +6,15 @@ This document defines the Terraform structure for the Azure Production MVP and t
 
 It turns the agreed Terraform principles into implementation-ready stage boundaries, remote state rules, workspace naming, module conventions, and public-repository workflow guardrails.
 
-This repository currently has no Terraform stage tree or deployment workflow tree. This document is therefore a greenfield contract for future infrastructure issues.
+The repository now contains the Terraform stage tree and the first deployment-adjacent workflow set. Current workflow coverage is split as follows:
+
+- `.github/workflows/terraform-plan.yml` creates guarded Terraform plan artifacts.
+- `.github/workflows/terraform-destroy-plan.yml` creates guarded destroy plans and applies reviewed destroy plan artifacts for disposable stages.
+- `.github/workflows/edge-origin-validation.yml` validates Front Door hostnames and direct Azure Container Apps origin isolation.
+- A guarded Terraform apply workflow for normal non-destroy infrastructure changes is still missing.
+- Runtime container image build definitions and the guarded GHCR publish workflow are still missing.
+
+Image build and publish is a separate production path from Terraform plan and apply. Terraform stages consume reviewed image references or digests; they do not build or publish container images.
 
 ## Source Documents
 
@@ -29,6 +37,8 @@ This repository currently has no Terraform stage tree or deployment workflow tre
 - AzAPI is used only for Azure provider gaps that AzureRM cannot model.
 - Deployment-capable workflows are manual only.
 - Production applies are guarded and must not use `terraform apply -auto-approve`.
+- Normal Terraform apply must apply an exact reviewed saved plan artifact, not a fresh unreviewed plan.
+- Runtime image publish workflows are manual, guarded, and package-scoped; they are separate from Azure-changing Terraform workflows.
 - No Customer Managed Keys are offered.
 - Platform-managed encryption is the only encryption mode.
 
@@ -340,6 +350,10 @@ Deployment-capable GitHub Actions must be designed for a public repository.
 
 Infrastructure deletion is defined separately in [../operations/infrastructure-deletion.md](../operations/infrastructure-deletion.md). Deletion must use guarded Terraform destroy plans by stage and workspace, not tag-based Azure deletion.
 
+The existing Terraform plan workflow is not a deployment apply workflow. It produces plan artifacts for review. The future normal apply workflow must download the reviewed plan artifact by run ID, verify stage and workspace, and apply that saved plan file.
+
+Runtime image publishing is also separate from Terraform plan. A future image publish workflow must build the Product Dashboard, Product API, Product Ingestion Endpoint, and shared Product Jobs images, publish them to GHCR with immutable commit SHA tags, and emit image digests for later Terraform inputs.
+
 Allowed trigger:
 
 ```yaml
@@ -438,12 +452,15 @@ terraform workspace show
 terraform apply "$PLAN_FILE"
 ```
 
+The remote apply flow is a contract for the missing guarded apply workflow. The currently committed normal Terraform workflow stops at a saved plan artifact.
+
 Rules:
 
 - Always run `terraform validate` before `terraform plan`.
 - Never plan or apply from the default workspace.
 - Never apply without displaying the selected workspace.
 - Never apply without an approved plan artifact for `pp` or `pd`.
+- Never apply a newly generated plan in the apply job when a reviewed saved plan artifact is required.
 - Do not use `terraform apply -auto-approve` in guarded production workflows.
 
 The currently installed local Terraform binary in this workspace is `v1.3.5`, which is older than the current Terraform version reported by the CLI. Implementation issues should decide the pinned Terraform version before creating workflow jobs.
@@ -474,6 +491,7 @@ Terraform implementation issues must verify:
 - Managed Grafana provider authentication uses Entra OIDC by default, with service account token fallback disabled unless a non-production proof records provider incompatibility.
 - Terraform state does not output or store application secrets.
 - Production workflows are manual, guarded, and OIDC based.
+- Runtime image build and publish workflows are manual, guarded, and separate from Terraform plan and apply.
 - Public-repository workflow guardrail tests fail unsafe examples.
 
 ## Verified Platform Facts
@@ -484,6 +502,10 @@ Terraform implementation issues must verify:
 - Microsoft describes Azure Verified Modules as reusable Infrastructure as Code modules for Azure, available for Bicep and Terraform, developed and maintained for consistency and best-practice alignment: https://learn.microsoft.com/en-us/community/content/azure-verified-modules
 - GitHub Actions OIDC lets workflows request short-lived cloud access tokens instead of storing long-lived cloud credentials in GitHub secrets: https://docs.github.com/en/actions/concepts/security/openid-connect
 - GitHub recommends least-privilege workflow credentials and limiting `GITHUB_TOKEN` permissions to the minimum required: https://docs.github.com/en/actions/reference/security/secure-use
+- GitHub documents Docker image publishing workflows that build from Dockerfiles, grant `packages: write`, publish to GHCR, and expose image digests for attestations or downstream evidence: https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images
+- GitHub recommends adding `org.opencontainers.image.source` metadata when publishing container images so repository-linked `GITHUB_TOKEN` permissions work with GHCR: https://docs.github.com/packages/working-with-a-github-packages-registry/working-with-the-container-registry
+- Terraform `plan -out=FILE` saves a generated plan that can later be passed to `terraform apply` in automation: https://developer.hashicorp.com/terraform/cli/commands/plan
+- Terraform saved plan mode applies the operations in the saved plan file when that file is passed to `terraform apply`: https://developer.hashicorp.com/terraform/cli/commands/apply
 - Azure Container Apps is the Azure service for running containerized applications without managing orchestration infrastructure: https://learn.microsoft.com/en-us/azure/container-apps/
 - Azure Front Door has Terraform quickstart support for Front Door Standard and Premium profiles: https://learn.microsoft.com/en-us/azure/frontdoor/create-front-door-terraform
 - Azure Front Door Premium supports Private Link to origins: https://learn.microsoft.com/en-us/azure/frontdoor/private-link
