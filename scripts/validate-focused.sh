@@ -40,6 +40,7 @@ run_docs_checks() {
   check_comments_not_staged
   git diff --check
   bash -n scripts/issue-start.sh
+  bash -n scripts/validate-edge-origin-workflow.sh
   bash -n scripts/validate-focused.sh
   bash -n scripts/validate-pr.sh
   if [[ -f .agents/skills/review-worktree-issue-pr/SKILL.md ]]; then
@@ -77,6 +78,7 @@ case "$profile" in
   terraform)
     check_comments_not_staged
     scripts/validate-terraform-workflow-guardrails.sh
+    scripts/validate-edge-origin-workflow.sh
     git diff --check
     ;;
   docs)
