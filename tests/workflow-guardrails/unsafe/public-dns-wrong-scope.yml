@@ -1,0 +1,88 @@
+name: Unsafe Terraform Public DNS Fixture
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        required: true
+        type: choice
+        options:
+          - plan_apply
+          - verify_delegation
+      environment:
+        required: true
+        type: choice
+        options:
+          - pd
+          - dv
+      azure_region:
+        required: true
+        type: choice
+        options:
+          - eastus2
+          - westeurope
+      customer_organization_slug:
+        required: true
+        type: string
+      confirmation:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  public-dns:
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        github.repository == 'collaborationwithothers/ai-agent-token-observability' &&
+        github.actor == 'haripraghash' &&
+        github.ref == 'refs/heads/main'
+      }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    environment:
+      name: terraform-public-dns-apply
+    steps:
+      - name: Validate guardrails before privileged steps
+        env:
+          REQUIRED_REPOSITORY: collaborationwithothers/ai-agent-token-observability
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+        run: |
+          set -euo pipefail
+          RETAINED_TERRAFORM_STAGE="public_dns"
+          RETAINED_WORKSPACE="pd_eastus2_internal"
+          NORMAL_DEPLOY_ENVIRONMENTS="dv|qa|pp|pd"
+          NORMAL_DEPLOY_REGIONS="eastus|eastus2|westeurope"
+          test "${GITHUB_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
+          test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
+          test "${GITHUB_ACTOR}" = "haripraghash"
+          test "${GITHUB_REF}" = "refs/heads/main"
+          case "${GITHUB_REF_NAME}:${ENVIRONMENT}" in main:dv|main:pd) ;; *) exit 1 ;; esac
+          case "${ENVIRONMENT}" in dv|pd) ;; *) exit 1 ;; esac
+          case "${AZURE_REGION}" in eastus2|westeurope) ;; *) exit 1 ;; esac
+          case "${CUSTOMER_ORGANIZATION_SLUG}" in internal) ;; *) exit 1 ;; esac
+          TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
+          test "${TF_WORKSPACE}" != "default"
+          EXPECTED_CONFIRMATION="apply ${RETAINED_TERRAFORM_STAGE} ${TF_WORKSPACE}"
+          EXPECTED_VERIFY_CONFIRMATION="verify ${RETAINED_TERRAFORM_STAGE} ${TF_WORKSPACE}"
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Unsafe public DNS operation
+        run: |
+          TERRAFORM_STAGE="public_dns"
+          STAGE_DIR="infrastructure/azure/stages/${TERRAFORM_STAGE}"
+          PLAN_FILE="${RUNNER_TEMP}/public_dns.tfplan"
+          terraform -chdir="${STAGE_DIR}" plan -input=false -out="${PLAN_FILE}"
+          terraform -chdir="${STAGE_DIR}" apply -input=false "${PLAN_FILE}"
+          terraform -chdir="${STAGE_DIR}" output -json cloudflare_delegation_ns_records
+          terraform -chdir="${STAGE_DIR}" output -json product_dns_zone_name_servers
+          dig +short NS tokenobs.consultwithcloud.com

@@ -410,7 +410,8 @@ Rules:
 - Apply must use the exact plan artifact from the guarded plan job for the same stage and same run.
 - `terraform apply -auto-approve` is forbidden in production workflows.
 - When no `terraform_stage` is supplied, normal deploy targets environment-scoped stages one by one in dependency order: `foundation`, `network_private_data_plane`, `observability_foundation`, `data_platform`, `ai_services`, `app_runtime`, `managed_grafana`, and `edge`. Each stage's apply must complete before the next dependent stage is planned.
-- `public_dns` must be planned and applied separately as retained shared infrastructure before `edge` depends on its delegated Azure DNS zone output.
+- `public_dns` must be planned and applied separately through `.github/workflows/terraform-public-dns.yml` as retained shared infrastructure before `edge` depends on its delegated Azure DNS zone output.
+- The retained public DNS workflow must use the single owner workspace `pd_eastus2_internal`, require the protected `terraform-public-dns-apply` environment before applying the saved plan artifact, emit the manual Cloudflare NS records from `cloudflare_delegation_ns_records`, and provide a `verify_delegation` operation that compares public NS records with `product_dns_zone_name_servers`.
 
 Guardrail validator:
 
@@ -419,6 +420,7 @@ Guardrail validator:
 - The validator must fail if an Azure-changing workflow lacks repository, actor, environment, region, workspace, branch, OIDC, permissions, and confirmation checks.
 - The validator must fail if `terraform apply -auto-approve` appears in deployment-capable workflows.
 - The validator must fail if the normal Terraform deploy workflow can apply without the `terraform-apply` environment, without downloading the saved plan artifact, or with `public_dns` in normal target stages.
+- The validator must fail if the retained public DNS workflow can target non-`pd_eastus2_internal` scope, manage Cloudflare API/provider state, handle certificate material, omit public NS verification, or plan a public DNS destroy.
 - The validator must have tests with unsafe workflow fixtures.
 
 Recommended validator path:

@@ -1,0 +1,387 @@
+name: Terraform Public DNS
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Retained public DNS operation.
+        required: true
+        type: choice
+        options:
+          - plan_apply
+          - verify_delegation
+      environment:
+        description: Retained public DNS environment. Only pd owns public DNS.
+        required: true
+        type: choice
+        options:
+          - pd
+      azure_region:
+        description: Retained public DNS Azure region. Only eastus2 owns public DNS.
+        required: true
+        type: choice
+        options:
+          - eastus2
+      customer_organization_slug:
+        description: Retained public DNS customer organization slug. Use internal.
+        required: true
+        type: string
+      confirmation:
+        description: Type apply public_dns WORKSPACE or verify public_dns WORKSPACE.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  select:
+    name: Select retained public DNS operation
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        github.repository == 'collaborationwithothers/ai-agent-token-observability' &&
+        github.actor == 'haripraghash' &&
+        github.ref == 'refs/heads/main'
+      }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    outputs:
+      operation: ${{ steps.guardrails.outputs.operation }}
+      terraform_workspace: ${{ steps.guardrails.outputs.terraform_workspace }}
+      run_plan_apply: ${{ steps.guardrails.outputs.run_plan_apply }}
+      run_verify_delegation: ${{ steps.guardrails.outputs.run_verify_delegation }}
+    steps:
+      - name: Validate guardrails before privileged steps
+        id: guardrails
+        env:
+          REQUIRED_REPOSITORY: collaborationwithothers/ai-agent-token-observability
+          OPERATION_INPUT: ${{ inputs.operation }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+
+          RETAINED_TERRAFORM_STAGE="public_dns"
+          RETAINED_WORKSPACE="pd_eastus2_internal"
+          NORMAL_DEPLOY_ENVIRONMENTS="dv|qa|pp|pd"
+          NORMAL_DEPLOY_REGIONS="eastus|eastus2|westeurope"
+
+          test "${GITHUB_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
+          test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
+          test "${GITHUB_ACTOR}" = "haripraghash"
+          test "${GITHUB_REF}" = "refs/heads/main"
+          case "${GITHUB_REF_NAME}:${ENVIRONMENT}" in main:pd) ;; *) exit 1 ;; esac
+          case "${ENVIRONMENT}" in pd) ;; *) exit 1 ;; esac
+          case "${AZURE_REGION}" in eastus2) ;; *) exit 1 ;; esac
+          case "${CUSTOMER_ORGANIZATION_SLUG}" in internal) ;; *) exit 1 ;; esac
+
+          TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
+          test "${TF_WORKSPACE}" = "${RETAINED_WORKSPACE}"
+          test "${TF_WORKSPACE}" != "default"
+
+          OPERATION="$(printf '%s' "${OPERATION_INPUT}" | tr -d '[:space:]')"
+          RUN_PLAN_APPLY=false
+          RUN_VERIFY_DELEGATION=false
+          case "${OPERATION}" in
+            plan_apply)
+              EXPECTED_CONFIRMATION="apply ${RETAINED_TERRAFORM_STAGE} ${TF_WORKSPACE}"
+              RUN_PLAN_APPLY=true
+              ;;
+            verify_delegation)
+              EXPECTED_CONFIRMATION="verify ${RETAINED_TERRAFORM_STAGE} ${TF_WORKSPACE}"
+              RUN_VERIFY_DELEGATION=true
+              ;;
+            *)
+              echo "Unsupported retained public DNS operation: ${OPERATION}" >&2
+              exit 1
+              ;;
+          esac
+
+          test "${CONFIRMATION}" = "${EXPECTED_CONFIRMATION}"
+
+          {
+            echo "operation=${OPERATION}"
+            echo "terraform_workspace=${TF_WORKSPACE}"
+            echo "run_plan_apply=${RUN_PLAN_APPLY}"
+            echo "run_verify_delegation=${RUN_VERIFY_DELEGATION}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Retained Public DNS"
+            echo
+            echo "Stage: ${RETAINED_TERRAFORM_STAGE}"
+            echo "Workspace: ${TF_WORKSPACE}"
+            echo "Operation: ${OPERATION}"
+            echo "Cloudflare delegation remains a manual parent-zone step outside Terraform."
+            echo "Normal deploy environments for the shared validator: ${NORMAL_DEPLOY_ENVIRONMENTS}"
+            echo "Normal deploy regions for the shared validator: ${NORMAL_DEPLOY_REGIONS}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  plan-public-dns:
+    name: Plan public_dns
+    needs: select
+    if: ${{ needs.select.outputs.run_plan_apply == 'true' }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.7
+          terraform_wrapper: false
+      - name: Terraform retained public DNS plan
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          PLAN_ARTIFACT_DIR: ${{ runner.temp }}/terraform-public-dns-plans
+          TF_STATE_RESOURCE_GROUP_NAME: ${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}
+          TF_STATE_STORAGE_ACCOUNT_NAME: ${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}
+          TF_STATE_CONTAINER_NAME: ${{ vars.TF_STATE_CONTAINER_NAME }}
+        run: |
+          set -euo pipefail
+
+          TERRAFORM_STAGE="public_dns"
+          STAGE_DIR="infrastructure/azure/stages/${TERRAFORM_STAGE}"
+          PLAN_STAGE_DIR="${PLAN_ARTIFACT_DIR}/${TERRAFORM_STAGE}"
+          PLAN_FILE="${PLAN_STAGE_DIR}/${TERRAFORM_STAGE}-${TF_WORKSPACE}.tfplan"
+          PLAN_TEXT="${PLAN_STAGE_DIR}/${TERRAFORM_STAGE}-${TF_WORKSPACE}.txt"
+
+          test "${TF_WORKSPACE}" = "pd_eastus2_internal"
+          mkdir -p "${PLAN_STAGE_DIR}"
+          cp "${STAGE_DIR}/backend.azurerm.tf.example" "${STAGE_DIR}/backend.generated.tf"
+
+          terraform -chdir="${STAGE_DIR}" init -input=false \
+            -backend-config="resource_group_name=${TF_STATE_RESOURCE_GROUP_NAME}" \
+            -backend-config="storage_account_name=${TF_STATE_STORAGE_ACCOUNT_NAME}" \
+            -backend-config="container_name=${TF_STATE_CONTAINER_NAME}" \
+            -backend-config="key=${TERRAFORM_STAGE}.tfstate" \
+            -backend-config="use_azuread_auth=true"
+
+          terraform -chdir="${STAGE_DIR}" workspace select "${TF_WORKSPACE}" || terraform -chdir="${STAGE_DIR}" workspace new "${TF_WORKSPACE}"
+          SELECTED_WORKSPACE="$(terraform -chdir="${STAGE_DIR}" workspace show)"
+          test "${SELECTED_WORKSPACE}" = "${TF_WORKSPACE}"
+          test "${SELECTED_WORKSPACE}" != "default"
+
+          terraform -chdir="${STAGE_DIR}" validate
+          terraform -chdir="${STAGE_DIR}" plan -input=false -out="${PLAN_FILE}" \
+            -var="environment=${ENVIRONMENT}" \
+            -var="azure_region=${AZURE_REGION}" \
+            -var="customer_organization_slug=${CUSTOMER_ORGANIZATION_SLUG}" \
+            -var="terraform_workspace_name=${TF_WORKSPACE}" \
+            -var="resource_instance=core" \
+            -var="tags={environment=\"${ENVIRONMENT}\",region=\"${AZURE_REGION}\",product=\"token-observability\",owner=\"platform\",data_classification=\"internal\",managed_by=\"terraform\"}"
+          terraform -chdir="${STAGE_DIR}" show -no-color "${PLAN_FILE}" > "${PLAN_TEXT}"
+
+          {
+            echo "## Retained Public DNS Plan"
+            echo
+            echo "Workspace: ${TF_WORKSPACE}"
+            echo "Stage: ${TERRAFORM_STAGE}"
+            echo "Plan artifact: ${TERRAFORM_STAGE}/${TERRAFORM_STAGE}-${TF_WORKSPACE}.tfplan"
+            echo "Text preview artifact: ${TERRAFORM_STAGE}/${TERRAFORM_STAGE}-${TF_WORKSPACE}.txt"
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terraform-public-dns-plan-${{ needs.select.outputs.terraform_workspace }}
+          path: ${{ runner.temp }}/terraform-public-dns-plans/public_dns
+          if-no-files-found: error
+          retention-days: 14
+
+  apply-public-dns:
+    name: Apply public_dns
+    needs: [select, plan-public-dns]
+    if: ${{ needs.plan-public-dns.result == 'success' }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    environment:
+      name: terraform-public-dns-apply
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate guardrails before privileged steps
+        env:
+          REQUIRED_REPOSITORY: collaborationwithothers/ai-agent-token-observability
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          OPERATION: ${{ needs.select.outputs.operation }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+
+          test "${GITHUB_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
+          test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
+          test "${GITHUB_ACTOR}" = "haripraghash"
+          test "${GITHUB_REF}" = "refs/heads/main"
+          case "${GITHUB_REF_NAME}:${ENVIRONMENT}" in main:pd) ;; *) exit 1 ;; esac
+          test "${AZURE_REGION}" = "eastus2"
+          test "${CUSTOMER_ORGANIZATION_SLUG}" = "internal"
+          test "${TF_WORKSPACE}" = "pd_eastus2_internal"
+          test "${OPERATION}" = "plan_apply"
+          test "${CONFIRMATION}" = "apply public_dns ${TF_WORKSPACE}"
+      - uses: actions/download-artifact@v5
+        with:
+          name: terraform-public-dns-plan-${{ needs.select.outputs.terraform_workspace }}
+          path: ${{ runner.temp }}/terraform-public-dns-plans/public_dns
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.7
+          terraform_wrapper: false
+      - name: Terraform retained public DNS apply
+        env:
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          TF_STATE_RESOURCE_GROUP_NAME: ${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}
+          TF_STATE_STORAGE_ACCOUNT_NAME: ${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}
+          TF_STATE_CONTAINER_NAME: ${{ vars.TF_STATE_CONTAINER_NAME }}
+          PLAN_ARTIFACT_DIR: ${{ runner.temp }}/terraform-public-dns-plans
+        run: |
+          set -euo pipefail
+
+          TERRAFORM_STAGE="public_dns"
+          STAGE_DIR="infrastructure/azure/stages/${TERRAFORM_STAGE}"
+          PLAN_FILE="${PLAN_ARTIFACT_DIR}/${TERRAFORM_STAGE}/${TERRAFORM_STAGE}-${TF_WORKSPACE}.tfplan"
+
+          test "${TF_WORKSPACE}" = "pd_eastus2_internal"
+          test -f "${PLAN_FILE}"
+          cp "${STAGE_DIR}/backend.azurerm.tf.example" "${STAGE_DIR}/backend.generated.tf"
+
+          terraform -chdir="${STAGE_DIR}" init -input=false \
+            -backend-config="resource_group_name=${TF_STATE_RESOURCE_GROUP_NAME}" \
+            -backend-config="storage_account_name=${TF_STATE_STORAGE_ACCOUNT_NAME}" \
+            -backend-config="container_name=${TF_STATE_CONTAINER_NAME}" \
+            -backend-config="key=${TERRAFORM_STAGE}.tfstate" \
+            -backend-config="use_azuread_auth=true"
+
+          terraform -chdir="${STAGE_DIR}" workspace select "${TF_WORKSPACE}"
+          SELECTED_WORKSPACE="$(terraform -chdir="${STAGE_DIR}" workspace show)"
+          test "${SELECTED_WORKSPACE}" = "${TF_WORKSPACE}"
+          test "${SELECTED_WORKSPACE}" != "default"
+
+          terraform -chdir="${STAGE_DIR}" apply -input=false "${PLAN_FILE}"
+          CLOUDFLARE_NS_RECORDS="$(terraform -chdir="${STAGE_DIR}" output -json cloudflare_delegation_ns_records)"
+
+          {
+            echo "## Manual Cloudflare NS Delegation"
+            echo
+            echo "Create these NS records in the Cloudflare parent zone before edge deployment depends on public DNS:"
+            echo
+            echo "| Zone | Name | Type | Value |"
+            echo "| --- | --- | --- | --- |"
+            jq -r '.[] | "| \(.zone) | \(.name) | \(.type) | \(.value) |"' <<< "${CLOUDFLARE_NS_RECORDS}"
+            echo
+            echo "After the manual Cloudflare step, rerun this workflow with operation verify_delegation."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  verify-delegation:
+    name: Verify public Cloudflare delegation
+    needs: select
+    if: ${{ needs.select.outputs.run_verify_delegation == 'true' }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    environment:
+      name: terraform-public-dns-verification
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate guardrails before privileged steps
+        env:
+          REQUIRED_REPOSITORY: collaborationwithothers/ai-agent-token-observability
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          OPERATION: ${{ needs.select.outputs.operation }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+
+          test "${GITHUB_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
+          test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
+          test "${GITHUB_ACTOR}" = "haripraghash"
+          test "${GITHUB_REF}" = "refs/heads/main"
+          case "${GITHUB_REF_NAME}:${ENVIRONMENT}" in main:pd) ;; *) exit 1 ;; esac
+          test "${AZURE_REGION}" = "eastus2"
+          test "${CUSTOMER_ORGANIZATION_SLUG}" = "internal"
+          test "${TF_WORKSPACE}" = "pd_eastus2_internal"
+          test "${OPERATION}" = "verify_delegation"
+          test "${CONFIRMATION}" = "verify public_dns ${TF_WORKSPACE}"
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.7
+          terraform_wrapper: false
+      - name: Verify delegated Azure DNS name servers resolve publicly
+        env:
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          TF_STATE_RESOURCE_GROUP_NAME: ${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}
+          TF_STATE_STORAGE_ACCOUNT_NAME: ${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}
+          TF_STATE_CONTAINER_NAME: ${{ vars.TF_STATE_CONTAINER_NAME }}
+        run: |
+          set -euo pipefail
+
+          TERRAFORM_STAGE="public_dns"
+          STAGE_DIR="infrastructure/azure/stages/${TERRAFORM_STAGE}"
+          EXPECTED_NS="${RUNNER_TEMP}/expected-public-dns-ns.txt"
+          ACTUAL_NS="${RUNNER_TEMP}/actual-public-dns-ns.txt"
+
+          test "${TF_WORKSPACE}" = "pd_eastus2_internal"
+          command -v dig
+          cp "${STAGE_DIR}/backend.azurerm.tf.example" "${STAGE_DIR}/backend.generated.tf"
+
+          terraform -chdir="${STAGE_DIR}" init -input=false \
+            -backend-config="resource_group_name=${TF_STATE_RESOURCE_GROUP_NAME}" \
+            -backend-config="storage_account_name=${TF_STATE_STORAGE_ACCOUNT_NAME}" \
+            -backend-config="container_name=${TF_STATE_CONTAINER_NAME}" \
+            -backend-config="key=${TERRAFORM_STAGE}.tfstate" \
+            -backend-config="use_azuread_auth=true"
+
+          terraform -chdir="${STAGE_DIR}" workspace select "${TF_WORKSPACE}"
+          SELECTED_WORKSPACE="$(terraform -chdir="${STAGE_DIR}" workspace show)"
+          test "${SELECTED_WORKSPACE}" = "${TF_WORKSPACE}"
+          test "${SELECTED_WORKSPACE}" != "default"
+
+          terraform -chdir="${STAGE_DIR}" output -json product_dns_zone_name_servers \
+            | jq -r '.[] | ascii_downcase | sub("\\.$"; "")' \
+            | sort -u > "${EXPECTED_NS}"
+
+          dig +short NS tokenobs.consultwithcloud.com \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed 's/\.$//' \
+            | sort -u > "${ACTUAL_NS}"
+
+          test -s "${EXPECTED_NS}"
+          test -s "${ACTUAL_NS}"
+          diff -u "${EXPECTED_NS}" "${ACTUAL_NS}"
+
+          {
+            echo "## Public DNS Delegation Verification"
+            echo
+            echo "Verified public NS records for tokenobs.consultwithcloud.com match the retained Azure DNS zone outputs."
+            echo
+            echo "| Name server |"
+            echo "| --- |"
+            sed 's/^/| /; s/$/ |/' "${ACTUAL_NS}"
+          } >> "${GITHUB_STEP_SUMMARY}"

@@ -1,0 +1,163 @@
+name: Safe Terraform Public DNS Fixture
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        required: true
+        type: choice
+        options:
+          - plan_apply
+          - verify_delegation
+      environment:
+        required: true
+        type: choice
+        options:
+          - pd
+      azure_region:
+        required: true
+        type: choice
+        options:
+          - eastus2
+      customer_organization_slug:
+        required: true
+        type: string
+      confirmation:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  select:
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        github.repository == 'collaborationwithothers/ai-agent-token-observability' &&
+        github.actor == 'haripraghash' &&
+        github.ref == 'refs/heads/main'
+      }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    outputs:
+      operation: ${{ steps.guardrails.outputs.operation }}
+      terraform_workspace: ${{ steps.guardrails.outputs.terraform_workspace }}
+      run_plan_apply: ${{ steps.guardrails.outputs.run_plan_apply }}
+      run_verify_delegation: ${{ steps.guardrails.outputs.run_verify_delegation }}
+    steps:
+      - name: Validate guardrails before privileged steps
+        id: guardrails
+        env:
+          REQUIRED_REPOSITORY: collaborationwithothers/ai-agent-token-observability
+          OPERATION_INPUT: ${{ inputs.operation }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          RETAINED_TERRAFORM_STAGE="public_dns"
+          RETAINED_WORKSPACE="pd_eastus2_internal"
+          NORMAL_DEPLOY_ENVIRONMENTS="dv|qa|pp|pd"
+          NORMAL_DEPLOY_REGIONS="eastus|eastus2|westeurope"
+          test "${GITHUB_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
+          test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
+          test "${GITHUB_ACTOR}" = "haripraghash"
+          test "${GITHUB_REF}" = "refs/heads/main"
+          case "${GITHUB_REF_NAME}:${ENVIRONMENT}" in main:pd) ;; *) exit 1 ;; esac
+          case "${ENVIRONMENT}" in pd) ;; *) exit 1 ;; esac
+          case "${AZURE_REGION}" in eastus2) ;; *) exit 1 ;; esac
+          case "${CUSTOMER_ORGANIZATION_SLUG}" in internal) ;; *) exit 1 ;; esac
+          TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
+          test "${TF_WORKSPACE}" = "${RETAINED_WORKSPACE}"
+          test "${TF_WORKSPACE}" != "default"
+          case "${OPERATION_INPUT}" in
+            plan_apply) EXPECTED_CONFIRMATION="apply ${RETAINED_TERRAFORM_STAGE} ${TF_WORKSPACE}" ;;
+            verify_delegation) EXPECTED_CONFIRMATION="verify ${RETAINED_TERRAFORM_STAGE} ${TF_WORKSPACE}" ;;
+            *) exit 1 ;;
+          esac
+          test "${CONFIRMATION}" = "${EXPECTED_CONFIRMATION}"
+          echo "operation=${OPERATION_INPUT}" >> "${GITHUB_OUTPUT}"
+          echo "terraform_workspace=${TF_WORKSPACE}" >> "${GITHUB_OUTPUT}"
+          echo "run_plan_apply=true" >> "${GITHUB_OUTPUT}"
+          echo "run_verify_delegation=true" >> "${GITHUB_OUTPUT}"
+
+  plan-public-dns:
+    needs: select
+    if: ${{ needs.select.outputs.run_plan_apply == 'true' }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Terraform retained public DNS plan
+        run: |
+          TERRAFORM_STAGE="public_dns"
+          STAGE_DIR="infrastructure/azure/stages/${TERRAFORM_STAGE}"
+          PLAN_FILE="${RUNNER_TEMP}/public_dns/pd_eastus2_internal.tfplan"
+          terraform -chdir="${STAGE_DIR}" init -input=false
+          terraform -chdir="${STAGE_DIR}" validate
+          terraform -chdir="${STAGE_DIR}" plan -input=false -out="${PLAN_FILE}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terraform-public-dns-plan-${{ needs.select.outputs.terraform_workspace }}
+          path: ${{ runner.temp }}/public_dns
+
+  apply-public-dns:
+    needs: [select, plan-public-dns]
+    if: ${{ needs.plan-public-dns.result == 'success' }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    environment:
+      name: terraform-public-dns-apply
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate guardrails before privileged steps
+        run: test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
+      - uses: actions/download-artifact@v5
+        with:
+          name: terraform-public-dns-plan-${{ needs.select.outputs.terraform_workspace }}
+          path: ${{ runner.temp }}/public_dns
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Terraform retained public DNS apply
+        run: |
+          STAGE_DIR="infrastructure/azure/stages/public_dns"
+          PLAN_FILE="${RUNNER_TEMP}/public_dns/pd_eastus2_internal.tfplan"
+          terraform -chdir="${STAGE_DIR}" apply -input=false "${PLAN_FILE}"
+          terraform -chdir="${STAGE_DIR}" output -json cloudflare_delegation_ns_records
+
+  verify-delegation:
+    needs: select
+    if: ${{ needs.select.outputs.run_verify_delegation == 'true' }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    environment:
+      name: terraform-public-dns-verification
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate guardrails before privileged steps
+        run: test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Verify delegated Azure DNS name servers resolve publicly
+        run: |
+          STAGE_DIR="infrastructure/azure/stages/public_dns"
+          terraform -chdir="${STAGE_DIR}" output -json product_dns_zone_name_servers
+          dig +short NS tokenobs.consultwithcloud.com

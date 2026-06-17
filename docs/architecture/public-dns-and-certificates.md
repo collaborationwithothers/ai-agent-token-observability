@@ -160,7 +160,7 @@ Tradeoff:
 
 Deferred target-state option:
 
-- Bring Your Own Certificate with a wildcard certificate in shared Key Vault can be reconsidered if multi-tenant hostname growth makes explicit managed certificates operationally expensive.
+- Bring Your Own Certificate with a wildcard certificate in retained per-environment Key Vaults can be reconsidered if multi-tenant hostname growth makes explicit managed certificates operationally expensive.
 - The deferred BYOC renewal workflow is captured in [../operations/certificate-renewal.md](../operations/certificate-renewal.md) and is not a first-release requirement.
 
 ## Terraform Ownership
@@ -184,6 +184,8 @@ Terraform should not manage:
 Terraform stage ownership:
 
 - The retained `public_dns` stage owns the Azure DNS zone `tokenobs.consultwithcloud.com` from the single owner workspace `pd_eastus2_internal` and outputs the Azure name servers that Cloudflare must delegate from the apex zone.
+- The retained `.github/workflows/terraform-public-dns.yml` workflow is the only repository workflow that may plan and apply the `public_dns` stage. It derives the owner workspace as `pd_eastus2_internal`, applies only the saved public DNS plan artifact, and emits the manual Cloudflare NS records as sanitized workflow-summary evidence.
+- The retained public DNS workflow also provides `verify_delegation`, which compares public `dig NS tokenobs.consultwithcloud.com` results with the Terraform output `product_dns_zone_name_servers` after the manual Cloudflare parent-zone change.
 - The disposable `edge` stage owns Front Door custom domains plus the `_dnsauth`, `app`, `api`, and `ingest` records inside the delegated Azure DNS zone when its `azure_dns_zone.manage_records` input is true.
 - The initial Cloudflare NS delegation remains outside this repo's Terraform state unless a later issue explicitly grants and governs Cloudflare API access.
 
@@ -195,9 +197,11 @@ The following resources are shared foundation resources and must be retained by 
 - Azure Container Registry.
 - Shared deployment identities.
 - Terraform remote state storage.
-- Shared Key Vault if used for application secrets or future BYOC certificates.
+- Per-environment retained foundation Key Vaults if used for application secrets or future BYOC certificates.
 
 Environment deletion workflows may remove environment-specific DNS records only if the record is clearly owned by the deleted environment and is not part of the shared product hostname set.
+
+If the deferred wildcard BYOC option is adopted later, Terraform may own the retained Key Vault and RBAC boundary, but certificate private key material, PEM, PFX, ACME account state, and imported certificate contents must stay outside Terraform state.
 
 ## Operational Requirements
 
@@ -207,6 +211,7 @@ The first implementation must prove in a non-production environment:
 
 - Azure Front Door serves managed certificates for `app`, `api`, and `ingest`.
 - Public DNS points product hostnames to the Azure Front Door endpoint.
+- Public delegation for `tokenobs.consultwithcloud.com` has been verified after the manual Cloudflare NS record change.
 - Front Door origin health succeeds over Private Link.
 - Direct HTTPS access to the generated Azure Container Apps FQDN fails or is unreachable from the public internet after public network access is disabled.
 - Product authentication and redirect URI behavior uses the public Front Door hostnames, not generated ACA hostnames.
