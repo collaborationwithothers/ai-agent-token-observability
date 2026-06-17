@@ -1,0 +1,379 @@
+name: Edge Origin Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_repository:
+        description: Must equal collaborationwithothers/ai-agent-token-observability.
+        required: true
+        type: string
+      environment:
+        description: Deployment environment to validate.
+        required: true
+        type: choice
+        options:
+          - dv
+          - qa
+          - pp
+          - pd
+      azure_region:
+        description: Azure region for this workspace.
+        required: true
+        type: choice
+        options:
+          - eastus
+          - eastus2
+          - westeurope
+      customer_organization_slug:
+        description: Customer organization slug. Use internal for first release.
+        required: true
+        type: string
+      terraform_workspace:
+        description: Expected workspace, formatted as environment_region_customerSlug.
+        required: true
+        type: string
+      confirmation:
+        description: Type validate-edge-origin workspace, for example validate-edge-origin dv_eastus2_internal.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  validate-edge-origin:
+    name: Guarded edge origin validation
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        github.repository == 'collaborationwithothers/ai-agent-token-observability' &&
+        inputs.expected_repository == 'collaborationwithothers/ai-agent-token-observability' &&
+        github.actor == 'haripraghash' &&
+        github.ref == 'refs/heads/main'
+      }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 30
+    outputs:
+      dashboard_origin_url: ${{ steps.public-origin-targets.outputs.dashboard_origin_url }}
+      api_origin_url: ${{ steps.public-origin-targets.outputs.api_origin_url }}
+      ingest_origin_url: ${{ steps.public-origin-targets.outputs.ingest_origin_url }}
+      public_network_access: ${{ steps.public-origin-targets.outputs.public_network_access }}
+    steps:
+      - name: Validate guardrails before privileged steps
+        env:
+          REQUIRED_REPOSITORY: collaborationwithothers/ai-agent-token-observability
+          EXPECTED_REPOSITORY: ${{ inputs.expected_repository }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          REQUESTED_TERRAFORM_WORKSPACE: ${{ inputs.terraform_workspace }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+
+          test "${GITHUB_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
+          test "${EXPECTED_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
+          test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
+          test "${GITHUB_ACTOR}" = "haripraghash"
+          test "${GITHUB_REF}" = "refs/heads/main"
+          case "${GITHUB_REF_NAME}:${ENVIRONMENT}" in main:dv|main:qa|main:pp|main:pd) ;; *) exit 1 ;; esac
+          case "${ENVIRONMENT}" in dv|qa|pp|pd) ;; *) exit 1 ;; esac
+          case "${AZURE_REGION}" in eastus|eastus2|westeurope) ;; *) exit 1 ;; esac
+          case "${CUSTOMER_ORGANIZATION_SLUG}" in *[!a-z0-9-]*|""|-*|*-) exit 1 ;; esac
+
+          TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
+          test "${TF_WORKSPACE}" != "default"
+          test "${REQUESTED_TERRAFORM_WORKSPACE}" = "${TF_WORKSPACE}"
+          test "${CONFIRMATION}" = "validate-edge-origin ${TF_WORKSPACE}"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.7
+          terraform_wrapper: false
+
+      - name: Read Terraform evidence outputs
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+        run: |
+          set -euo pipefail
+
+          TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
+          EVIDENCE_DIR="${RUNNER_TEMP}/edge-origin-evidence"
+          mkdir -p "${EVIDENCE_DIR}"
+
+          init_stage() {
+            local stage="$1"
+            local stage_dir="infrastructure/azure/stages/${stage}"
+
+            test -d "${stage_dir}"
+            cp "${stage_dir}/backend.azurerm.tf.example" "${stage_dir}/backend.generated.tf"
+
+            terraform -chdir="${stage_dir}" init -input=false \
+              -backend-config="resource_group_name=${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}" \
+              -backend-config="storage_account_name=${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}" \
+              -backend-config="container_name=${{ vars.TF_STATE_CONTAINER_NAME }}" \
+              -backend-config="key=${stage}.tfstate" \
+              -backend-config="use_azuread_auth=true"
+
+            terraform -chdir="${stage_dir}" workspace select "${TF_WORKSPACE}"
+          }
+
+          init_stage app_runtime
+          terraform -chdir="infrastructure/azure/stages/app_runtime" output -json direct_origin_validation_targets > "${EVIDENCE_DIR}/direct_origin_validation_targets.json"
+
+          init_stage edge
+          terraform -chdir="infrastructure/azure/stages/edge" output -json front_door_custom_domain_hostnames > "${EVIDENCE_DIR}/front_door_custom_domain_hostnames.json"
+          terraform -chdir="infrastructure/azure/stages/edge" output -json front_door_private_link_origin_approval_requests > "${EVIDENCE_DIR}/front_door_private_link_origin_approval_requests.json"
+          terraform -chdir="infrastructure/azure/stages/edge" output -json public_auth_callback_base_urls > "${EVIDENCE_DIR}/public_auth_callback_base_urls.json"
+
+          {
+            echo "EVIDENCE_DIR=${EVIDENCE_DIR}"
+            echo "TF_WORKSPACE=${TF_WORKSPACE}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Validate Terraform evidence contract
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+
+          HOSTNAMES="${EVIDENCE_DIR}/front_door_custom_domain_hostnames.json"
+          DIRECT_ORIGINS="${EVIDENCE_DIR}/direct_origin_validation_targets.json"
+          PRIVATE_LINK="${EVIDENCE_DIR}/front_door_private_link_origin_approval_requests.json"
+          AUTH_CALLBACKS="${EVIDENCE_DIR}/public_auth_callback_base_urls.json"
+
+          jq -e '
+            .product_dashboard == "app.tokenobs.consultwithcloud.com" and
+            .product_api == "api.tokenobs.consultwithcloud.com" and
+            .product_ingestion_endpoint == "ingest.tokenobs.consultwithcloud.com"
+          ' "${HOSTNAMES}" > /dev/null
+
+          jq -e '
+            .dashboard == "https://app.tokenobs.consultwithcloud.com" and
+            .api == "https://api.tokenobs.consultwithcloud.com" and
+            .ingest == "https://ingest.tokenobs.consultwithcloud.com"
+          ' "${AUTH_CALLBACKS}" > /dev/null
+
+          jq -e '
+            (.fqdns.product_dashboard | length > 0) and
+            (.fqdns.product_api | length > 0) and
+            (.fqdns.product_ingestion_endpoint | length > 0)
+          ' "${DIRECT_ORIGINS}" > /dev/null
+
+          jq -e '
+            length == 3 and
+            all(.[]; .target_type == "managedEnvironments") and
+            all(.[]; (.private_link_target_id | test("/providers/Microsoft.App/managedEnvironments/"))) and
+            all(.[]; .origin_host_name == .origin_host_header)
+          ' "${PRIVATE_LINK}" > /dev/null
+
+          case "${ENVIRONMENT}" in pp|pd)
+            test "$(jq -r '.public_network_access' "${DIRECT_ORIGINS}")" = "Disabled"
+            ;;
+          esac
+
+      - name: Export public origin probe targets
+        id: public-origin-targets
+        run: |
+          set -euo pipefail
+
+          DIRECT_ORIGINS="${EVIDENCE_DIR}/direct_origin_validation_targets.json"
+          DASHBOARD_ACA_FQDN="$(jq -r '.fqdns.product_dashboard' "${DIRECT_ORIGINS}")"
+          API_ACA_FQDN="$(jq -r '.fqdns.product_api' "${DIRECT_ORIGINS}")"
+          INGEST_ACA_FQDN="$(jq -r '.fqdns.product_ingestion_endpoint' "${DIRECT_ORIGINS}")"
+          PUBLIC_NETWORK_ACCESS="$(jq -r '.public_network_access' "${DIRECT_ORIGINS}")"
+
+          {
+            echo "dashboard_origin_url=https://${DASHBOARD_ACA_FQDN}/"
+            echo "api_origin_url=https://${API_ACA_FQDN}/health/ready"
+            echo "ingest_origin_url=https://${INGEST_ACA_FQDN}/health/ready"
+            echo "public_network_access=${PUBLIC_NETWORK_ACCESS}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Probe public Front Door hostnames
+        run: |
+          set -euo pipefail
+
+          validate_certificate() {
+            local hostname="$1"
+
+            if ! openssl s_client -servername "${hostname}" -connect "${hostname}:443" </dev/null 2>/dev/null \
+              | openssl x509 -noout -ext subjectAltName \
+              | grep -F "DNS:${hostname}" > /dev/null; then
+              echo "Certificate SAN validation failed for ${hostname}" >&2
+              return 1
+            fi
+          }
+
+          validate_public_endpoint() {
+            local label="$1"
+            local url="$2"
+            local status
+
+            status="$(curl -fsSIL --max-time 20 --output /dev/null --write-out "%{http_code}" "${url}" || true)"
+            case "${status}" in
+              200|204|301|302|307|308|401|403)
+                printf '| %s | %s | HTTP %s |\n' "${label}" "${url}" "${status}" >> "${GITHUB_STEP_SUMMARY}"
+                ;;
+              *)
+                echo "Public Front Door probe failed for ${label} with HTTP status ${status:-unavailable}" >&2
+                return 1
+                ;;
+            esac
+          }
+
+          APP_HOSTNAME="$(jq -r '.product_dashboard' "${EVIDENCE_DIR}/front_door_custom_domain_hostnames.json")"
+          API_HOSTNAME="$(jq -r '.product_api' "${EVIDENCE_DIR}/front_door_custom_domain_hostnames.json")"
+          INGEST_HOSTNAME="$(jq -r '.product_ingestion_endpoint' "${EVIDENCE_DIR}/front_door_custom_domain_hostnames.json")"
+
+          {
+            echo "## Edge Origin Validation"
+            echo
+            echo "Workspace: ${TF_WORKSPACE}"
+            echo
+            echo "### Public Front Door Probes"
+            echo
+            echo "| Service | URL | Result |"
+            echo "| --- | --- | --- |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          validate_certificate "${APP_HOSTNAME}"
+          validate_certificate "${API_HOSTNAME}"
+          validate_certificate "${INGEST_HOSTNAME}"
+
+          validate_public_endpoint "Product Dashboard" "https://${APP_HOSTNAME}/"
+          validate_public_endpoint "Product API" "https://${API_HOSTNAME}/health/ready"
+          validate_public_endpoint "Product Ingestion Endpoint" "https://${INGEST_HOSTNAME}/health/ready"
+
+      - name: Summarize sanitized Terraform evidence
+        run: |
+          set -euo pipefail
+
+          PUBLIC_NETWORK_ACCESS="$(jq -r '.public_network_access' "${EVIDENCE_DIR}/direct_origin_validation_targets.json")"
+          PRIVATE_LINK_COUNT="$(jq 'length' "${EVIDENCE_DIR}/front_door_private_link_origin_approval_requests.json")"
+
+          {
+            echo
+            echo "### Sanitized Terraform Evidence"
+            echo
+            echo "- Container Apps environment public network access: ${PUBLIC_NETWORK_ACCESS}"
+            echo "- Front Door Private Link approval request entries: ${PRIVATE_LINK_COUNT}"
+            echo "- Auth callback base URLs use Front Door public hostnames."
+            echo
+            echo "No response bodies, headers, cookies, tokens, or Terraform output values containing validation tokens were written to this summary."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  public-direct-origin-probe:
+    name: Public direct ACA origin validation
+    needs: validate-edge-origin
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        github.repository == 'collaborationwithothers/ai-agent-token-observability' &&
+        inputs.expected_repository == 'collaborationwithothers/ai-agent-token-observability' &&
+        github.actor == 'haripraghash' &&
+        github.ref == 'refs/heads/main'
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: Validate public probe guardrails
+        env:
+          REQUIRED_REPOSITORY: collaborationwithothers/ai-agent-token-observability
+          EXPECTED_REPOSITORY: ${{ inputs.expected_repository }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          REQUESTED_TERRAFORM_WORKSPACE: ${{ inputs.terraform_workspace }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+
+          test "${GITHUB_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
+          test "${EXPECTED_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
+          test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
+          test "${GITHUB_ACTOR}" = "haripraghash"
+          test "${GITHUB_REF}" = "refs/heads/main"
+          case "${GITHUB_REF_NAME}:${ENVIRONMENT}" in main:dv|main:qa|main:pp|main:pd) ;; *) exit 1 ;; esac
+          case "${ENVIRONMENT}" in dv|qa|pp|pd) ;; *) exit 1 ;; esac
+          case "${AZURE_REGION}" in eastus|eastus2|westeurope) ;; *) exit 1 ;; esac
+          case "${CUSTOMER_ORGANIZATION_SLUG}" in *[!a-z0-9-]*|""|-*|*-) exit 1 ;; esac
+
+          TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
+          test "${TF_WORKSPACE}" != "default"
+          test "${REQUESTED_TERRAFORM_WORKSPACE}" = "${TF_WORKSPACE}"
+          test "${CONFIRMATION}" = "validate-edge-origin ${TF_WORKSPACE}"
+
+      - name: Probe direct ACA origins from public runner
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          DASHBOARD_ORIGIN_URL: ${{ needs.validate-edge-origin.outputs.dashboard_origin_url }}
+          API_ORIGIN_URL: ${{ needs.validate-edge-origin.outputs.api_origin_url }}
+          INGEST_ORIGIN_URL: ${{ needs.validate-edge-origin.outputs.ingest_origin_url }}
+          PUBLIC_NETWORK_ACCESS: ${{ needs.validate-edge-origin.outputs.public_network_access }}
+        run: |
+          set -euo pipefail
+
+          test -n "${DASHBOARD_ORIGIN_URL}"
+          test -n "${API_ORIGIN_URL}"
+          test -n "${INGEST_ORIGIN_URL}"
+          test -n "${PUBLIC_NETWORK_ACCESS}"
+
+          validate_direct_origin() {
+            local label="$1"
+            local url="$2"
+            local status
+            local curl_exit
+
+            set +e
+            status="$(curl -sSIL --max-time 15 --output /dev/null --write-out "%{http_code}" "${url}" 2>/dev/null)"
+            curl_exit="$?"
+            set -e
+
+            if [[ "${curl_exit}" -ne 0 || "${status}" == "000" || -z "${status}" ]]; then
+              printf '| %s | %s | not publicly reachable from GitHub-hosted runner |\n' "${label}" "${url}" >> "${GITHUB_STEP_SUMMARY}"
+              return 0
+            fi
+
+            case "${ENVIRONMENT}" in pp|pd)
+              echo "Direct ACA origin returned HTTP ${status} for ${label}; public bypass proof failed." >&2
+              return 1
+              ;;
+            esac
+
+            printf '| %s | %s | HTTP %s, non-production evidence only |\n' "${label}" "${url}" "${status}" >> "${GITHUB_STEP_SUMMARY}"
+          }
+
+          {
+            echo "## Public Direct ACA Origin Validation"
+            echo
+            echo "Environment: ${ENVIRONMENT}"
+            echo
+            echo "Container Apps environment public network access from Terraform: ${PUBLIC_NETWORK_ACCESS}"
+            echo
+            echo "| Service | URL | Result |"
+            echo "| --- | --- | --- |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          validate_direct_origin "Product Dashboard origin" "${DASHBOARD_ORIGIN_URL}"
+          validate_direct_origin "Product API origin" "${API_ORIGIN_URL}"
+          validate_direct_origin "Product Ingestion Endpoint origin" "${INGEST_ORIGIN_URL}"

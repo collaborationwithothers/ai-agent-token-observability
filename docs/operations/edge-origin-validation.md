@@ -192,6 +192,20 @@ For `qa`, `pp`, and `pd`, validation should be represented as a guarded GitHub A
 
 Managed Azure VNet runners may be used for private-resource validation and Azure API checks. They do not prove public-origin isolation by themselves. Direct-bypass checks must include a public-internet perspective or another documented equivalent.
 
+Implemented workflow:
+
+```text
+.github/workflows/edge-origin-validation.yml
+```
+
+Required confirmation phrase:
+
+```text
+validate-edge-origin {environment}_{azureRegion}_{customerOrganizationSlug}
+```
+
+The workflow reads the `app_runtime` and `edge` Terraform state outputs on the managed Azure runner, validates the public Front Door hostname and authentication callback contract, probes the public Front Door hostnames, and exports only sanitized generated ACA origin URLs to a separate GitHub-hosted runner job. That public runner job has no Azure login and proves generated ACA FQDNs are not reachable from a public-internet perspective. Workflow summaries must contain only sanitized status evidence.
+
 ## Acceptance Criteria
 
 - DNS delegation and public hostname records are correct.
