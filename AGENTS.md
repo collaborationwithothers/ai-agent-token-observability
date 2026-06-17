@@ -115,6 +115,19 @@ If a subagent wait or close attempt fails once, stop waiting on that subagent an
 
 For Code Reviewer, request one full review after focused validation. If it reports `CHANGES_REQUESTED`, fix the findings, rerun validation, and request one targeted rereview using the prior findings ledger.
 
+### Planning And Implementation Agents
+
+Project-scoped custom agents live under `.codex/agents/`.
+
+For ready-for-agent GitHub issue work, use `Issue Planner` when the user asks for a planning subagent or when a detailed implementation handoff is explicitly requested. `Issue Planner` is read-only and must produce the Issue Start Packet, acceptance matrix, validation plan, risk checklist, and `IMPLEMENTOR HANDOFF` before implementation begins.
+
+Use implementation agents only when the user explicitly asks for implementation subagents:
+
+- Use `Issue Implementor` for narrow, low-risk, well-scoped, or mostly mechanical changes after a planner handoff exists.
+- Use `Issue Implementor High` for security, privacy, tenant-boundary, authorization, persistence, migration, Terraform provider behavior, production architecture, or token metric state changes after a planner handoff exists.
+
+Implementation agents must not run Code Reviewer, write `Comments.md`, commit, push, or create PRs unless explicitly instructed. The main agent remains responsible for final validation, review orchestration, PR creation, and closing-reference verification.
+
 ### Review Efficiency
 
 Before running Code Reviewer:
