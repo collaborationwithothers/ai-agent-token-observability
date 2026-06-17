@@ -132,7 +132,7 @@ jobs:
               -backend-config="key=${stage}.tfstate" \
               -backend-config="use_azuread_auth=true"
 
-            terraform -chdir="${stage_dir}" workspace select "${TF_WORKSPACE}"
+            env -u TF_WORKSPACE terraform -chdir="${stage_dir}" workspace select "${TF_WORKSPACE}"
           }
 
           init_stage app_runtime

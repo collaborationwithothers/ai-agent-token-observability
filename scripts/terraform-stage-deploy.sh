@@ -92,9 +92,9 @@ init_stage() {
     -backend-config="use_azuread_auth=true"
 
   if [[ "${create_workspace}" == "true" ]]; then
-    terraform -chdir="${stage_dir}" workspace select "${terraform_workspace}" || terraform -chdir="${stage_dir}" workspace new "${terraform_workspace}"
+    env -u TF_WORKSPACE terraform -chdir="${stage_dir}" workspace select "${terraform_workspace}" || env -u TF_WORKSPACE terraform -chdir="${stage_dir}" workspace new "${terraform_workspace}"
   else
-    terraform -chdir="${stage_dir}" workspace select "${terraform_workspace}"
+    env -u TF_WORKSPACE terraform -chdir="${stage_dir}" workspace select "${terraform_workspace}"
   fi
 
   selected_workspace="$(terraform -chdir="${stage_dir}" workspace show)"

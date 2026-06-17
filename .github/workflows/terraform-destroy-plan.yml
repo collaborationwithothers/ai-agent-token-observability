@@ -154,7 +154,7 @@ jobs:
               -backend-config="key=${terraform_stage}.tfstate" \
               -backend-config="use_azuread_auth=true"
 
-            terraform -chdir="${stage_dir}" workspace select "${TF_WORKSPACE}"
+            env -u TF_WORKSPACE terraform -chdir="${stage_dir}" workspace select "${TF_WORKSPACE}"
             SELECTED_WORKSPACE="$(terraform -chdir="${stage_dir}" workspace show)"
             test "${SELECTED_WORKSPACE}" = "${TF_WORKSPACE}"
             test "${SELECTED_WORKSPACE}" != "default"
@@ -318,7 +318,7 @@ jobs:
               -backend-config="key=${terraform_stage}.tfstate" \
               -backend-config="use_azuread_auth=true"
 
-            terraform -chdir="${STAGE_DIR}" workspace select "${TF_WORKSPACE}"
+            env -u TF_WORKSPACE terraform -chdir="${STAGE_DIR}" workspace select "${TF_WORKSPACE}"
             SELECTED_WORKSPACE="$(terraform -chdir="${STAGE_DIR}" workspace show)"
             test "${SELECTED_WORKSPACE}" = "${TF_WORKSPACE}"
             test "${SELECTED_WORKSPACE}" != "default"

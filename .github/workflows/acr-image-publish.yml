@@ -116,7 +116,7 @@ jobs:
             -backend-config="key=foundation.tfstate" \
             -backend-config="use_azuread_auth=true"
 
-          terraform -chdir="${STAGE_DIR}" workspace select "${TF_WORKSPACE}"
+          env -u TF_WORKSPACE terraform -chdir="${STAGE_DIR}" workspace select "${TF_WORKSPACE}"
           SELECTED_WORKSPACE="$(terraform -chdir="${STAGE_DIR}" workspace show)"
           test "${SELECTED_WORKSPACE}" = "${TF_WORKSPACE}"
           test "${SELECTED_WORKSPACE}" != "default"
