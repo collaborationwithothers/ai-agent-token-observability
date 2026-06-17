@@ -230,4 +230,10 @@ variable "front_door_private_link_request_message" {
 variable "log_analytics_workspace_id" {
   description = "Log Analytics workspace ID used for Front Door access, health probe, WAF logs, and metrics."
   type        = string
+  default     = null
+
+  validation {
+    condition     = var.log_analytics_workspace_id == null || can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.OperationalInsights/workspaces/[^/]+$", var.log_analytics_workspace_id))
+    error_message = "log_analytics_workspace_id must be a Log Analytics workspace resource ID when supplied."
+  }
 }

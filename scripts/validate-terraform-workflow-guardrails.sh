@@ -81,11 +81,9 @@ REQUIRED_PATTERNS = {
     "managed runner label": r"(?m)^\s*labels\s*:\s*\[\s*gh-linux\s*\]\s*$",
     "job-level workflow_dispatch gate": r"github\.event_name\s*==\s*'workflow_dispatch'",
     "job-level repository gate": r"github\.repository\s*==\s*'collaborationwithothers/ai-agent-token-observability'",
-    "job-level expected repository input gate": r"inputs\.expected_repository\s*==\s*'collaborationwithothers/ai-agent-token-observability'",
     "job-level actor gate": r"github\.actor\s*==\s*'haripraghash'",
     "job-level main branch gate": r"github\.ref\s*==\s*'refs/heads/main'",
     "expected repository gate": r"GITHUB_REPOSITORY.*REQUIRED_REPOSITORY|REQUIRED_REPOSITORY.*GITHUB_REPOSITORY",
-    "expected repository input gate": r"EXPECTED_REPOSITORY.*REQUIRED_REPOSITORY|REQUIRED_REPOSITORY.*EXPECTED_REPOSITORY",
     "workflow_dispatch event gate": r"GITHUB_EVENT_NAME.*workflow_dispatch|workflow_dispatch.*GITHUB_EVENT_NAME",
     "expected actor gate": r"GITHUB_ACTOR.*haripraghash|haripraghash.*GITHUB_ACTOR",
     "full ref gate": r"GITHUB_REF.*refs/heads/main|refs/heads/main.*GITHUB_REF",
@@ -93,9 +91,8 @@ REQUIRED_PATTERNS = {
     "environment gate": r"dv\|qa\|pp\|pd|dv.*qa.*pp.*pd",
     "region gate": r"eastus\|eastus2\|westeurope|eastus.*eastus2.*westeurope",
     "customer organization slug gate": r"CUSTOMER_ORGANIZATION_SLUG|customer_organization_slug",
-    "workspace derivation": r"TF_WORKSPACE=.*ENVIRONMENT.*AZURE_REGION.*CUSTOMER_ORGANIZATION_SLUG|terraform_workspace",
+    "workspace derivation": r"TF_WORKSPACE=.*ENVIRONMENT.*AZURE_REGION.*CUSTOMER_ORGANIZATION_SLUG",
     "default workspace denial": r"TF_WORKSPACE.*default|default.*TF_WORKSPACE",
-    "confirmation gate": r"CONFIRMATION|confirmation",
     "environment protection": r"(?m)^\s*environment\s*:",
 }
 
@@ -118,17 +115,17 @@ IMAGE_PUBLISH_REQUIRED_PATTERNS = {
 }
 
 DESTROY_REQUIRED_PATTERNS = {
-    "destroy scope gate": r"(?m)^\s*(DESTROY_SCOPE|destroy_scope)\s*:",
-    "deletion reason gate": r"(?m)^\s*(REASON|reason)\s*:",
-    "reviewed destroy plan run id gate": r"(?m)^\s*(REVIEWED_DESTROY_PLAN_RUN_ID|reviewed_destroy_plan_run_id)\s*:",
+    "deletion target gate": r"(?m)^\s*(DELETION_TARGET|deletion_target)\s*:",
+    "derived destroy scope": r"DESTROY_SCOPE",
     "disposable stage allow-list": r"DISPOSABLE_STAGE_ORDER",
     "retained shared stage deny-list": r"RETAINED_STAGE_DENY_LIST",
     "environment and stage destroy scopes": r"environment\|stage|stage\|environment",
     "saved destroy plan file": r"DESTROY_PLAN_FILE",
     "destroy plan preview": r"terraform\s+-chdir=.*plan\s+-destroy.*-out=.*DESTROY_PLAN_FILE",
-    "reviewed destroy plan apply": r"terraform\s+-chdir=.*apply\s+-input=false\s+.*DESTROY_PLAN_FILE",
-    "delete apply opt-in": r"APPLY_DESTROY|apply_destroy",
-    "reviewed artifact run id": r"run-id:\s*\${{\s*inputs\.reviewed_destroy_plan_run_id\s*}}",
+    "approved destroy plan apply": r"terraform\s+-chdir=.*apply\s+-input=false\s+.*DESTROY_PLAN_FILE",
+    "same-run plan dependency": r"needs\s*:\s*destroy-plan",
+    "same-run artifact download": r"actions/download-artifact",
+    "deletion approval environment": r"(?m)^\s*name\s*:\s*terraform-deletion-approval\s*$",
 }
 
 
@@ -220,6 +217,33 @@ def destroy_required_errors(content: str) -> list[str]:
         if re.search(pattern, content, re.IGNORECASE | re.MULTILINE | re.DOTALL) is None
     ]
 
+    forbidden_dispatch_inputs = (
+        "expected_repository",
+        "terraform_workspace",
+        "edge_log_analytics_workspace_id",
+        "apply_destroy",
+        "reviewed_destroy_plan_run_id",
+        "reason",
+    )
+    dispatch_inputs = dispatch_input_names(content)
+    for input_name in forbidden_dispatch_inputs:
+        if input_name in dispatch_inputs:
+            errors.append(f"deletion workflow must not expose {input_name} as a dispatch input")
+    forbidden_legacy_references = (
+        "REQUESTED_TERRAFORM_WORKSPACE",
+        "EDGE_LOG_ANALYTICS_WORKSPACE_ID",
+        "APPLY_DESTROY",
+        "REVIEWED_DESTROY_PLAN_RUN_ID",
+        "inputs.terraform_workspace",
+        "inputs.edge_log_analytics_workspace_id",
+        "inputs.apply_destroy",
+        "inputs.reviewed_destroy_plan_run_id",
+        "inputs.reason",
+    )
+    for reference in forbidden_legacy_references:
+        if reference in content:
+            errors.append(f"deletion workflow must not reference {reference}")
+
     stage_options = re.findall(r"(?m)^\s*-\s*([a-z0-9_]+)\s*$", content)
     retained_options = sorted({"foundation", "public_dns"} & set(stage_options))
     if retained_options:
@@ -241,10 +265,6 @@ def destroy_required_errors(content: str) -> list[str]:
     if retained_stage_command_paths:
         errors.append(f"retained shared stage targeted by Terraform command: {', '.join(retained_stage_command_paths)}")
 
-    if re.search(r"(?m)^\s*needs\s*:\s*destroy-plan\s*$", content) and re.search(r"terraform\s+-chdir=.*apply\s+-input=false", content, re.IGNORECASE | re.DOTALL):
-        errors.append("destroy apply job must not depend on same-run destroy-plan job")
-    if re.search(r"needs\.destroy-plan\.outputs", content):
-        errors.append("destroy apply must not consume same-run destroy-plan outputs")
     if re.search(r"run-id:\s*\${{\s*github\.run_id\s*}}", content):
         errors.append("destroy apply must not download a plan artifact from the current run")
 
@@ -276,6 +296,37 @@ def image_publish_required_errors(content: str) -> list[str]:
     return errors
 
 
+def dispatch_input_names(content: str) -> set[str]:
+    match = re.search(
+        r"(?ms)^on:\n\s+workflow_dispatch:\n\s+inputs:\n(?P<inputs>.*?)(?=^\S)",
+        content,
+    )
+    if match is None:
+        return set()
+    return set(re.findall(r"(?m)^\s{6}([A-Za-z0-9_]+)\s*:", match.group("inputs")))
+
+
+def is_terraform_plan_workflow(path: pathlib.Path, content: str) -> bool:
+    return path.name == "terraform-plan.yml" or re.search(
+        r"(?m)^name:\s*(?:Safe\s+)?Terraform Plan(?:\s+Fixture)?\s*$",
+        content,
+    ) is not None
+
+
+def terraform_plan_required_errors(content: str) -> list[str]:
+    errors: list[str] = []
+    dispatch_inputs = dispatch_input_names(content)
+    if "terraform_workspace" in dispatch_inputs:
+        errors.append("Terraform plan workflow must not expose terraform_workspace as a dispatch input")
+    if "REQUESTED_TERRAFORM_WORKSPACE" in content:
+        errors.append("Terraform plan workflow must not validate a user-entered Terraform workspace")
+    if "inputs.terraform_workspace" in content:
+        errors.append("Terraform plan workflow must not read inputs.terraform_workspace")
+    if re.search(r"terraform_workspace.*GITHUB_OUTPUT|GITHUB_OUTPUT.*terraform_workspace", content, re.IGNORECASE) is None:
+        errors.append("Terraform plan workflow must publish the derived workspace as a step output")
+    return errors
+
+
 def validate_file(path: pathlib.Path) -> list[str]:
     content = path.read_text(encoding="utf-8")
     if not is_deployment_capable(content):
@@ -285,6 +336,8 @@ def validate_file(path: pathlib.Path) -> list[str]:
     errors.extend(forbidden_trigger_errors(content))
     errors.extend(forbidden_command_errors(content))
     errors.extend(required_gate_errors(content))
+    if is_terraform_plan_workflow(path, content):
+        errors.extend(terraform_plan_required_errors(content))
     if is_destroy_capable(content):
         errors.extend(destroy_required_errors(content))
     if is_image_publish_capable(content):

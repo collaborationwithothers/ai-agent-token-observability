@@ -88,21 +88,27 @@ Required inputs:
 - `environment`
 - `azure_region`
 - `customer_organization_slug`
-- `destroy_scope`
-- `confirmation`
-- `reason`
+- `deletion_target`
 
-Allowed `destroy_scope` values:
+Allowed `deletion_target` values:
 
 - `environment`
-- `stage`
+- `edge`
+- `managed_grafana`
+- `app_runtime`
+- `ai_services`
+- `data_platform`
+- `observability_foundation`
+- `network_private_data_plane`
 
-Disallowed `destroy_scope` values:
+Disallowed `deletion_target` values:
 
 - `subscription`
 - `resource_group_by_tag`
 - `all_tagged_resources`
 - `shared`
+- `foundation`
+- `public_dns`
 
 ## Required Gates
 
@@ -116,25 +122,13 @@ The workflow must validate all of these before Azure login:
 - Allowed region.
 - Allowed Customer Organization slug.
 - Derived workspace equals `{environment}_{azureRegion}_{customerOrganizationSlug}`.
-- Destroy scope is allowed.
-- Confirmation text exactly matches the requested destroy target.
-- Reason is non-empty.
+- Destroy scope is derived from `deletion_target`.
 - Target stages are in the disposable stage allow-list.
 - Target stages are not in the retained shared stage deny-list.
 
-Recommended confirmation format:
+The workflow creates the destroy plan first, uploads the plan artifact, and then the apply job waits for GitHub environment approval on `terraform-deletion-approval`. After approval, the same workflow run downloads and applies the saved plan artifact. The operator must not rerun the workflow to apply an approved plan.
 
-```text
-destroy {environment}_{azureRegion}_{customerOrganizationSlug} {destroy_scope}
-```
-
-Example:
-
-```text
-destroy dv_eastus_internal environment
-```
-
-`pp` and `pd` deletion jobs must use GitHub environments with required reviewers and prevent self-review where available.
+Configure the `terraform-deletion-approval` GitHub environment with required reviewers and prevent self-review where available.
 
 ## Command Contract
 
@@ -160,7 +154,7 @@ Rules:
 - Do not use `terraform apply -auto-approve`.
 - Do not use `terraform destroy -auto-approve`.
 - Do not use Terraform `-target` for normal environment deletion.
-- Apply must use the reviewed destroy plan artifact.
+- Apply must use the approved destroy plan artifact from the same workflow run.
 - The selected workspace must be displayed before apply.
 - The default workspace must never be used.
 - Destroy plans must be retained as workflow artifacts for audit.
@@ -172,7 +166,7 @@ The workflow must not delete Terraform state blobs.
 After successful deletion:
 
 - Keep state for audit unless an explicit state-retention policy says otherwise.
-- Record the deleted stage, workspace, actor, time, commit SHA, plan artifact ID, and reason.
+- Record the deleted stage, workspace, actor, time, commit SHA, and plan artifact ID.
 - Do not delete the remote state storage account or container.
 - Do not manually edit state in the normal workflow.
 
@@ -190,7 +184,7 @@ The workflow guardrail validator must fail if:
 - A workflow contains `terraform apply -auto-approve`.
 - A workflow runs destroy against the default workspace.
 - A workflow can target retained shared stages.
-- A workflow lacks repository, actor, branch, environment, region, workspace, confirmation, and protected-environment checks.
+- A workflow lacks repository, actor, branch, environment, region, workspace derivation, target derivation, and protected-environment checks.
 
 ## Acceptance Criteria
 
@@ -202,7 +196,7 @@ The workflow guardrail validator must fail if:
 - Resource-group deletion is forbidden.
 - Subscription-wide deletion is forbidden.
 - `terraform apply -auto-approve` and `terraform destroy -auto-approve` are forbidden.
-- Destroy plan artifacts are reviewable before apply.
+- Destroy plan artifacts are reviewable before the approval-gated apply job runs.
 - `pp` and `pd` require protected environment approval.
 - Remote state remains after environment deletion.
 

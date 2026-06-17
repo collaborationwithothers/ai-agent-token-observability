@@ -9,7 +9,7 @@ It turns the agreed Terraform principles into implementation-ready stage boundar
 The repository now contains the Terraform stage tree and the first deployment-adjacent workflow set. Current workflow coverage is split as follows:
 
 - `.github/workflows/terraform-plan.yml` creates guarded Terraform plan artifacts.
-- `.github/workflows/terraform-destroy-plan.yml` creates guarded destroy plans and applies reviewed destroy plan artifacts for disposable stages.
+- `.github/workflows/terraform-destroy-plan.yml` creates guarded destroy plans and applies approved same-run destroy plan artifacts for disposable stages.
 - `.github/workflows/edge-origin-validation.yml` validates Front Door hostnames and direct Azure Container Apps origin isolation.
 - A guarded Terraform apply workflow for normal non-destroy infrastructure changes is still missing.
 - Runtime container image build definitions and the guarded ACR publish workflow are still missing.
