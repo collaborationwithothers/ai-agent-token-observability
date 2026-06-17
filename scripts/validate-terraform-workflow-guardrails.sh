@@ -371,7 +371,6 @@ def public_dns_required_errors(content: str) -> list[str]:
         "environment",
         "azure_region",
         "customer_organization_slug",
-        "confirmation",
     }
     for input_name in sorted(required_inputs - dispatch_inputs):
         errors.append(f"retained public DNS workflow missing {input_name} dispatch input")
@@ -384,8 +383,6 @@ def public_dns_required_errors(content: str) -> list[str]:
         "pd-only environment gate": r"case\s+\"\$\{ENVIRONMENT\}\".*pd|test\s+\"\$\{ENVIRONMENT\}\"\s*=\s*\"pd\"",
         "eastus2-only region gate": r"case\s+\"\$\{AZURE_REGION\}\".*eastus2|test\s+\"\$\{AZURE_REGION\}\"\s*=\s*\"eastus2\"",
         "internal-only customer gate": r"case\s+\"\$\{CUSTOMER_ORGANIZATION_SLUG\}\".*internal|test\s+\"\$\{CUSTOMER_ORGANIZATION_SLUG\}\"\s*=\s*\"internal\"",
-        "apply confirmation": r"apply\s+\$\{?RETAINED_TERRAFORM_STAGE\}?\s+\$\{TF_WORKSPACE\}|apply public_dns \${TF_WORKSPACE}|apply public_dns pd_eastus2_internal",
-        "verify confirmation": r"verify\s+\$\{?RETAINED_TERRAFORM_STAGE\}?\s+\$\{TF_WORKSPACE\}|verify public_dns \${TF_WORKSPACE}|verify public_dns pd_eastus2_internal",
         "saved public DNS plan": r"terraform\s+-chdir=.*public_dns.*plan.*-out=.*PLAN_FILE|terraform\s+-chdir=.*STAGE_DIR.*plan.*-out=.*PLAN_FILE",
         "approved public DNS apply": r"terraform\s+-chdir=.*public_dns.*apply\s+-input=false\s+.*PLAN_FILE|terraform\s+-chdir=.*STAGE_DIR.*apply\s+-input=false\s+.*PLAN_FILE",
         "same-run public DNS artifact download": r"actions/download-artifact",

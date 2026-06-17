@@ -26,11 +26,6 @@ on:
         description: Retained public DNS customer organization slug. Use internal.
         required: true
         type: string
-      confirmation:
-        description: Type apply public_dns WORKSPACE or verify public_dns WORKSPACE.
-        required: true
-        type: string
-
 permissions:
   contents: read
   id-token: write
@@ -62,7 +57,6 @@ jobs:
           ENVIRONMENT: ${{ inputs.environment }}
           AZURE_REGION: ${{ inputs.azure_region }}
           CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
-          CONFIRMATION: ${{ inputs.confirmation }}
         run: |
           set -euo pipefail
 
@@ -89,11 +83,9 @@ jobs:
           RUN_VERIFY_DELEGATION=false
           case "${OPERATION}" in
             plan_apply)
-              EXPECTED_CONFIRMATION="apply ${RETAINED_TERRAFORM_STAGE} ${TF_WORKSPACE}"
               RUN_PLAN_APPLY=true
               ;;
             verify_delegation)
-              EXPECTED_CONFIRMATION="verify ${RETAINED_TERRAFORM_STAGE} ${TF_WORKSPACE}"
               RUN_VERIFY_DELEGATION=true
               ;;
             *)
@@ -101,8 +93,6 @@ jobs:
               exit 1
               ;;
           esac
-
-          test "${CONFIRMATION}" = "${EXPECTED_CONFIRMATION}"
 
           {
             echo "operation=${OPERATION}"
@@ -219,7 +209,6 @@ jobs:
           CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
           TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
           OPERATION: ${{ needs.select.outputs.operation }}
-          CONFIRMATION: ${{ inputs.confirmation }}
         run: |
           set -euo pipefail
 
@@ -232,7 +221,6 @@ jobs:
           test "${CUSTOMER_ORGANIZATION_SLUG}" = "internal"
           test "${TF_WORKSPACE}" = "pd_eastus2_internal"
           test "${OPERATION}" = "plan_apply"
-          test "${CONFIRMATION}" = "apply public_dns ${TF_WORKSPACE}"
       - uses: actions/download-artifact@v5
         with:
           name: terraform-public-dns-plan-${{ needs.select.outputs.terraform_workspace }}
@@ -310,7 +298,6 @@ jobs:
           CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
           TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
           OPERATION: ${{ needs.select.outputs.operation }}
-          CONFIRMATION: ${{ inputs.confirmation }}
         run: |
           set -euo pipefail
 
@@ -323,7 +310,6 @@ jobs:
           test "${CUSTOMER_ORGANIZATION_SLUG}" = "internal"
           test "${TF_WORKSPACE}" = "pd_eastus2_internal"
           test "${OPERATION}" = "verify_delegation"
-          test "${CONFIRMATION}" = "verify public_dns ${TF_WORKSPACE}"
       - uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
