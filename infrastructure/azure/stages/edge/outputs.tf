@@ -40,6 +40,35 @@ output "front_door_route_ids" {
   value       = module.front_door_edge.route_ids
 }
 
+output "front_door_custom_domain_ids" {
+  description = "Front Door managed custom domain IDs by product service key."
+  value       = module.front_door_edge.custom_domain_ids
+}
+
+output "front_door_custom_domain_hostnames" {
+  description = "Public Front Door product hostnames by product service key."
+  value       = module.front_door_edge.custom_domain_hostnames
+}
+
+output "front_door_managed_certificate_validation_records" {
+  description = "DNS TXT validation records required for Front Door managed certificates."
+  value       = module.front_door_edge.managed_certificate_validation_records
+}
+
+output "front_door_custom_domain_cname_records" {
+  description = "DNS CNAME records required to route product hostnames to Front Door endpoints."
+  value       = module.front_door_edge.custom_domain_cname_records
+}
+
+output "public_auth_callback_base_urls" {
+  description = "Public Front Door base URLs that must be used for browser-visible authentication callbacks and redirects."
+  value = {
+    dashboard = "https://${var.public_ingress_hostnames.app}"
+    api       = "https://${var.public_ingress_hostnames.api}"
+    ingest    = "https://${var.public_ingress_hostnames.ingest}"
+  }
+}
+
 output "front_door_origin_group_ids" {
   description = "Front Door origin group IDs by product service key."
   value       = module.front_door_edge.origin_group_ids

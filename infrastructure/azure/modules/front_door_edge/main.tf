@@ -4,18 +4,21 @@ locals {
   endpoints = {
     product_dashboard = {
       name             = "${var.name_prefix}-app"
+      public_hostname  = var.public_ingress_hostnames.app
       origin_fqdn      = var.container_app_fqdns.product_dashboard
       health_path      = "/"
       rate_limit_group = "app"
     }
     product_api = {
       name             = "${var.name_prefix}-api"
+      public_hostname  = var.public_ingress_hostnames.api
       origin_fqdn      = var.container_app_fqdns.product_api
       health_path      = "/health/ready"
       rate_limit_group = "app"
     }
     product_ingestion_endpoint = {
       name             = "${var.name_prefix}-ingest"
+      public_hostname  = var.public_ingress_hostnames.ingest
       origin_fqdn      = var.container_app_fqdns.product_ingestion_endpoint
       health_path      = "/health/ready"
       rate_limit_group = "ingestion"
@@ -96,6 +99,20 @@ resource "azurerm_cdn_frontdoor_origin" "this" {
   weight                         = 500
 }
 
+resource "azurerm_cdn_frontdoor_custom_domain" "this" {
+  for_each = local.endpoints
+
+  name                     = "${each.value.name}-domain"
+  cdn_frontdoor_profile_id = azurerm_cdn_frontdoor_profile.this.id
+  dns_zone_id              = try(var.azure_dns_zone.id, null)
+  host_name                = each.value.public_hostname
+
+  tls {
+    certificate_type = "ManagedCertificate"
+    minimum_version  = "TLS12"
+  }
+}
+
 resource "azurerm_cdn_frontdoor_route" "this" {
   for_each = local.endpoints
 
@@ -103,11 +120,14 @@ resource "azurerm_cdn_frontdoor_route" "this" {
   cdn_frontdoor_endpoint_id     = azurerm_cdn_frontdoor_endpoint.this[each.key].id
   cdn_frontdoor_origin_group_id = azurerm_cdn_frontdoor_origin_group.this[each.key].id
   cdn_frontdoor_origin_ids      = [azurerm_cdn_frontdoor_origin.this[each.key].id]
-  enabled                       = true
+  cdn_frontdoor_custom_domain_ids = [
+    azurerm_cdn_frontdoor_custom_domain.this[each.key].id
+  ]
+  enabled = true
 
   forwarding_protocol    = "HttpsOnly"
   https_redirect_enabled = true
-  link_to_default_domain = true
+  link_to_default_domain = false
   patterns_to_match      = ["/*"]
   supported_protocols    = ["Http", "Https"]
 }
@@ -185,15 +205,48 @@ resource "azurerm_cdn_frontdoor_security_policy" "this" {
         patterns_to_match = ["/*"]
 
         dynamic "domain" {
-          for_each = azurerm_cdn_frontdoor_endpoint.this
+          for_each = merge(
+            { for key, endpoint in azurerm_cdn_frontdoor_endpoint.this : "default-${key}" => endpoint.id },
+            { for key, domain in azurerm_cdn_frontdoor_custom_domain.this : "custom-${key}" => domain.id }
+          )
 
           content {
-            cdn_frontdoor_domain_id = domain.value.id
+            cdn_frontdoor_domain_id = domain.value
           }
         }
       }
     }
   }
+}
+
+resource "azurerm_dns_txt_record" "front_door_domain_validation" {
+  for_each = try(var.azure_dns_zone.manage_records, false) ? azurerm_cdn_frontdoor_custom_domain.this : {}
+
+  name                = "_dnsauth.${split(".", each.value.host_name)[0]}"
+  zone_name           = var.azure_dns_zone.name
+  resource_group_name = var.azure_dns_zone.resource_group_name
+  ttl                 = 3600
+  tags                = var.tags
+
+  record {
+    value = each.value.validation_token
+  }
+}
+
+resource "azurerm_dns_cname_record" "front_door_custom_domain" {
+  for_each = try(var.azure_dns_zone.manage_records, false) ? azurerm_cdn_frontdoor_custom_domain.this : {}
+
+  depends_on = [
+    azurerm_cdn_frontdoor_route.this,
+    azurerm_cdn_frontdoor_security_policy.this
+  ]
+
+  name                = split(".", each.value.host_name)[0]
+  zone_name           = var.azure_dns_zone.name
+  resource_group_name = var.azure_dns_zone.resource_group_name
+  ttl                 = 3600
+  record              = azurerm_cdn_frontdoor_endpoint.this[each.key].host_name
+  tags                = var.tags
 }
 
 resource "azurerm_monitor_diagnostic_setting" "front_door_profile" {

@@ -33,5 +33,6 @@ module "front_door_edge" {
   waf_rate_limits            = var.waf_rate_limits
   public_ingress_hostnames   = var.public_ingress_hostnames
   container_app_fqdns        = var.container_app_fqdns
+  azure_dns_zone             = var.azure_dns_zone
   log_analytics_workspace_id = var.log_analytics_workspace_id
 }

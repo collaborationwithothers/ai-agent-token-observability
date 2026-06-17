@@ -159,6 +159,19 @@ Required checks:
 - Redirect URI registered in Entra matches the Front Door public hostname.
 - Post-login browser location remains under the Front Door public hostname.
 - API calls from the Product Dashboard use the intended public or private Product API path and do not call generated ACA FQDNs.
+- Terraform edge output `public_auth_callback_base_urls.dashboard` is the base URL used for dashboard callback and logout redirect configuration.
+- Terraform edge output `public_auth_callback_base_urls.api` is the base URL used anywhere Product API public callback configuration is required.
+
+### 7. Managed Certificate And DNS Record Proof
+
+The validation must prove:
+
+- Front Door custom domains exist for `app.tokenobs.consultwithcloud.com`, `api.tokenobs.consultwithcloud.com`, and `ingest.tokenobs.consultwithcloud.com`.
+- Front Door custom domains use managed certificates, not customer-managed certificates.
+- DNS TXT validation records match the values from Terraform edge output `front_door_managed_certificate_validation_records`.
+- DNS CNAME records match the values from Terraform edge output `front_door_custom_domain_cname_records`.
+- Azure Managed Grafana is not assigned a product vanity hostname for the first release.
+- No Azure Container Apps custom domains or product certificates are required for first-release public ingress.
 
 ## Workflow Placement
 
