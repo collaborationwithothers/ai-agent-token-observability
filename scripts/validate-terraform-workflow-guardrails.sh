@@ -68,6 +68,9 @@ DEPLOYMENT_CAPABLE_PATTERNS = (
     r"azure/login",
     r"\bterraform\s+(?:init|validate|plan|apply|destroy|workspace)\b",
     r"\baz\s+(?:login|deployment|group|resource)\b",
+    r"\baz\s+acr\s+login\b",
+    r"docker/build-push-action",
+    r"\bdocker\s+push\b",
 )
 
 REQUIRED_PATTERNS = {
@@ -94,6 +97,23 @@ REQUIRED_PATTERNS = {
     "default workspace denial": r"TF_WORKSPACE.*default|default.*TF_WORKSPACE",
     "confirmation gate": r"CONFIRMATION|confirmation",
     "environment protection": r"(?m)^\s*environment\s*:",
+}
+
+IMAGE_PUBLISH_PATTERNS = (
+    r"\baz\s+acr\s+login\b",
+    r"docker/build-push-action",
+    r"\bdocker\s+push\b",
+    r"ACR_LOGIN_SERVER|acr_login_server",
+)
+
+IMAGE_PUBLISH_REQUIRED_PATTERNS = {
+    "ACR login server input": r"(?m)^\s*acr_login_server\s*:",
+    "ACR login server guard": r"ACR_LOGIN_SERVER.*azurecr\.io|azurecr\.io.*ACR_LOGIN_SERVER",
+    "Product Dashboard image": r"product-dashboard",
+    "Product API image": r"product-api",
+    "Product Ingestion image": r"product-ingestion",
+    "Product Jobs image": r"product-jobs",
+    "image digest artifact": r"app-runtime-images\.auto\.tfvars\.json|image-digests",
 }
 
 DESTROY_REQUIRED_PATTERNS = {
@@ -133,13 +153,25 @@ def is_destroy_capable(content: str) -> bool:
     return re.search(r"plan\s+-destroy|destroy_scope|DESTROY_SCOPE", content, re.IGNORECASE) is not None
 
 
+def is_image_publish_capable(content: str) -> bool:
+    return any(re.search(pattern, content, re.IGNORECASE) for pattern in IMAGE_PUBLISH_PATTERNS)
+
+
 def forbidden_trigger_errors(content: str) -> list[str]:
     errors: list[str] = []
     for trigger in FORBIDDEN_TRIGGERS:
-        block_pattern = rf"(?m)^\s*{re.escape(trigger)}\s*:"
         list_pattern = rf"(?m)^\s*on\s*:\s*\[[^\]]*\b{re.escape(trigger)}\b"
         scalar_pattern = rf"(?m)^\s*on\s*:\s*{re.escape(trigger)}\s*$"
-        if re.search(block_pattern, content) or re.search(list_pattern, content) or re.search(scalar_pattern, content):
+        nested_block = False
+        in_on_block = False
+        for line in content.splitlines():
+            if re.match(r"^\S", line):
+                in_on_block = line.startswith("on:")
+                continue
+            if in_on_block and re.match(rf"^[ \t]+{re.escape(trigger)}\s*:", line):
+                nested_block = True
+                break
+        if nested_block or re.search(list_pattern, content) or re.search(scalar_pattern, content):
             errors.append(f"forbidden trigger: {trigger}")
     return errors
 
@@ -218,6 +250,26 @@ def destroy_required_errors(content: str) -> list[str]:
     return errors
 
 
+def image_publish_required_errors(content: str) -> list[str]:
+    errors = [
+        f"missing {name}"
+        for name, pattern in IMAGE_PUBLISH_REQUIRED_PATTERNS.items()
+        if re.search(pattern, content, re.IGNORECASE | re.MULTILINE | re.DOTALL) is None
+    ]
+
+    if re.search(r"(?m)^\s*packages\s*:\s*write\s*$", content):
+        errors.append("ACR image publish workflow must not grant packages write")
+    if re.search(r"ghcr\.io|GHCR", content, re.IGNORECASE):
+        errors.append("ACR image publish workflow must not reference GHCR")
+
+    azure_login_line = first_line(content, "azure/login")
+    acr_login_line = first_line(content, "az acr login")
+    if azure_login_line is not None and acr_login_line is not None and acr_login_line < azure_login_line:
+        errors.append("ACR login must run after Azure login")
+
+    return errors
+
+
 def validate_file(path: pathlib.Path) -> list[str]:
     content = path.read_text(encoding="utf-8")
     if not is_deployment_capable(content):
@@ -229,6 +281,8 @@ def validate_file(path: pathlib.Path) -> list[str]:
     errors.extend(required_gate_errors(content))
     if is_destroy_capable(content):
         errors.extend(destroy_required_errors(content))
+    if is_image_publish_capable(content):
+        errors.extend(image_publish_required_errors(content))
     return errors
 
 

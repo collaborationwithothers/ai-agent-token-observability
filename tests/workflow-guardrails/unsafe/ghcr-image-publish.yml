@@ -1,0 +1,17 @@
+name: Unsafe GHCR Image Publish
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/build-push-action@v7
+        with:
+          push: true
+          tags: ghcr.io/collaborationwithothers/ai-agent-token-observability/product-api:${{ github.sha }}

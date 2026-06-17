@@ -1,0 +1,189 @@
+name: ACR Image Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_repository:
+        description: Must equal collaborationwithothers/ai-agent-token-observability.
+        required: true
+        type: string
+      environment:
+        description: Deployment environment.
+        required: true
+        type: choice
+        options:
+          - dv
+          - qa
+          - pp
+          - pd
+      azure_region:
+        description: Azure region for this workspace.
+        required: true
+        type: choice
+        options:
+          - eastus
+          - eastus2
+          - westeurope
+      customer_organization_slug:
+        description: Customer organization slug. Use internal for first release.
+        required: true
+        type: string
+      terraform_workspace:
+        description: Expected workspace, formatted as environment_region_customerSlug.
+        required: true
+        type: string
+      acr_login_server:
+        description: Azure Container Registry login server, for example tokenobs.azurecr.io.
+        required: true
+        type: string
+      confirmation:
+        description: Type publish images workspace, for example publish images dv_eastus2_internal.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Guarded ACR image publish
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        github.repository == 'collaborationwithothers/ai-agent-token-observability' &&
+        inputs.expected_repository == 'collaborationwithothers/ai-agent-token-observability' &&
+        github.actor == 'haripraghash' &&
+        github.ref == 'refs/heads/main'
+      }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Validate guardrails before privileged steps
+        env:
+          REQUIRED_REPOSITORY: collaborationwithothers/ai-agent-token-observability
+          EXPECTED_REPOSITORY: ${{ inputs.expected_repository }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          REQUESTED_TERRAFORM_WORKSPACE: ${{ inputs.terraform_workspace }}
+          ACR_LOGIN_SERVER: ${{ inputs.acr_login_server }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+
+          test "${GITHUB_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
+          test "${EXPECTED_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
+          test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
+          test "${GITHUB_ACTOR}" = "haripraghash"
+          test "${GITHUB_REF}" = "refs/heads/main"
+          case "${GITHUB_REF_NAME}:${ENVIRONMENT}" in main:dv|main:qa|main:pp|main:pd) ;; *) exit 1 ;; esac
+          case "${ENVIRONMENT}" in dv|qa|pp|pd) ;; *) exit 1 ;; esac
+          case "${AZURE_REGION}" in eastus|eastus2|westeurope) ;; *) exit 1 ;; esac
+          case "${CUSTOMER_ORGANIZATION_SLUG}" in *[!a-z0-9-]*|""|-*|*-) exit 1 ;; esac
+          case "${ACR_LOGIN_SERVER}" in *.azurecr.io) ;; *) exit 1 ;; esac
+          ACR_NAME="${ACR_LOGIN_SERVER%.azurecr.io}"
+          case "${ACR_NAME}" in *[!a-zA-Z0-9]*|"" ) exit 1 ;; *) ;; esac
+          TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
+          test "${TF_WORKSPACE}" != "default"
+          test "${REQUESTED_TERRAFORM_WORKSPACE}" = "${TF_WORKSPACE}"
+          test "${CONFIRMATION}" = "publish images ${TF_WORKSPACE}"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Azure Container Registry login
+        env:
+          ACR_LOGIN_SERVER: ${{ inputs.acr_login_server }}
+        run: |
+          set -euo pipefail
+          az acr login --name "${ACR_LOGIN_SERVER%.azurecr.io}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and publish Product Dashboard image
+        id: product-dashboard
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: web/token-observability-dashboard/Dockerfile
+          push: true
+          tags: ${{ inputs.acr_login_server }}/product-dashboard:${{ github.sha }}
+
+      - name: Build and publish Product API image
+        id: product-api
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: src/TokenObservability.Api/Dockerfile
+          push: true
+          tags: ${{ inputs.acr_login_server }}/product-api:${{ github.sha }}
+
+      - name: Build and publish Product Ingestion Endpoint image
+        id: product-ingestion
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: src/TokenObservability.Ingestion/Dockerfile
+          push: true
+          tags: ${{ inputs.acr_login_server }}/product-ingestion:${{ github.sha }}
+
+      - name: Build and publish Product Jobs image
+        id: product-jobs
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: src/TokenObservability.Jobs/Dockerfile
+          push: true
+          tags: ${{ inputs.acr_login_server }}/product-jobs:${{ github.sha }}
+
+      - name: Emit image digest artifact
+        env:
+          ACR_LOGIN_SERVER: ${{ inputs.acr_login_server }}
+          DASHBOARD_DIGEST: ${{ steps.product-dashboard.outputs.digest }}
+          API_DIGEST: ${{ steps.product-api.outputs.digest }}
+          INGESTION_DIGEST: ${{ steps.product-ingestion.outputs.digest }}
+          JOBS_DIGEST: ${{ steps.product-jobs.outputs.digest }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p image-digests
+          cat > image-digests/app-runtime-images.auto.tfvars.json <<EOF
+          {
+            "container_registry_server": "${ACR_LOGIN_SERVER}",
+            "dashboard_image": "${ACR_LOGIN_SERVER}/product-dashboard@${DASHBOARD_DIGEST}",
+            "product_api_image": "${ACR_LOGIN_SERVER}/product-api@${API_DIGEST}",
+            "product_ingestion_image": "${ACR_LOGIN_SERVER}/product-ingestion@${INGESTION_DIGEST}",
+            "shared_jobs_image": "${ACR_LOGIN_SERVER}/product-jobs@${JOBS_DIGEST}"
+          }
+          EOF
+
+          {
+            echo "## ACR image publish"
+            echo
+            echo "| Runtime image | Immutable reference |"
+            echo "| --- | --- |"
+            echo "| Product Dashboard | \`${ACR_LOGIN_SERVER}/product-dashboard@${DASHBOARD_DIGEST}\` |"
+            echo "| Product API | \`${ACR_LOGIN_SERVER}/product-api@${API_DIGEST}\` |"
+            echo "| Product Ingestion Endpoint | \`${ACR_LOGIN_SERVER}/product-ingestion@${INGESTION_DIGEST}\` |"
+            echo "| Product Jobs | \`${ACR_LOGIN_SERVER}/product-jobs@${JOBS_DIGEST}\` |"
+            echo
+            echo "Download \`app-runtime-images.auto.tfvars.json\` and pass it to the app_runtime Terraform stage with \`-var-file\`."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload image digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-runtime-image-digests-${{ inputs.terraform_workspace }}-${{ github.sha }}
+          path: image-digests/app-runtime-images.auto.tfvars.json
+          if-no-files-found: error

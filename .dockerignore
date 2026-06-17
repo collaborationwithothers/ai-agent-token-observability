@@ -1,0 +1,11 @@
+.git
+.github
+.idea
+.vscode
+**/bin
+**/obj
+**/node_modules
+**/dist
+**/.terraform
+**/*.tfplan
+Comments.md

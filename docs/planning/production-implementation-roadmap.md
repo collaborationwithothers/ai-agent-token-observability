@@ -188,7 +188,7 @@ GitHub milestone: [3. Azure Runtime And Edge Proof](https://github.com/collabora
 
 Includes:
 
-- Runtime container image definitions and guarded GHCR publish workflow.
+- Runtime container image definitions and guarded ACR publish workflow.
 - Container Apps environment and three long-running Container Apps.
 - Shared jobs image and explicit job command wiring.
 - Guarded Terraform apply workflow from reviewed plan artifacts.
@@ -219,7 +219,7 @@ Milestone 3 child issues:
 | --- | --- | --- | --- |
 | [#54](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/54) | Container Apps runtime environment and long-running services | ACA environment and Product Dashboard, Product API, and Product Ingestion Endpoint apps are provisioned | #19, #21, #22, #23, #41, #48 |
 | [#55](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/55) | Shared jobs image and explicit Container Apps job commands | ACA jobs runtime shape uses one shared jobs image with explicit job commands | #19, #21, #22, #23, #39, #43 |
-| [#125](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/125) | Runtime container image definitions and GHCR publish workflow | Runtime images have repository-owned build definitions and a guarded GHCR publish workflow with immutable SHA tags and digest outputs | #19, #21, #22, #23, #54, #55 |
+| [#125](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/125) | Runtime container image definitions and ACR publish workflow | Runtime images have repository-owned build definitions and a guarded ACR publish workflow with immutable SHA tags and digest outputs | #19, #21, #22, #23, #54, #55 |
 | [#56](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/56) | Azure Front Door Premium WAF routes and rate limits | Front Door Premium WAF routes public traffic to product endpoints | #21, #22, #23, #41, #48, #54 |
 | [#57](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/57) | Front Door managed certificates and product hostnames | Front Door managed certificates bind product hostnames for first release | #21, #23, #54, #56 |
 | [#58](https://github.com/collaborationwithothers/ai-agent-token-observability/issues/58) | Front Door Private Link origins and ACA public access lock down | Front Door reaches ACA through Private Link and direct ACA public bypass fails | #21, #22, #23, #41, #54, #56 |
