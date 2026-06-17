@@ -96,6 +96,20 @@ REQUIRED_PATTERNS = {
     "environment protection": r"(?m)^\s*environment\s*:",
 }
 
+DESTROY_REQUIRED_PATTERNS = {
+    "destroy scope gate": r"(?m)^\s*(DESTROY_SCOPE|destroy_scope)\s*:",
+    "deletion reason gate": r"(?m)^\s*(REASON|reason)\s*:",
+    "reviewed destroy plan run id gate": r"(?m)^\s*(REVIEWED_DESTROY_PLAN_RUN_ID|reviewed_destroy_plan_run_id)\s*:",
+    "disposable stage allow-list": r"DISPOSABLE_STAGE_ORDER",
+    "retained shared stage deny-list": r"RETAINED_STAGE_DENY_LIST",
+    "environment and stage destroy scopes": r"environment\|stage|stage\|environment",
+    "saved destroy plan file": r"DESTROY_PLAN_FILE",
+    "destroy plan preview": r"terraform\s+-chdir=.*plan\s+-destroy.*-out=.*DESTROY_PLAN_FILE",
+    "reviewed destroy plan apply": r"terraform\s+-chdir=.*apply\s+-input=false\s+.*DESTROY_PLAN_FILE",
+    "delete apply opt-in": r"APPLY_DESTROY|apply_destroy",
+    "reviewed artifact run id": r"run-id:\s*\${{\s*inputs\.reviewed_destroy_plan_run_id\s*}}",
+}
+
 
 def workflow_files(paths: list[str]) -> list[pathlib.Path]:
     files: list[pathlib.Path] = []
@@ -113,6 +127,10 @@ def workflow_files(paths: list[str]) -> list[pathlib.Path]:
 
 def is_deployment_capable(content: str) -> bool:
     return any(re.search(pattern, content, re.IGNORECASE) for pattern in DEPLOYMENT_CAPABLE_PATTERNS)
+
+
+def is_destroy_capable(content: str) -> bool:
+    return re.search(r"plan\s+-destroy|destroy_scope|DESTROY_SCOPE", content, re.IGNORECASE) is not None
 
 
 def forbidden_trigger_errors(content: str) -> list[str]:
@@ -162,6 +180,44 @@ def required_gate_errors(content: str) -> list[str]:
     return errors
 
 
+def destroy_required_errors(content: str) -> list[str]:
+    errors = [
+        f"missing {name}"
+        for name, pattern in DESTROY_REQUIRED_PATTERNS.items()
+        if re.search(pattern, content, re.IGNORECASE | re.MULTILINE | re.DOTALL) is None
+    ]
+
+    stage_options = re.findall(r"(?m)^\s*-\s*([a-z0-9_]+)\s*$", content)
+    retained_options = sorted({"foundation", "public_dns"} & set(stage_options))
+    if retained_options:
+        errors.append(f"retained shared stage exposed as workflow input option: {', '.join(retained_options)}")
+
+    disposable_stage_orders = re.findall(r"DISPOSABLE_STAGE_ORDER\s*=\s*\"([^\"]*)\"", content)
+    if not disposable_stage_orders:
+        errors.append("missing parsable DISPOSABLE_STAGE_ORDER assignment")
+    for order in disposable_stage_orders:
+        retained_order_stages = sorted({"foundation", "public_dns"} & set(order.split()))
+        if retained_order_stages:
+            errors.append(f"retained shared stage present in disposable destroy order: {', '.join(retained_order_stages)}")
+
+    retained_stage_command_paths = sorted(set(re.findall(
+        r"terraform\s+-chdir\s*=\s*[\"']?infrastructure/azure/stages/(foundation|public_dns)(?:[\"'\s]|$)",
+        content,
+        re.IGNORECASE,
+    )))
+    if retained_stage_command_paths:
+        errors.append(f"retained shared stage targeted by Terraform command: {', '.join(retained_stage_command_paths)}")
+
+    if re.search(r"(?m)^\s*needs\s*:\s*destroy-plan\s*$", content) and re.search(r"terraform\s+-chdir=.*apply\s+-input=false", content, re.IGNORECASE | re.DOTALL):
+        errors.append("destroy apply job must not depend on same-run destroy-plan job")
+    if re.search(r"needs\.destroy-plan\.outputs", content):
+        errors.append("destroy apply must not consume same-run destroy-plan outputs")
+    if re.search(r"run-id:\s*\${{\s*github\.run_id\s*}}", content):
+        errors.append("destroy apply must not download a plan artifact from the current run")
+
+    return errors
+
+
 def validate_file(path: pathlib.Path) -> list[str]:
     content = path.read_text(encoding="utf-8")
     if not is_deployment_capable(content):
@@ -171,6 +227,8 @@ def validate_file(path: pathlib.Path) -> list[str]:
     errors.extend(forbidden_trigger_errors(content))
     errors.extend(forbidden_command_errors(content))
     errors.extend(required_gate_errors(content))
+    if is_destroy_capable(content):
+        errors.extend(destroy_required_errors(content))
     return errors
 
 

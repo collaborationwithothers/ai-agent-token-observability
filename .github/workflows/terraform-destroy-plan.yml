@@ -1,4 +1,4 @@
-name: Terraform Deletion Plan
+name: Terraform Deletion
 
 on:
   workflow_dispatch:
@@ -29,13 +29,14 @@ on:
         required: true
         type: string
       destroy_scope:
-        description: Destroy scope. This skeleton template only permits stage scope.
+        description: Destroy scope. Environment destroys all disposable stages in reverse dependency order.
         required: true
         type: choice
         options:
+          - environment
           - stage
       terraform_stage:
-        description: Disposable Terraform stage to destroy-plan.
+        description: Disposable stage used when destroy_scope is stage. Ignored for environment scope.
         required: true
         type: choice
         options:
@@ -50,6 +51,19 @@ on:
         description: Expected workspace, formatted as environment_region_customerSlug.
         required: true
         type: string
+      edge_log_analytics_workspace_id:
+        description: Log Analytics workspace resource ID required when destroying the edge stage.
+        required: false
+        type: string
+      apply_destroy:
+        description: Apply a reviewed destroy plan artifact from reviewed_destroy_plan_run_id instead of generating a new plan.
+        required: true
+        default: false
+        type: boolean
+      reviewed_destroy_plan_run_id:
+        description: Prior workflow run ID containing the reviewed destroy plan artifact. Required when apply_destroy is true.
+        required: false
+        type: string
       confirmation:
         description: Type destroy workspace destroy_scope, for example destroy dv_eastus2_internal stage.
         required: true
@@ -60,6 +74,7 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: read
   id-token: write
 
@@ -68,6 +83,7 @@ jobs:
     name: Guarded Terraform deletion plan
     if: >-
       ${{
+        inputs.apply_destroy == false &&
         github.event_name == 'workflow_dispatch' &&
         github.repository == 'collaborationwithothers/ai-agent-token-observability' &&
         inputs.expected_repository == 'collaborationwithothers/ai-agent-token-observability' &&
@@ -78,8 +94,13 @@ jobs:
       group: consultwithcloud-azure
       labels: [gh-linux]
     environment: ${{ inputs.environment }}
+    timeout-minutes: 60
+    outputs:
+      target_stages: ${{ steps.guardrails.outputs.target_stages }}
+      terraform_workspace: ${{ steps.guardrails.outputs.terraform_workspace }}
     steps:
       - name: Validate guardrails before privileged steps
+        id: guardrails
         env:
           REQUIRED_REPOSITORY: collaborationwithothers/ai-agent-token-observability
           EXPECTED_REPOSITORY: ${{ inputs.expected_repository }}
@@ -89,10 +110,16 @@ jobs:
           DESTROY_SCOPE: ${{ inputs.destroy_scope }}
           TERRAFORM_STAGE: ${{ inputs.terraform_stage }}
           REQUESTED_TERRAFORM_WORKSPACE: ${{ inputs.terraform_workspace }}
+          EDGE_LOG_ANALYTICS_WORKSPACE_ID: ${{ inputs.edge_log_analytics_workspace_id }}
+          APPLY_DESTROY: ${{ inputs.apply_destroy }}
+          REVIEWED_DESTROY_PLAN_RUN_ID: ${{ inputs.reviewed_destroy_plan_run_id }}
           CONFIRMATION: ${{ inputs.confirmation }}
           REASON: ${{ inputs.reason }}
         run: |
           set -euo pipefail
+
+          DISPOSABLE_STAGE_ORDER="edge managed_grafana app_runtime ai_services data_platform observability_foundation network_private_data_plane"
+          RETAINED_STAGE_DENY_LIST="foundation public_dns"
 
           test "${GITHUB_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
           test "${EXPECTED_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
@@ -103,14 +130,41 @@ jobs:
           case "${ENVIRONMENT}" in dv|qa|pp|pd) ;; *) exit 1 ;; esac
           case "${AZURE_REGION}" in eastus|eastus2|westeurope) ;; *) exit 1 ;; esac
           case "${CUSTOMER_ORGANIZATION_SLUG}" in *[!a-z0-9-]*|""|-*|*-) exit 1 ;; esac
-          case "${DESTROY_SCOPE}" in stage) ;; *) exit 1 ;; esac
+          case "${DESTROY_SCOPE}" in environment|stage) ;; *) exit 1 ;; esac
           case "${TERRAFORM_STAGE}" in edge|managed_grafana|app_runtime|ai_services|data_platform|observability_foundation|network_private_data_plane) ;; *) exit 1 ;; esac
+          case "${EDGE_LOG_ANALYTICS_WORKSPACE_ID}" in ""|/subscriptions/*/resourceGroups/*/providers/Microsoft.OperationalInsights/workspaces/*) ;; *) exit 1 ;; esac
+          test "${APPLY_DESTROY}" = "false"
+          test -z "${REVIEWED_DESTROY_PLAN_RUN_ID}"
           test -n "${REASON}"
+
+          for retained_stage in ${RETAINED_STAGE_DENY_LIST}; do
+            test "${TERRAFORM_STAGE}" != "${retained_stage}"
+          done
 
           TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
           test "${TF_WORKSPACE}" != "default"
           test "${REQUESTED_TERRAFORM_WORKSPACE}" = "${TF_WORKSPACE}"
           test "${CONFIRMATION}" = "destroy ${TF_WORKSPACE} ${DESTROY_SCOPE}"
+
+          case "${DESTROY_SCOPE}" in
+            environment)
+              TARGET_STAGES="${DISPOSABLE_STAGE_ORDER}"
+              ;;
+            stage)
+              TARGET_STAGES="${TERRAFORM_STAGE}"
+              ;;
+          esac
+
+          case " ${TARGET_STAGES} " in
+            *" edge "*)
+              test -n "${EDGE_LOG_ANALYTICS_WORKSPACE_ID}"
+              ;;
+          esac
+
+          {
+            echo "target_stages=${TARGET_STAGES}"
+            echo "terraform_workspace=${TF_WORKSPACE}"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -126,45 +180,244 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.14.7
+          terraform_wrapper: false
 
       - name: Terraform deletion plan
         env:
           ENVIRONMENT: ${{ inputs.environment }}
           AZURE_REGION: ${{ inputs.azure_region }}
           CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
-          DESTROY_SCOPE: ${{ inputs.destroy_scope }}
-          TERRAFORM_STAGE: ${{ inputs.terraform_stage }}
+          TARGET_STAGES: ${{ steps.guardrails.outputs.target_stages }}
+          TF_WORKSPACE: ${{ steps.guardrails.outputs.terraform_workspace }}
+          EDGE_LOG_ANALYTICS_WORKSPACE_ID: ${{ inputs.edge_log_analytics_workspace_id }}
         run: |
           set -euo pipefail
 
-          TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
-          STAGE_DIR="infrastructure/azure/stages/${TERRAFORM_STAGE}"
-          DESTROY_PLAN_FILE="${TERRAFORM_STAGE}-${TF_WORKSPACE}-destroy.tfplan"
+          PLAN_ARTIFACT_DIR="${RUNNER_TEMP}/terraform-destroy-plans"
+          mkdir -p "${PLAN_ARTIFACT_DIR}"
 
-          test "${DESTROY_SCOPE}" = "stage"
-          test -d "${STAGE_DIR}"
-          cp "${STAGE_DIR}/backend.azurerm.tf.example" "${STAGE_DIR}/backend.generated.tf"
+          init_stage() {
+            local terraform_stage="$1"
+            local stage_dir="infrastructure/azure/stages/${terraform_stage}"
 
-          terraform -chdir="${STAGE_DIR}" init -input=false \
-            -backend-config="resource_group_name=${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}" \
-            -backend-config="storage_account_name=${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}" \
-            -backend-config="container_name=${{ vars.TF_STATE_CONTAINER_NAME }}" \
-            -backend-config="key=${TERRAFORM_STAGE}.tfstate" \
-            -backend-config="use_azuread_auth=true"
+            test -d "${stage_dir}"
+            cp "${stage_dir}/backend.azurerm.tf.example" "${stage_dir}/backend.generated.tf"
 
-          terraform -chdir="${STAGE_DIR}" workspace select "${TF_WORKSPACE}"
-          terraform -chdir="${STAGE_DIR}" validate
-          terraform -chdir="${STAGE_DIR}" plan -destroy -input=false -out="${DESTROY_PLAN_FILE}" \
-            -var="environment=${ENVIRONMENT}" \
-            -var="azure_region=${AZURE_REGION}" \
-            -var="customer_organization_slug=${CUSTOMER_ORGANIZATION_SLUG}" \
-            -var="terraform_workspace_name=${TF_WORKSPACE}" \
-            -var="resource_instance=core" \
-            -var="tags={environment=\"${ENVIRONMENT}\",region=\"${AZURE_REGION}\",product=\"token-observability\",owner=\"platform\",data_classification=\"internal\",managed_by=\"terraform\"}"
+            terraform -chdir="${stage_dir}" init -input=false \
+              -backend-config="resource_group_name=${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}" \
+              -backend-config="storage_account_name=${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}" \
+              -backend-config="container_name=${{ vars.TF_STATE_CONTAINER_NAME }}" \
+              -backend-config="key=${terraform_stage}.tfstate" \
+              -backend-config="use_azuread_auth=true"
+
+            terraform -chdir="${stage_dir}" workspace select "${TF_WORKSPACE}"
+            SELECTED_WORKSPACE="$(terraform -chdir="${stage_dir}" workspace show)"
+            test "${SELECTED_WORKSPACE}" = "${TF_WORKSPACE}"
+            test "${SELECTED_WORKSPACE}" != "default"
+          }
+
+          {
+            echo "## Terraform Deletion Preview"
+            echo
+            echo "Workspace: ${TF_WORKSPACE}"
+            echo
+            echo "Stages are planned in reverse dependency order. Retained shared stages are excluded."
+            echo
+            echo "| Stage | Plan file | Text preview |"
+            echo "| --- | --- | --- |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          for terraform_stage in ${TARGET_STAGES}; do
+            STAGE_DIR="infrastructure/azure/stages/${terraform_stage}"
+            DESTROY_PLAN_DIR="${PLAN_ARTIFACT_DIR}/${terraform_stage}"
+            DESTROY_PLAN_FILE="${DESTROY_PLAN_DIR}/${terraform_stage}-${TF_WORKSPACE}-destroy.tfplan"
+            DESTROY_PLAN_TEXT="${DESTROY_PLAN_DIR}/${terraform_stage}-${TF_WORKSPACE}-destroy.txt"
+
+            test -d "${STAGE_DIR}"
+            mkdir -p "${DESTROY_PLAN_DIR}"
+            init_stage "${terraform_stage}"
+            terraform -chdir="${STAGE_DIR}" validate
+            EXTRA_VAR_ARGS=()
+            case "${terraform_stage}" in
+              edge)
+                init_stage app_runtime
+                EDGE_CONTAINER_APP_FQDNS="$(terraform -chdir="infrastructure/azure/stages/app_runtime" output -json container_app_fqdns | jq -c '.')"
+                EDGE_CONTAINER_APP_ENVIRONMENT_ID="$(terraform -chdir="infrastructure/azure/stages/app_runtime" output -raw container_app_environment_id)"
+                EXTRA_VAR_ARGS+=("-var=container_app_fqdns=${EDGE_CONTAINER_APP_FQDNS}")
+                EXTRA_VAR_ARGS+=("-var=container_app_environment_id=${EDGE_CONTAINER_APP_ENVIRONMENT_ID}")
+                EXTRA_VAR_ARGS+=("-var=enable_front_door_private_link_origins=true")
+                EXTRA_VAR_ARGS+=("-var=log_analytics_workspace_id=${EDGE_LOG_ANALYTICS_WORKSPACE_ID}")
+                ;;
+            esac
+            terraform -chdir="${STAGE_DIR}" plan -destroy -input=false -out="${DESTROY_PLAN_FILE}" \
+              -var="environment=${ENVIRONMENT}" \
+              -var="azure_region=${AZURE_REGION}" \
+              -var="customer_organization_slug=${CUSTOMER_ORGANIZATION_SLUG}" \
+              -var="terraform_workspace_name=${TF_WORKSPACE}" \
+              -var="resource_instance=core" \
+              -var="tags={environment=\"${ENVIRONMENT}\",region=\"${AZURE_REGION}\",product=\"token-observability\",owner=\"platform\",data_classification=\"internal\",managed_by=\"terraform\"}" \
+              "${EXTRA_VAR_ARGS[@]}"
+            terraform -chdir="${STAGE_DIR}" show -no-color "${DESTROY_PLAN_FILE}" > "${DESTROY_PLAN_TEXT}"
+
+            printf '| %s | `%s` | `%s` |\n' \
+              "${terraform_stage}" \
+              "${terraform_stage}/${terraform_stage}-${TF_WORKSPACE}-destroy.tfplan" \
+              "${terraform_stage}/${terraform_stage}-${TF_WORKSPACE}-destroy.txt" >> "${GITHUB_STEP_SUMMARY}"
+          done
 
       - name: Upload deletion plan artifact
         uses: actions/upload-artifact@v4
         with:
-          name: terraform-destroy-plan-${{ inputs.terraform_stage }}-${{ inputs.terraform_workspace }}
-          path: infrastructure/azure/stages/${{ inputs.terraform_stage }}/*-destroy.tfplan
+          name: terraform-destroy-plans-${{ inputs.destroy_scope }}-${{ steps.guardrails.outputs.terraform_workspace }}
+          path: ${{ runner.temp }}/terraform-destroy-plans
           if-no-files-found: error
+          retention-days: 14
+
+  destroy-apply:
+    name: Guarded Terraform deletion apply
+    if: >-
+      ${{
+        inputs.apply_destroy == true &&
+        github.event_name == 'workflow_dispatch' &&
+        github.repository == 'collaborationwithothers/ai-agent-token-observability' &&
+        inputs.expected_repository == 'collaborationwithothers/ai-agent-token-observability' &&
+        github.actor == 'haripraghash' &&
+        github.ref == 'refs/heads/main'
+      }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 90
+    steps:
+      - name: Validate guardrails before privileged steps
+        env:
+          REQUIRED_REPOSITORY: collaborationwithothers/ai-agent-token-observability
+          EXPECTED_REPOSITORY: ${{ inputs.expected_repository }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          DESTROY_SCOPE: ${{ inputs.destroy_scope }}
+          TERRAFORM_STAGE: ${{ inputs.terraform_stage }}
+          REQUESTED_TERRAFORM_WORKSPACE: ${{ inputs.terraform_workspace }}
+          EDGE_LOG_ANALYTICS_WORKSPACE_ID: ${{ inputs.edge_log_analytics_workspace_id }}
+          APPLY_DESTROY: ${{ inputs.apply_destroy }}
+          REVIEWED_DESTROY_PLAN_RUN_ID: ${{ inputs.reviewed_destroy_plan_run_id }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+
+          DISPOSABLE_STAGE_ORDER="edge managed_grafana app_runtime ai_services data_platform observability_foundation network_private_data_plane"
+          RETAINED_STAGE_DENY_LIST="foundation public_dns"
+
+          test "${GITHUB_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
+          test "${EXPECTED_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
+          test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
+          test "${GITHUB_ACTOR}" = "haripraghash"
+          test "${GITHUB_REF}" = "refs/heads/main"
+          case "${GITHUB_REF_NAME}:${ENVIRONMENT}" in main:dv|main:qa|main:pp|main:pd) ;; *) exit 1 ;; esac
+          case "${ENVIRONMENT}" in dv|qa|pp|pd) ;; *) exit 1 ;; esac
+          case "${AZURE_REGION}" in eastus|eastus2|westeurope) ;; *) exit 1 ;; esac
+          case "${CUSTOMER_ORGANIZATION_SLUG}" in *[!a-z0-9-]*|""|-*|*-) exit 1 ;; esac
+          case "${DESTROY_SCOPE}" in environment|stage) ;; *) exit 1 ;; esac
+          case "${TERRAFORM_STAGE}" in edge|managed_grafana|app_runtime|ai_services|data_platform|observability_foundation|network_private_data_plane) ;; *) exit 1 ;; esac
+          case "${EDGE_LOG_ANALYTICS_WORKSPACE_ID}" in ""|/subscriptions/*/resourceGroups/*/providers/Microsoft.OperationalInsights/workspaces/*) ;; *) exit 1 ;; esac
+          test "${APPLY_DESTROY}" = "true"
+          case "${REVIEWED_DESTROY_PLAN_RUN_ID}" in *[!0-9]*|"") exit 1 ;; esac
+          test -n "${REASON}"
+
+          for retained_stage in ${RETAINED_STAGE_DENY_LIST}; do
+            test "${TERRAFORM_STAGE}" != "${retained_stage}"
+          done
+
+          TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
+          test "${TF_WORKSPACE}" != "default"
+          test "${REQUESTED_TERRAFORM_WORKSPACE}" = "${TF_WORKSPACE}"
+          test "${CONFIRMATION}" = "destroy ${TF_WORKSPACE} ${DESTROY_SCOPE}"
+
+          case "${DESTROY_SCOPE}" in
+            environment)
+              TARGET_STAGES="${DISPOSABLE_STAGE_ORDER}"
+              ;;
+            stage)
+              TARGET_STAGES="${TERRAFORM_STAGE}"
+              ;;
+          esac
+
+          case " ${TARGET_STAGES} " in
+            *" edge "*)
+              test -n "${EDGE_LOG_ANALYTICS_WORKSPACE_ID}"
+              ;;
+          esac
+
+          {
+            echo "TARGET_STAGES=${TARGET_STAGES}"
+            echo "TF_WORKSPACE=${TF_WORKSPACE}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download reviewed deletion plan artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: terraform-destroy-plans-${{ inputs.destroy_scope }}-${{ inputs.terraform_workspace }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.reviewed_destroy_plan_run_id }}
+          path: ${{ runner.temp }}/terraform-destroy-plans
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.7
+          terraform_wrapper: false
+
+      - name: Terraform deletion apply from reviewed plans
+        run: |
+          set -euo pipefail
+
+          PLAN_ARTIFACT_DIR="${RUNNER_TEMP}/terraform-destroy-plans"
+
+          {
+            echo "## Terraform Deletion Apply"
+            echo
+            echo "Workspace: ${TF_WORKSPACE}"
+            echo
+            echo "| Stage | Reviewed plan applied |"
+            echo "| --- | --- |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          for terraform_stage in ${TARGET_STAGES}; do
+            STAGE_DIR="infrastructure/azure/stages/${terraform_stage}"
+            DESTROY_PLAN_FILE="${PLAN_ARTIFACT_DIR}/${terraform_stage}/${terraform_stage}-${TF_WORKSPACE}-destroy.tfplan"
+
+            test -d "${STAGE_DIR}"
+            test -f "${DESTROY_PLAN_FILE}"
+            cp "${STAGE_DIR}/backend.azurerm.tf.example" "${STAGE_DIR}/backend.generated.tf"
+
+            terraform -chdir="${STAGE_DIR}" init -input=false \
+              -backend-config="resource_group_name=${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}" \
+              -backend-config="storage_account_name=${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}" \
+              -backend-config="container_name=${{ vars.TF_STATE_CONTAINER_NAME }}" \
+              -backend-config="key=${terraform_stage}.tfstate" \
+              -backend-config="use_azuread_auth=true"
+
+            terraform -chdir="${STAGE_DIR}" workspace select "${TF_WORKSPACE}"
+            SELECTED_WORKSPACE="$(terraform -chdir="${STAGE_DIR}" workspace show)"
+            test "${SELECTED_WORKSPACE}" = "${TF_WORKSPACE}"
+            test "${SELECTED_WORKSPACE}" != "default"
+            terraform -chdir="${STAGE_DIR}" apply -input=false "${DESTROY_PLAN_FILE}"
+
+            printf '| %s | `%s` |\n' \
+              "${terraform_stage}" \
+              "${terraform_stage}/${terraform_stage}-${TF_WORKSPACE}-destroy.tfplan" >> "${GITHUB_STEP_SUMMARY}"
+          done
