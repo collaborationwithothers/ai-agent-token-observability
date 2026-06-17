@@ -34,6 +34,7 @@ on:
         type: choice
         options:
           - foundation
+          - public_dns
           - network_private_data_plane
           - observability_foundation
           - data_platform
@@ -92,9 +93,12 @@ jobs:
           case "${ENVIRONMENT}" in dv|qa|pp|pd) ;; *) exit 1 ;; esac
           case "${AZURE_REGION}" in eastus|eastus2|westeurope) ;; *) exit 1 ;; esac
           case "${CUSTOMER_ORGANIZATION_SLUG}" in *[!a-z0-9-]*|""|-*|*-) exit 1 ;; esac
-          case "${TERRAFORM_STAGE}" in foundation|network_private_data_plane|observability_foundation|data_platform|ai_services|app_runtime|managed_grafana|edge) ;; *) exit 1 ;; esac
-
           TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
+          case "${TERRAFORM_STAGE}" in foundation|public_dns|network_private_data_plane|observability_foundation|data_platform|ai_services|app_runtime|managed_grafana|edge) ;; *) exit 1 ;; esac
+          if [[ "${TERRAFORM_STAGE}" == "public_dns" ]]; then
+            test "${TF_WORKSPACE}" = "pd_eastus2_internal"
+          fi
+
           test "${TF_WORKSPACE}" != "default"
           test "${REQUESTED_TERRAFORM_WORKSPACE}" = "${TF_WORKSPACE}"
           test "${CONFIRMATION}" = "plan ${TF_WORKSPACE}"

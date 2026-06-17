@@ -79,9 +79,12 @@ variable "public_ingress_hostnames" {
     condition = alltrue([
       can(regex("^[a-z0-9][a-z0-9.-]*[a-z0-9]$", var.public_ingress_hostnames.app)),
       can(regex("^[a-z0-9][a-z0-9.-]*[a-z0-9]$", var.public_ingress_hostnames.api)),
-      can(regex("^[a-z0-9][a-z0-9.-]*[a-z0-9]$", var.public_ingress_hostnames.ingest))
+      can(regex("^[a-z0-9][a-z0-9.-]*[a-z0-9]$", var.public_ingress_hostnames.ingest)),
+      var.public_ingress_hostnames.app == "app.tokenobs.consultwithcloud.com",
+      var.public_ingress_hostnames.api == "api.tokenobs.consultwithcloud.com",
+      var.public_ingress_hostnames.ingest == "ingest.tokenobs.consultwithcloud.com"
     ])
-    error_message = "public_ingress_hostnames must include valid app, api, and ingest hostnames."
+    error_message = "public_ingress_hostnames must be the first-release app, api, and ingest hostnames under tokenobs.consultwithcloud.com."
   }
 }
 
@@ -112,11 +115,11 @@ variable "azure_dns_zone" {
 
   validation {
     condition = var.azure_dns_zone == null || !try(var.azure_dns_zone.manage_records, false) || alltrue([
-      can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.Network/dnsZones/[^/]+$", coalesce(try(var.azure_dns_zone.id, null), ""))),
-      coalesce(try(var.azure_dns_zone.name, null), "") != "",
+      can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.Network/dnsZones/tokenobs\\.consultwithcloud\\.com$", coalesce(try(var.azure_dns_zone.id, null), ""))),
+      coalesce(try(var.azure_dns_zone.name, null), "") == "tokenobs.consultwithcloud.com",
       coalesce(try(var.azure_dns_zone.resource_group_name, null), "") != ""
     ])
-    error_message = "azure_dns_zone must include id, name, and resource_group_name when manage_records is true."
+    error_message = "azure_dns_zone must be the delegated tokenobs.consultwithcloud.com Azure DNS zone when manage_records is true."
   }
 }
 

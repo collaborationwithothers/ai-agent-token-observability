@@ -29,7 +29,7 @@ terraform plan -input=false -lock=false \
   -var="resource_instance=core" \
   -var='tags={environment="dv",region="eastus2",product="token-observability",owner="platform",data_classification="internal",managed_by="terraform"}' \
   -var='container_app_fqdns={product_dashboard="dashboard.example.azurecontainerapps.io",product_api="api.example.azurecontainerapps.io",product_ingestion_endpoint="ingest.example.azurecontainerapps.io"}' \
-  -var='azure_dns_zone={id="/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-to-shared-dns/providers/Microsoft.Network/dnsZones/tokenobs.consultwithcloud.com",name="tokenobs.consultwithcloud.com",resource_group_name="rg-to-shared-dns",manage_records=true}' \
+  -var='azure_dns_zone={id="/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-to-shared-public-dns/providers/Microsoft.Network/dnsZones/tokenobs.consultwithcloud.com",name="tokenobs.consultwithcloud.com",resource_group_name="rg-to-shared-public-dns",manage_records=true}' \
   -var='container_app_environment_id=/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-to-dv-eastus2-internal-app/providers/Microsoft.App/managedEnvironments/to-dv-core-env' \
   -var='enable_front_door_private_link_origins=true' \
   -var='log_analytics_workspace_id=/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-to-dv-eastus2-internal-observability/providers/Microsoft.OperationalInsights/workspaces/to-dv-core-law'
@@ -40,7 +40,7 @@ Guarded plan workflow path:
 1. Initialize the `edge` stage with the non-production remote backend config.
 2. Select the workspace named `{environment}_{azureRegion}_{customerOrganizationSlug}`.
 3. Pass `container_app_fqdns` from the `app_runtime` stage output.
-4. Pass `azure_dns_zone` when the delegated Azure DNS zone is available. Set `manage_records=true` to let Terraform create Front Door TXT validation records and CNAME records for `app`, `api`, and `ingest`.
+4. Pass `azure_dns_zone` from the retained `public_dns` stage output `product_dns_zone`. Set `manage_records=true` to let Terraform create Front Door TXT validation records and CNAME records for `app`, `api`, and `ingest`.
 5. Pass `container_app_environment_id` from the `app_runtime` stage output when `enable_front_door_private_link_origins=true`.
 6. Set `enable_front_door_private_link_origins=true` in `pp` and `pd`; the stage rejects production-like plans that omit it.
 7. Pass `log_analytics_workspace_id` from the `observability_foundation` stage output.
@@ -49,8 +49,8 @@ Guarded plan workflow path:
 Managed certificate and DNS workflow:
 
 - `front_door_custom_domain_hostnames` must contain `app.tokenobs.consultwithcloud.com`, `api.tokenobs.consultwithcloud.com`, and `ingest.tokenobs.consultwithcloud.com`.
-- `front_door_managed_certificate_validation_records` exposes the `_dnsauth` TXT records required by Front Door managed certificate validation.
-- `front_door_custom_domain_cname_records` exposes the CNAME records that route public product hostnames to the Front Door endpoints.
+- `front_door_managed_certificate_validation_records` exposes the `_dnsauth` TXT record name, FQDN, zone, TTL, and value required by Front Door managed certificate validation.
+- `front_door_custom_domain_cname_records` exposes the CNAME record name, FQDN, zone, TTL, and value that route public product hostnames to the Front Door endpoints.
 - If `azure_dns_zone.manage_records` is false or `azure_dns_zone` is null, operators must create the exposed TXT and CNAME records through the delegated DNS workflow before expecting custom domain validation to complete.
 - `public_auth_callback_base_urls` is the authoritative public hostname set for browser-visible authentication callbacks and redirects.
 - Azure Managed Grafana intentionally has no custom hostname in this stage for the first release.

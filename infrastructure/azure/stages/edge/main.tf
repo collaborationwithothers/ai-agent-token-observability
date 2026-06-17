@@ -10,6 +10,16 @@ resource "azurerm_resource_group" "edge" {
     }
 
     precondition {
+      condition     = contains(var.allowed_regions, var.azure_region)
+      error_message = "azure_region must be included in allowed_regions."
+    }
+
+    precondition {
+      condition     = contains(var.allowed_customer_organization_slugs, var.customer_organization_slug)
+      error_message = "customer_organization_slug must be included in allowed_customer_organization_slugs."
+    }
+
+    precondition {
       condition     = var.front_door_sku == "Premium_AzureFrontDoor"
       error_message = "The edge stage must use Premium_AzureFrontDoor because production origin isolation requires Front Door Private Link."
     }
@@ -50,6 +60,6 @@ module "front_door_edge" {
     request_message        = var.front_door_private_link_request_message
     target_type            = "managedEnvironments"
   }
-  azure_dns_zone              = var.azure_dns_zone
+  azure_dns_zone             = var.azure_dns_zone
   log_analytics_workspace_id = var.log_analytics_workspace_id
 }

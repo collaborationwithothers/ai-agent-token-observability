@@ -37,9 +37,12 @@ output "managed_certificate_validation_records" {
   description = "DNS TXT validation records required by Azure Front Door managed certificates."
   value = {
     for key, domain in azurerm_cdn_frontdoor_custom_domain.this : key => {
-      name  = "_dnsauth.${split(".", domain.host_name)[0]}"
-      type  = "TXT"
-      value = domain.validation_token
+      name      = "_dnsauth.${split(".", domain.host_name)[0]}"
+      type      = "TXT"
+      zone_name = local.public_dns_zone_name
+      fqdn      = "${"_dnsauth.${split(".", domain.host_name)[0]}"}.${local.public_dns_zone_name}"
+      ttl       = 3600
+      value     = domain.validation_token
     }
   }
 }
@@ -48,9 +51,12 @@ output "custom_domain_cname_records" {
   description = "DNS CNAME records required to route public product hostnames to Front Door endpoints."
   value = {
     for key, domain in azurerm_cdn_frontdoor_custom_domain.this : key => {
-      name  = split(".", domain.host_name)[0]
-      type  = "CNAME"
-      value = azurerm_cdn_frontdoor_endpoint.this[key].host_name
+      name      = split(".", domain.host_name)[0]
+      type      = "CNAME"
+      zone_name = local.public_dns_zone_name
+      fqdn      = domain.host_name
+      ttl       = 3600
+      value     = azurerm_cdn_frontdoor_endpoint.this[key].host_name
     }
   }
 }
