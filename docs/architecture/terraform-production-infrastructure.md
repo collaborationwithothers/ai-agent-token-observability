@@ -12,7 +12,7 @@ The repository now contains the Terraform stage tree and the first deployment-ad
 - `.github/workflows/terraform-destroy-plan.yml` creates guarded destroy plans and applies reviewed destroy plan artifacts for disposable stages.
 - `.github/workflows/edge-origin-validation.yml` validates Front Door hostnames and direct Azure Container Apps origin isolation.
 - A guarded Terraform apply workflow for normal non-destroy infrastructure changes is still missing.
-- Runtime container image build definitions and the guarded GHCR publish workflow are still missing.
+- Runtime container image build definitions and the guarded ACR publish workflow are still missing.
 
 Image build and publish is a separate production path from Terraform plan and apply. Terraform stages consume reviewed image references or digests; they do not build or publish container images.
 
@@ -38,7 +38,7 @@ Image build and publish is a separate production path from Terraform plan and ap
 - Deployment-capable workflows are manual only.
 - Production applies are guarded and must not use `terraform apply -auto-approve`.
 - Normal Terraform apply must apply an exact reviewed saved plan artifact, not a fresh unreviewed plan.
-- Runtime image publish workflows are manual, guarded, and package-scoped; they are separate from Azure-changing Terraform workflows.
+- Runtime image publish workflows are manual, guarded, and ACR-scoped; they are separate from Terraform plan and apply workflows.
 - No Customer Managed Keys are offered.
 - Platform-managed encryption is the only encryption mode.
 
@@ -352,7 +352,7 @@ Infrastructure deletion is defined separately in [../operations/infrastructure-d
 
 The existing Terraform plan workflow is not a deployment apply workflow. It produces plan artifacts for review. The future normal apply workflow must download the reviewed plan artifact by run ID, verify stage and workspace, and apply that saved plan file.
 
-Runtime image publishing is also separate from Terraform plan. A future image publish workflow must build the Product Dashboard, Product API, Product Ingestion Endpoint, and shared Product Jobs images, publish them to GHCR with immutable commit SHA tags, and emit image digests for later Terraform inputs.
+Runtime image publishing is also separate from Terraform plan. The image publish workflow builds the Product Dashboard, Product API, Product Ingestion Endpoint, and shared Product Jobs images, publishes them to Azure Container Registry with immutable commit SHA tags, and emits digest-pinned app runtime Terraform inputs.
 
 Allowed trigger:
 
@@ -401,7 +401,7 @@ permissions:
 
 Rules:
 
-- `id-token: write` is allowed only for jobs that need Azure OIDC.
+- `id-token: write` is allowed only for jobs that need Azure OIDC, including ACR publish jobs that authenticate to Azure before `az acr login`.
 - `GITHUB_TOKEN` permissions must remain least privilege.
 - Workflow scripts must not interpolate untrusted context directly into shell commands.
 - Forked PRs must never receive Azure credentials or deployment-capable tokens.
@@ -491,7 +491,7 @@ Terraform implementation issues must verify:
 - Managed Grafana provider authentication uses Entra OIDC by default, with service account token fallback disabled unless a non-production proof records provider incompatibility.
 - Terraform state does not output or store application secrets.
 - Production workflows are manual, guarded, and OIDC based.
-- Runtime image build and publish workflows are manual, guarded, and separate from Terraform plan and apply.
+- Runtime image build and publish workflows are manual, guarded, ACR-only, and separate from Terraform plan and apply.
 - Public-repository workflow guardrail tests fail unsafe examples.
 
 ## Verified Platform Facts
@@ -502,8 +502,8 @@ Terraform implementation issues must verify:
 - Microsoft describes Azure Verified Modules as reusable Infrastructure as Code modules for Azure, available for Bicep and Terraform, developed and maintained for consistency and best-practice alignment: https://learn.microsoft.com/en-us/community/content/azure-verified-modules
 - GitHub Actions OIDC lets workflows request short-lived cloud access tokens instead of storing long-lived cloud credentials in GitHub secrets: https://docs.github.com/en/actions/concepts/security/openid-connect
 - GitHub recommends least-privilege workflow credentials and limiting `GITHUB_TOKEN` permissions to the minimum required: https://docs.github.com/en/actions/reference/security/secure-use
-- GitHub documents Docker image publishing workflows that build from Dockerfiles, grant `packages: write`, publish to GHCR, and expose image digests for attestations or downstream evidence: https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images
-- GitHub recommends adding `org.opencontainers.image.source` metadata when publishing container images so repository-linked `GITHUB_TOKEN` permissions work with GHCR: https://docs.github.com/packages/working-with-a-github-packages-registry/working-with-the-container-registry
+- Microsoft documents publishing Docker images from GitHub Actions to Azure Container Registry by authenticating to the registry and running Docker build and push commands: https://learn.microsoft.com/en-us/azure/app-service/deploy-container-github-action
+- Docker build-push-action exposes a digest output from successful image builds for downstream evidence and artifact generation: https://github.com/docker/build-push-action/blob/master/README.md
 - Terraform `plan -out=FILE` saves a generated plan that can later be passed to `terraform apply` in automation: https://developer.hashicorp.com/terraform/cli/commands/plan
 - Terraform saved plan mode applies the operations in the saved plan file when that file is passed to `terraform apply`: https://developer.hashicorp.com/terraform/cli/commands/apply
 - Azure Container Apps is the Azure service for running containerized applications without managing orchestration infrastructure: https://learn.microsoft.com/en-us/azure/container-apps/

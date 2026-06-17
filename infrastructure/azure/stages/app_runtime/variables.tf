@@ -155,7 +155,7 @@ variable "log_analytics_workspace_id" {
 variable "dashboard_image" {
   description = "Container image for the Product Dashboard Container App."
   type        = string
-  default     = "ghcr.io/collaborationwithothers/ai-agent-token-observability/product-dashboard:latest"
+  default     = "example.azurecr.io/product-dashboard:0000000000000000000000000000000000000000"
 
   validation {
     condition     = length(trimspace(var.dashboard_image)) > 0
@@ -166,7 +166,7 @@ variable "dashboard_image" {
 variable "product_api_image" {
   description = "Container image for the Product API Container App."
   type        = string
-  default     = "ghcr.io/collaborationwithothers/ai-agent-token-observability/product-api:latest"
+  default     = "example.azurecr.io/product-api:0000000000000000000000000000000000000000"
 
   validation {
     condition     = length(trimspace(var.product_api_image)) > 0
@@ -177,7 +177,7 @@ variable "product_api_image" {
 variable "product_ingestion_image" {
   description = "Container image for the Product Ingestion Endpoint Container App."
   type        = string
-  default     = "ghcr.io/collaborationwithothers/ai-agent-token-observability/product-ingestion:latest"
+  default     = "example.azurecr.io/product-ingestion:0000000000000000000000000000000000000000"
 
   validation {
     condition     = length(trimspace(var.product_ingestion_image)) > 0
@@ -188,7 +188,7 @@ variable "product_ingestion_image" {
 variable "shared_jobs_image" {
   description = "Shared container image for finite Product Jobs commands."
   type        = string
-  default     = "ghcr.io/collaborationwithothers/ai-agent-token-observability/product-jobs:latest"
+  default     = "example.azurecr.io/product-jobs:0000000000000000000000000000000000000000"
 
   validation {
     condition     = length(trimspace(var.shared_jobs_image)) > 0
