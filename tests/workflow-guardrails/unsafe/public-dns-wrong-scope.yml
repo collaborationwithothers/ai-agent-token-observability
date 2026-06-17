@@ -24,9 +24,6 @@ on:
       customer_organization_slug:
         required: true
         type: string
-      confirmation:
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -69,8 +66,6 @@ jobs:
           case "${CUSTOMER_ORGANIZATION_SLUG}" in internal) ;; *) exit 1 ;; esac
           TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
           test "${TF_WORKSPACE}" != "default"
-          EXPECTED_CONFIRMATION="apply ${RETAINED_TERRAFORM_STAGE} ${TF_WORKSPACE}"
-          EXPECTED_VERIFY_CONFIRMATION="verify ${RETAINED_TERRAFORM_STAGE} ${TF_WORKSPACE}"
       - uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}

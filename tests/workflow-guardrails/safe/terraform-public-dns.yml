@@ -22,9 +22,6 @@ on:
       customer_organization_slug:
         required: true
         type: string
-      confirmation:
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -56,7 +53,6 @@ jobs:
           ENVIRONMENT: ${{ inputs.environment }}
           AZURE_REGION: ${{ inputs.azure_region }}
           CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
-          CONFIRMATION: ${{ inputs.confirmation }}
         run: |
           set -euo pipefail
           RETAINED_TERRAFORM_STAGE="public_dns"
@@ -75,11 +71,10 @@ jobs:
           test "${TF_WORKSPACE}" = "${RETAINED_WORKSPACE}"
           test "${TF_WORKSPACE}" != "default"
           case "${OPERATION_INPUT}" in
-            plan_apply) EXPECTED_CONFIRMATION="apply ${RETAINED_TERRAFORM_STAGE} ${TF_WORKSPACE}" ;;
-            verify_delegation) EXPECTED_CONFIRMATION="verify ${RETAINED_TERRAFORM_STAGE} ${TF_WORKSPACE}" ;;
+            plan_apply) ;;
+            verify_delegation) ;;
             *) exit 1 ;;
           esac
-          test "${CONFIRMATION}" = "${EXPECTED_CONFIRMATION}"
           echo "operation=${OPERATION_INPUT}" >> "${GITHUB_OUTPUT}"
           echo "terraform_workspace=${TF_WORKSPACE}" >> "${GITHUB_OUTPUT}"
           echo "run_plan_apply=true" >> "${GITHUB_OUTPUT}"
