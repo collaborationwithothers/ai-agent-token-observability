@@ -79,6 +79,11 @@ output "front_door_origin_ids" {
   value       = module.front_door_edge.origin_ids
 }
 
+output "front_door_private_link_origin_approval_requests" {
+  description = "Private Link origin approval details by product service key for operator audit records."
+  value       = module.front_door_edge.private_link_origin_approval_requests
+}
+
 output "front_door_waf_policy_id" {
   description = "Front Door WAF policy resource ID."
   value       = module.front_door_edge.waf_policy_id

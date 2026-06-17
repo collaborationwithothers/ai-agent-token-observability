@@ -44,8 +44,16 @@ terraform plan -input=false -lock=false \
   -var='tags={environment="dv",region="eastus2",product="token-observability",owner="platform",data_classification="internal",managed_by="terraform"}'
 ```
 
-Use `/Users/harisubramaniam/.terraform.versions/terraform_1.14.7` locally when the system `terraform` binary is older than the stage `required_version`.
+Use `tfswitch 1.14.7` locally when the system `terraform` binary is older than the stage `required_version`.
 
 The stage intentionally uses Container App managed identities and secret references rather than hardcoded secret values. Supply image names, optional registry server, optional Log Analytics workspace ID, and Key Vault secret IDs through environment-specific workflow inputs or variable files.
+
+Origin bypass guardrail:
+
+- `container_app_environment_public_network_access` defaults to `Enabled` for early non-production proof work.
+- `pp` and `pd` plans fail unless `container_app_environment_public_network_access` is `Disabled`.
+- Use the `container_app_environment_id` output as the Front Door Private Link target in the edge stage.
+- Use the `direct_origin_validation_targets` output as the sanitized stable Container App ingress FQDN input to the edge-origin validation runbook.
+- Direct requests to generated ACA FQDNs must not return application responses in `pp` or `pd`.
 
 Do not use `terraform apply -auto-approve`. Production applies must use the guarded manual workflow path defined by the Terraform production infrastructure architecture.

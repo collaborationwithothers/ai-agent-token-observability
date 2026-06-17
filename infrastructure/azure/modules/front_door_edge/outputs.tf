@@ -65,6 +65,21 @@ output "origin_ids" {
   value       = { for key, origin in azurerm_cdn_frontdoor_origin.this : key => origin.id }
 }
 
+output "private_link_origin_approval_requests" {
+  description = "Auditable Private Link origin approval details by product service key."
+  value = local.private_link_origin.enabled ? {
+    for key, endpoint in local.endpoints : key => {
+      origin_id              = azurerm_cdn_frontdoor_origin.this[key].id
+      private_link_target_id = local.private_link_origin.private_link_target_id
+      target_type            = local.private_link_origin.target_type
+      location               = local.private_link_origin.location
+      request_message        = local.private_link_origin.request_message
+      origin_host_name       = endpoint.origin_fqdn
+      origin_host_header     = endpoint.origin_fqdn
+    }
+  } : {}
+}
+
 output "waf_policy_id" {
   description = "Front Door WAF policy resource ID."
   value       = azurerm_cdn_frontdoor_firewall_policy.this.id

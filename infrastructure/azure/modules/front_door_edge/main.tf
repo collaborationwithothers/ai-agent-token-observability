@@ -1,6 +1,14 @@
 locals {
   waf_policy_name = replace("${var.name_prefix}-waf", "-", "")
 
+  private_link_origin = {
+    enabled                = var.private_link_origin.enabled
+    private_link_target_id = try(var.private_link_origin.private_link_target_id, null)
+    location               = coalesce(try(var.private_link_origin.location, null), var.location)
+    request_message        = coalesce(try(var.private_link_origin.request_message, null), "Access request for CDN FrontDoor Private Link Origin")
+    target_type            = coalesce(try(var.private_link_origin.target_type, null), "managedEnvironments")
+  }
+
   endpoints = {
     product_dashboard = {
       name             = "${var.name_prefix}-app"
@@ -97,6 +105,17 @@ resource "azurerm_cdn_frontdoor_origin" "this" {
   https_port                     = 443
   priority                       = 1
   weight                         = 500
+
+  dynamic "private_link" {
+    for_each = local.private_link_origin.enabled ? [local.private_link_origin] : []
+
+    content {
+      private_link_target_id = private_link.value.private_link_target_id
+      location               = private_link.value.location
+      request_message        = private_link.value.request_message
+      target_type            = private_link.value.target_type
+    }
+  }
 }
 
 resource "azurerm_cdn_frontdoor_custom_domain" "this" {

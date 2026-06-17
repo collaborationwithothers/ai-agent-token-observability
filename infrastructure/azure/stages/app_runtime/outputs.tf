@@ -25,14 +25,28 @@ output "container_app_environment_name" {
   value       = azurerm_container_app_environment.this.name
 }
 
+output "container_app_environment_public_network_access" {
+  description = "Configured public network access mode for the Container Apps environment."
+  value       = azurerm_container_app_environment.this.public_network_access
+}
+
 output "container_app_ids" {
   description = "Container App resource IDs by long-running service key."
   value       = { for key, app in azurerm_container_app.services : key => app.id }
 }
 
 output "container_app_fqdns" {
-  description = "Container App latest revision FQDNs by long-running service key."
-  value       = { for key, app in azurerm_container_app.services : key => app.latest_revision_fqdn }
+  description = "Stable generated Container App ingress FQDNs by long-running service key."
+  value       = { for key, app in azurerm_container_app.services : key => app.ingress[0].fqdn }
+}
+
+output "direct_origin_validation_targets" {
+  description = "Generated ACA FQDNs and expected direct-origin proof result for edge-origin validation."
+  value = {
+    public_network_access = azurerm_container_app_environment.this.public_network_access
+    expected_result       = contains(["pp", "pd"], var.environment) ? "Direct public requests to these generated ACA FQDNs must fail, time out, or return a platform rejection." : "Direct public origin bypass proof is required before promoting this topology to pp or pd."
+    fqdns                 = { for key, app in azurerm_container_app.services : key => app.ingress[0].fqdn }
+  }
 }
 
 output "container_app_identity_principal_ids" {
