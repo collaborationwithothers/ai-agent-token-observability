@@ -138,6 +138,26 @@ case "${mode}" in
 
     mapfile -t var_args < <(common_var_args)
     case "${TERRAFORM_STAGE}" in
+      data_platform)
+        foundation_deployment_identities="$(terraform_output_json foundation "${TF_WORKSPACE}" deployment_identities)"
+        network_subnet_ids="$(terraform_output_json network_private_data_plane "${TF_WORKSPACE}" subnet_ids)"
+        private_dns_zone_ids="$(terraform_output_json network_private_data_plane "${TF_WORKSPACE}" private_dns_zone_ids)"
+        diagnostic_destinations="$(terraform_output_json observability_foundation "${TF_WORKSPACE}" diagnostic_destinations)"
+        postgresql_ad_administrators="$(
+          jq -c '
+            with_entries(.value = {
+              tenant_id: .value.tenant_id,
+              object_id: .value.principal_id,
+              principal_name: .value.name,
+              principal_type: "ServicePrincipal"
+            })
+          ' <<<"${foundation_deployment_identities}"
+        )"
+        var_args+=("-var=postgresql_ad_administrators=${postgresql_ad_administrators}")
+        var_args+=("-var=network_subnet_ids=${network_subnet_ids}")
+        var_args+=("-var=private_dns_zone_ids=${private_dns_zone_ids}")
+        var_args+=("-var=diagnostic_destinations=${diagnostic_destinations}")
+        ;;
       edge)
         app_runtime_container_app_fqdns="$(terraform_output_json app_runtime "${TF_WORKSPACE}" container_app_fqdns)"
         app_runtime_container_app_environment_id="$(terraform_output_raw app_runtime "${TF_WORKSPACE}" container_app_environment_id)"
