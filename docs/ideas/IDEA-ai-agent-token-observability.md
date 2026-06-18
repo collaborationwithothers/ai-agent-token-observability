@@ -871,8 +871,8 @@ Spec Kit Spec-Bloat Scenario:
 * import the captured telemetry into the observability app
 * run Repo Context Enrichment against the same repo
 * show the resulting spec-bloat Token Hotspot and recommendation
-* document the scenario in `docs/scenarios/spec-kit-spec-bloat.md`
-* document the live demo flow in `docs/demos/manual-spec-kit-spec-bloat.md`
+* document the scenario in `docs/archive/demos/spec-kit-spec-bloat.md`
+* document the live demo flow in `docs/archive/demos/manual-spec-kit-spec-bloat.md`
 
 Manual Spec Kit artifact classification:
 
@@ -1031,7 +1031,7 @@ Tasks:
 Exit criteria:
 
 * sample OTel trace committed under `tests/fixtures`
-* `docs/architecture/copilot-otel-field-mapping.md` documents field categories and normalized mappings
+* `docs/archive/future-adapters/copilot-otel-field-mapping.md` documents field categories and normalized mappings
 * known limitations listed
 
 ### Phase 1: Local ingestion MVP
@@ -1406,7 +1406,7 @@ The first portfolio milestone should prove:
 Document before heavy coding:
 
 1. `IDEA-ai-agent-token-observability.md`
-2. `docs/prd/local-first-mvp.md`
+2. `docs/archive/local-first/local-first-mvp.md`
 3. `system-context.md`
 4. `data-model.md`
 5. `0001-use-dotnet-aspire-and-blazor-for-local-first-mvp.md`

@@ -1,6 +1,6 @@
 # Local-First MVP PRD
 
-Status: superseded by [Azure Production MVP PRD](./azure-production-mvp.md) and [ADR 0002](../adr/0002-replace-local-first-with-azure-production-saas.md)
+Status: superseded by [Azure Production MVP PRD](../../prd/azure-production-mvp.md) and [ADR 0002](../../adr/0002-replace-local-first-with-azure-production-saas.md)
 
 ## Problem Statement
 
@@ -323,8 +323,8 @@ Spec Kit Spec-Bloat Scenario:
 * The captured telemetry is imported into the observability app.
 * Repo Context Enrichment runs against the same repo.
 * The dashboard shows the resulting spec-bloat Token Hotspot and recommendation.
-* The scenario is documented in `docs/scenarios/spec-kit-spec-bloat.md`.
-* The live demo flow is documented in `docs/demos/manual-spec-kit-spec-bloat.md`.
+* The scenario is documented in `docs/archive/demos/spec-kit-spec-bloat.md`.
+* The live demo flow is documented in `docs/archive/demos/manual-spec-kit-spec-bloat.md`.
 
 ## Implementation Start Gate
 
@@ -332,7 +332,7 @@ Project skeleton work can start from this PRD.
 
 Parser behavior and schema implementation are blocked until these documents exist:
 
-* `docs/architecture/copilot-otel-field-mapping.md`
+* `docs/archive/future-adapters/copilot-otel-field-mapping.md`
 * initial `data-model.md` or equivalent schema document
 
 Parser behavior should not be considered stable until the Copilot Field Mapping is complete.

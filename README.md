@@ -42,9 +42,9 @@ Read these before creating implementation issues or changing behavior:
 
 Superseded references:
 
-- [Local-First MVP PRD](./docs/prd/local-first-mvp.md)
-- [ADR 0001](./docs/adr/0001-use-dotnet-aspire-and-blazor-for-local-first-mvp.md)
-- [Copilot OTel Field Mapping](./docs/architecture/copilot-otel-field-mapping.md)
+- [Local-First MVP PRD](./docs/archive/local-first/local-first-mvp.md)
+- [ADR 0001](./docs/archive/local-first/0001-use-dotnet-aspire-and-blazor-for-local-first-mvp.md)
+- [Copilot OTel Field Mapping](./docs/archive/future-adapters/copilot-otel-field-mapping.md)
 
 The superseded docs are historical or future-adapter reference material. They must not drive production MVP implementation issues.
 
@@ -54,7 +54,7 @@ The active source tree is production-shaped.
 
 - The root solution and production solution reference the Token Observability production skeleton.
 - The Aspire AppHost, Blazor Local Dashboard, local dashboard API, direct file import worker, local storage/import services, and Copilot JSONL tests have been removed from the active code path.
-- Superseded local-first documents remain as historical reference only.
+- Superseded local-first documents are archived as historical reference only.
 
 Do not reintroduce local-only mode as a product feature.
 

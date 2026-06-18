@@ -6,16 +6,23 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 usage() {
   cat <<'USAGE'
 Usage:
-  scripts/issue-start.sh ISSUE_NUMBER
-  scripts/issue-start.sh --no-issue
+  scripts/issue-start.sh [--compact] ISSUE_NUMBER
+  scripts/issue-start.sh [--compact] --no-issue
 
 Prints the required ready-for-agent Issue Start Packet.
 USAGE
 }
 
+compact=false
+
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   usage
   exit 0
+fi
+
+if [[ "${1:-}" == "--compact" ]]; then
+  compact=true
+  shift
 fi
 
 issue_arg="${1:-}"
@@ -25,6 +32,39 @@ if [[ -z "$issue_arg" ]]; then
 fi
 
 cd "$ROOT_DIR"
+
+print_worktrees() {
+  if [[ "$compact" == true ]]; then
+    local current_worktree
+    current_worktree="$(git rev-parse --show-toplevel)"
+    local issue_pattern=""
+    if [[ "$issue_arg" != "--no-issue" ]]; then
+      issue_pattern="issue-${issue_arg}"
+    fi
+
+    git worktree list --porcelain | awk -v current="$current_worktree" -v issue="$issue_pattern" '
+      BEGIN { block = ""; include = 0 }
+      /^worktree / {
+        if (block != "" && include) {
+          printf "%s\n", block
+        }
+        block = $0 "\n"
+        include = (index($0, current) > 0 || (issue != "" && index($0, issue) > 0))
+        next
+      }
+      {
+        block = block $0 "\n"
+      }
+      END {
+        if (block != "" && include) {
+          printf "%s", block
+        }
+      }
+    '
+  else
+    git worktree list --porcelain
+  fi
+}
 
 echo "# Issue Start Packet"
 echo
@@ -58,7 +98,7 @@ fi
 
 echo "## Worktrees"
 echo
-git worktree list --porcelain
+print_worktrees
 echo
 
 echo "## Status"

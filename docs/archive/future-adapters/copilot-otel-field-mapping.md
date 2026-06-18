@@ -2,7 +2,7 @@
 
 Status: historical Phase 0 reference. This document is not the Azure Production MVP ingestion contract.
 
-For the Azure Production MVP, Codex CLI is the first production harness and [codex-production-ingestion-contract.md](./codex-production-ingestion-contract.md) is the implementation source of truth. This Copilot mapping remains useful only as prior evidence for future VS Code Copilot adapter work.
+For the Azure Production MVP, Codex CLI is the first production harness and [codex-production-ingestion-contract.md](../../architecture/codex-production-ingestion-contract.md) is the implementation source of truth. This Copilot mapping remains useful only as prior evidence for future VS Code Copilot adapter work.
 
 ## Purpose
 

@@ -148,7 +148,7 @@ The MVP must show:
 
 - `docs/specs/production-target-state.md`
 - `docs/prd/azure-production-mvp.md`
-- Supersession note in `docs/prd/local-first-mvp.md`
+- Supersession note in `docs/archive/local-first/local-first-mvp.md`
 - `docs/architecture/azure-production-architecture.md`
 - `docs/architecture/content-capture-and-redaction.md`
 - `docs/architecture/recommendation-engine.md`
