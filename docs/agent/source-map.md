@@ -17,6 +17,8 @@ Use this file to choose the smallest useful context set for a task. Do not load 
 - `scripts/issue-start.sh`: issue packet generator.
 - `scripts/session-digest.sh`: compact issue packet wrapper for new sessions.
 - `scripts/worktree-current.sh`: compact current and issue worktree context.
+- `scripts/validate-markdown-links.sh`: relative Markdown link validation for docs moves and splits.
+- `scripts/workflow-digest.sh`: compact GitHub Actions workflow summary.
 - `scripts/validate-focused.sh`: scoped validation entry point.
 - `scripts/validate-pr.sh`: final PR validation gate.
 - `.github/codex/prompts/infrastructure-readiness.md`: GitHub Action prompt file for infrastructure-readiness work.
@@ -34,6 +36,10 @@ Read only when the touched boundary needs it:
 - `docs/architecture/data-model.md`: persistence and contracts.
 - `docs/architecture/production-codebase-transition.md`: deleting, replacing, retaining, or quarantining local-first code.
 - `docs/architecture/implementation-readiness-review.md`: issue readiness and implementation ordering.
+- `docs/planning/production-implementation-roadmap.md`: roadmap index only.
+- `docs/planning/production-implementation-roadmap/overview-and-milestones-0-2.md`
+- `docs/planning/production-implementation-roadmap/milestones-3-7.md`
+- `docs/planning/production-implementation-roadmap/issue-shape-labels-and-platform-facts.md`
 - `docs/adr/0002-replace-local-first-with-azure-production-saas.md`: production pivot decision.
 - `docs/adr/0003-use-react-spa-for-production-dashboard.md`: production dashboard stack decision.
 
@@ -58,6 +64,8 @@ Read when changing Azure infrastructure, Terraform stages, modules, or deploymen
 
 Prefer targeted searches and focused line ranges. Do not stream full Terraform plans. Use `terraform show -json` with `jq` assertions or narrow text filters.
 
+Use `scripts/workflow-digest.sh WORKFLOW.yml` before reading large workflow files end to end.
+
 ## Product Boundaries
 
 Read only when touching the matching boundary:
@@ -76,7 +84,7 @@ These files can be large or broad. Load focused sections only when needed:
 - Full production architecture docs.
 - Full runtime topology docs.
 - Full Terraform production infrastructure reference files.
-- Full planning roadmaps.
+- Full planning roadmap reference files.
 - Full operations runbooks.
 
 ## Historical Or Future-Adapter Context
@@ -86,6 +94,7 @@ Do not use these to drive Azure Production MVP implementation unless the user ex
 - `docs/archive/local-first/local-first-mvp.md`
 - `docs/archive/local-first/0001-use-dotnet-aspire-and-blazor-for-local-first-mvp.md`
 - `docs/archive/future-adapters/copilot-otel-field-mapping.md`
+- `docs/archive/ideas/IDEA-ai-agent-token-observability.md`
 - `docs/archive/demos/**`
 - `docs/archive/demos/spec-kit-spec-bloat.md`
 
@@ -97,6 +106,7 @@ Avoid loading or pasting these into the main thread unless they are the artifact
 - Full `git worktree list --porcelain` output in repos with many stale worktrees.
 - Full `gh issue list` output with large limits.
 - Broad `rg docs infrastructure` output.
+- Full GitHub workflow YAML when `scripts/workflow-digest.sh` is enough.
 - Full validation logs when a pass/fail summary and targeted diagnostics are enough.
 - Raw subagent notifications when a concise summary will do.
 

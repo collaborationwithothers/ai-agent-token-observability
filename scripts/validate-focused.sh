@@ -44,9 +44,12 @@ run_docs_checks() {
   bash -n scripts/worktree-current.sh
   bash -n scripts/terraform-stage-check.sh
   bash -n scripts/codex-infra-issue.sh
+  bash -n scripts/validate-markdown-links.sh
+  bash -n scripts/workflow-digest.sh
   bash -n scripts/validate-edge-origin-workflow.sh
   bash -n scripts/validate-focused.sh
   bash -n scripts/validate-pr.sh
+  scripts/validate-markdown-links.sh
   if [[ -f .agents/skills/review-worktree-issue-pr/SKILL.md ]]; then
     grep -q '^name: review-worktree-issue-pr$' .agents/skills/review-worktree-issue-pr/SKILL.md
     grep -q '^description: ' .agents/skills/review-worktree-issue-pr/SKILL.md

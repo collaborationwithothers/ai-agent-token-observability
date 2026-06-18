@@ -20,6 +20,7 @@ This skill refines the repo ready-for-agent issue workflow for infrastructure wo
 
 2. Create a compact issue-start packet.
    - Run `scripts/session-digest.sh ISSUE_NUMBER` or `scripts/issue-start.sh --compact ISSUE_NUMBER`.
+   - Use `scripts/issue-start.sh --minimal ISSUE_NUMBER` when selecting or resuming work and the full issue body is not needed yet.
    - If output is noisy, summarize only: issue metadata, acceptance criteria, current worktree, branch/status, diff stat, untracked files, acceptance matrix, and focused validation commands.
    - Do not paste full worktree lists when many stale worktrees exist. Report current worktree plus matching issue worktree only.
 
@@ -65,6 +66,7 @@ This skill refines the repo ready-for-agent issue workflow for infrastructure wo
 - Report command results as targeted evidence, not raw logs.
 - Cap noisy command output and rerun with narrower filters instead of increasing output.
 - Avoid broad `rg docs infrastructure` searches. Search specific docs or paths.
+- Use `scripts/workflow-digest.sh WORKFLOW.yml` before reading large workflow YAML files end to end.
 - Avoid full file reads when `rg -n` plus focused `sed -n` ranges are enough.
 - Avoid repeated reads of `CONTEXT.md`, architecture docs, and Terraform docs across main and subagents.
 
