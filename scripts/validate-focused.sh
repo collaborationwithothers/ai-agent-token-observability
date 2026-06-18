@@ -78,6 +78,7 @@ case "$profile" in
   terraform)
     check_comments_not_staged
     scripts/validate-terraform-foundation-acr.sh
+    scripts/validate-terraform-network-private-data-plane.sh
     scripts/validate-terraform-workflow-guardrails.sh
     scripts/validate-edge-origin-workflow.sh
     bash -n scripts/terraform-stage-deploy.sh

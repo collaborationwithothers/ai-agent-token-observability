@@ -95,3 +95,73 @@ variable "public_ingress_hostnames" {
   type        = map(string)
   default     = {}
 }
+
+variable "network_resource_group_name" {
+  description = "Optional explicit resource group name for private data plane network resources. When null, a deterministic stage name is used."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.network_resource_group_name == null || can(regex("^[A-Za-z0-9._() -]{1,90}$", var.network_resource_group_name))
+    error_message = "network_resource_group_name must be a valid Azure resource group name when supplied."
+  }
+}
+
+variable "virtual_network_name" {
+  description = "Optional explicit virtual network name. When null, a deterministic stage name is used."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.virtual_network_name == null || can(regex("^[A-Za-z0-9_.-]{2,64}$", var.virtual_network_name))
+    error_message = "virtual_network_name must be 2 to 64 valid Azure virtual network name characters when supplied."
+  }
+}
+
+variable "virtual_network_address_space" {
+  description = "Address space assigned to the private data plane virtual network."
+  type        = list(string)
+  default     = ["10.40.0.0/20"]
+
+  validation {
+    condition     = length(var.virtual_network_address_space) > 0 && alltrue([for prefix in var.virtual_network_address_space : can(cidrhost(prefix, 0))])
+    error_message = "virtual_network_address_space must contain at least one valid CIDR prefix."
+  }
+}
+
+variable "subnet_address_prefixes" {
+  description = "Stable address prefixes for downstream private data plane subnets."
+  type = object({
+    container_apps_infrastructure = string
+    private_endpoints             = string
+    postgresql_delegated          = string
+    reserved                      = string
+    shared_networking             = string
+  })
+  default = {
+    container_apps_infrastructure = "10.40.0.0/23"
+    private_endpoints             = "10.40.2.0/24"
+    postgresql_delegated          = "10.40.3.0/27"
+    reserved                      = "10.40.8.0/21"
+    shared_networking             = "10.40.4.0/24"
+  }
+
+  validation {
+    condition     = alltrue([for prefix in values(var.subnet_address_prefixes) : can(cidrhost(prefix, 0))])
+    error_message = "subnet_address_prefixes values must be valid CIDR prefixes."
+  }
+}
+
+variable "additional_private_dns_zones" {
+  description = "Additional private DNS zones owned by this stage, keyed by stable downstream contract key."
+  type = map(object({
+    domain_name = string
+    purpose     = optional(string, "Additional downstream private endpoint DNS zone.")
+  }))
+  default = {}
+
+  validation {
+    condition     = alltrue([for zone in values(var.additional_private_dns_zones) : can(regex("^[a-z0-9][a-z0-9.-]*[a-z0-9]$", zone.domain_name))])
+    error_message = "additional_private_dns_zones domain_name values must be valid lowercase DNS zone names."
+  }
+}
