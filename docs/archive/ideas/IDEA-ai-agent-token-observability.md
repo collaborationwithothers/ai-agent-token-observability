@@ -2,7 +2,7 @@
 
 Status: historical ideation. This document is not the Azure Production MVP implementation source of truth.
 
-The active production direction is defined by [Azure Production MVP PRD](../prd/azure-production-mvp.md), [Production Target State Spec](../specs/production-target-state.md), and [ADR 0002](../adr/0002-replace-local-first-with-azure-production-saas.md). Use this idea document only as background context for product concepts that survived the production pivot.
+The active production direction is defined by [Azure Production MVP PRD](../../prd/azure-production-mvp.md), [Production Target State Spec](../../specs/production-target-state.md), and [ADR 0002](../../adr/0002-replace-local-first-with-azure-production-saas.md). Use this idea document only as background context for product concepts that survived the production pivot.
 
 ## Working repo name
 

@@ -6,14 +6,14 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 usage() {
   cat <<'USAGE'
 Usage:
-  scripts/issue-start.sh [--compact] ISSUE_NUMBER
-  scripts/issue-start.sh [--compact] --no-issue
+  scripts/issue-start.sh [--compact|--minimal] ISSUE_NUMBER
+  scripts/issue-start.sh [--compact|--minimal] --no-issue
 
 Prints the required ready-for-agent Issue Start Packet.
 USAGE
 }
 
-compact=false
+mode="full"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   usage
@@ -21,7 +21,10 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 fi
 
 if [[ "${1:-}" == "--compact" ]]; then
-  compact=true
+  mode="compact"
+  shift
+elif [[ "${1:-}" == "--minimal" ]]; then
+  mode="minimal"
   shift
 fi
 
@@ -34,7 +37,7 @@ fi
 cd "$ROOT_DIR"
 
 print_worktrees() {
-  if [[ "$compact" == true ]]; then
+  if [[ "$mode" == "compact" || "$mode" == "minimal" ]]; then
     local current_worktree
     current_worktree="$(git rev-parse --show-toplevel)"
     local issue_pattern=""
@@ -84,9 +87,15 @@ if [[ "$issue_arg" != "--no-issue" ]]; then
   else
     echo "## GitHub Issue"
     echo
-    gh issue view "$issue_arg" \
-      --json number,title,state,labels,url,body \
-      --template '{{printf "- Number: #%v\n" .number}}{{printf "- Title: %s\n" .title}}{{printf "- State: %s\n" .state}}{{printf "- URL: %s\n" .url}}- Labels:{{range .labels}} {{.name}}{{end}}{{printf "\n\n### Body\n\n%s\n" .body}}'
+    if [[ "$mode" == "minimal" ]]; then
+      gh issue view "$issue_arg" \
+        --json number,title,state,labels,url \
+        --template '{{printf "- Number: #%v\n" .number}}{{printf "- Title: %s\n" .title}}{{printf "- State: %s\n" .state}}{{printf "- URL: %s\n" .url}}- Labels:{{range .labels}} {{.name}}{{end}}{{printf "\n"}}'
+    else
+      gh issue view "$issue_arg" \
+        --json number,title,state,labels,url,body \
+        --template '{{printf "- Number: #%v\n" .number}}{{printf "- Title: %s\n" .title}}{{printf "- State: %s\n" .state}}{{printf "- URL: %s\n" .url}}- Labels:{{range .labels}} {{.name}}{{end}}{{printf "\n\n### Body\n\n%s\n" .body}}'
+    fi
     echo
   fi
 else
@@ -100,6 +109,22 @@ echo "## Worktrees"
 echo
 print_worktrees
 echo
+
+if [[ "$mode" == "minimal" ]]; then
+  cat <<'MINIMAL'
+## Focused Validation Plan
+
+Choose the smallest profile that covers the changed surface:
+
+- `scripts/validate-focused.sh ingestion`
+- `scripts/validate-focused.sh api`
+- `scripts/validate-focused.sh dashboard`
+- `scripts/validate-focused.sh terraform`
+- `scripts/validate-focused.sh docs`
+- `scripts/validate-focused.sh all`
+MINIMAL
+  exit 0
+fi
 
 echo "## Status"
 echo

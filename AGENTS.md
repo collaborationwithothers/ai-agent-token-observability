@@ -73,7 +73,7 @@ Before code changes or Code Reviewer, produce an Issue Start Packet:
 - Acceptance matrix: criterion, implementation file, test evidence, and docs or schema evidence.
 - Focused validation commands for the changed surface.
 
-Use `scripts/session-digest.sh ISSUE_NUMBER` or `scripts/issue-start.sh --compact ISSUE_NUMBER` when an issue number is known. If full issue-start output is needed, summarize noisy sections instead of pasting the whole output.
+Use `scripts/session-digest.sh ISSUE_NUMBER` or `scripts/issue-start.sh --compact ISSUE_NUMBER` when an issue number is known. Use `scripts/issue-start.sh --minimal ISSUE_NUMBER` for issue selection or resume checks when the full issue body is not needed yet. If full issue-start output is needed, summarize noisy sections instead of pasting the whole output.
 
 ## Subagents
 
