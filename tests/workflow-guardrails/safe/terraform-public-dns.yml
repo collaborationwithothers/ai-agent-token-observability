@@ -20,7 +20,8 @@ on:
         options:
           - eastus2
       customer_organization_slug:
-        required: true
+        required: false
+        default: internal
         type: string
 
 permissions:

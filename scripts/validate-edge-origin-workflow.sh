@@ -37,15 +37,36 @@ required_fragments = {
     "pp pd bypass enforcement": 'case "${ENVIRONMENT}" in pp|pd)',
 }
 
+forbidden_fragments = {
+    "terraform workspace dispatch input": "terraform_workspace:",
+    "confirmation dispatch input": "confirmation:",
+    "requested workspace validation": "REQUESTED_TERRAFORM_WORKSPACE",
+    "confirmation validation": "CONFIRMATION",
+    "terraform workspace input reference": "inputs.terraform_workspace",
+    "confirmation input reference": "inputs.confirmation",
+}
+
 missing = [
     name
     for name, fragment in required_fragments.items()
     if fragment not in content
 ]
 
+forbidden = [
+    name
+    for name, fragment in forbidden_fragments.items()
+    if fragment in content
+]
+
 if missing:
     print("Edge origin validation workflow is missing required coverage:")
     for name in missing:
+        print(f"  - {name}")
+    sys.exit(1)
+
+if forbidden:
+    print("Edge origin validation workflow contains forbidden manual workspace or confirmation inputs:")
+    for name in forbidden:
         print(f"  - {name}")
     sys.exit(1)
 

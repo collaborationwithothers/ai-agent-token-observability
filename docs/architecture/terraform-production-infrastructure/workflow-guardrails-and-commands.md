@@ -27,9 +27,8 @@ Required normal deploy workflow inputs:
 
 - `environment`
 - `azure_region`
-- `customer_organization_slug`
+- optional `customer_organization_slug`, defaulting to `internal`
 - optional `terraform_stage`
-- `confirmation`
 
 Required validations before Azure login:
 
@@ -43,9 +42,10 @@ Required validations before Azure login:
 - If supplied, `terraform_stage` is in the allow-list of normal deploy stage directories.
 - `public_dns` is not accepted by the normal deploy workflow because it is retained shared DNS infrastructure owned from `pd_eastus2_internal`.
 - Derived workspace equals `{environment}_{azureRegion}_{customerOrganizationSlug}`.
-- `confirmation` exactly matches `deploy {workspace}` for an all-stage deploy or `deploy {stage} {workspace}` for a single-stage deploy.
+- The workflow publishes the derived workspace as an internal job output for downstream plan and apply jobs.
+- The workflow does not require a manual confirmation phrase because the workspace is derived from validated inputs and apply jobs still require protected environment approval.
 
-The retained public DNS workflow is the only Terraform apply exception to the `confirmation` input requirement. It is not a normal deployment workflow. Its replacement controls are a fixed `public_dns` stage, the single owner workspace `pd_eastus2_internal`, repository, actor, branch, `pd`, `eastus2`, and `internal` gates, same-run saved plan artifact apply, the protected `terraform-public-dns-apply` GitHub environment, Cloudflare delegation output only, and public NS verification before edge deployment depends on the delegated zone.
+The retained public DNS workflow is not a normal deployment workflow. Its controls are a fixed `public_dns` stage, the single owner workspace `pd_eastus2_internal`, repository, actor, branch, `pd`, `eastus2`, and `internal` gates, same-run saved plan artifact apply, the protected `terraform-public-dns-apply` GitHub environment, Cloudflare delegation output only, and public NS verification before edge deployment depends on the delegated zone.
 
 Required GitHub permissions:
 
@@ -74,8 +74,9 @@ Guardrail validator:
 
 - A committed validator must inspect `.github/workflows/*.yml`.
 - The validator must fail if an Azure-changing workflow has forbidden triggers.
-- The validator must fail if a normal Azure-changing workflow lacks repository, actor, environment, region, workspace, branch, OIDC, permissions, and confirmation checks.
-- The validator must fail if the retained public DNS workflow lacks its documented replacement controls for the confirmation exception.
+- The validator must fail if a normal Azure-changing workflow lacks repository, actor, environment, region, derived workspace, branch, OIDC, permissions, and protected environment checks.
+- The validator must fail if the normal deploy or related operational workflows reintroduce manual workspace or confirmation dispatch inputs.
+- The validator must fail if the retained public DNS workflow lacks its documented retained-stage controls.
 - The validator must fail if `terraform apply -auto-approve` appears in deployment-capable workflows.
 - The validator must fail if the normal Terraform deploy workflow can apply without the `terraform-apply` environment, without downloading the saved plan artifact, or with `public_dns` in normal target stages.
 - The validator must fail if the retained public DNS workflow can target non-`pd_eastus2_internal` scope, manage Cloudflare API/provider state, handle certificate material, omit public NS verification, or plan a public DNS destroy.

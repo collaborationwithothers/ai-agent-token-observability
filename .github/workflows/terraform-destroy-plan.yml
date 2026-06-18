@@ -21,8 +21,9 @@ on:
           - eastus2
           - westeurope
       customer_organization_slug:
-        description: Customer organization slug. Use internal for first release.
-        required: true
+        description: Customer organization slug. Defaults to internal; override when needed.
+        required: false
+        default: internal
         type: string
       deletion_target:
         description: Environment deletes all disposable stages. Otherwise, select one disposable stage.

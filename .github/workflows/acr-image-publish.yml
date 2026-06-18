@@ -25,16 +25,9 @@ on:
           - eastus2
           - westeurope
       customer_organization_slug:
-        description: Customer organization slug. Use internal for first release.
-        required: true
-        type: string
-      terraform_workspace:
-        description: Expected workspace, formatted as environment_region_customerSlug.
-        required: true
-        type: string
-      confirmation:
-        description: Type publish images workspace, for example publish images dv_eastus2_internal.
-        required: true
+        description: Customer organization slug. Defaults to internal; override when needed.
+        required: false
+        default: internal
         type: string
 
 permissions:
@@ -58,14 +51,13 @@ jobs:
     environment: ${{ inputs.environment }}
     steps:
       - name: Validate guardrails before privileged steps
+        id: guardrails
         env:
           REQUIRED_REPOSITORY: collaborationwithothers/ai-agent-token-observability
           EXPECTED_REPOSITORY: ${{ inputs.expected_repository }}
           ENVIRONMENT: ${{ inputs.environment }}
           AZURE_REGION: ${{ inputs.azure_region }}
           CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
-          REQUESTED_TERRAFORM_WORKSPACE: ${{ inputs.terraform_workspace }}
-          CONFIRMATION: ${{ inputs.confirmation }}
         run: |
           set -euo pipefail
 
@@ -80,8 +72,7 @@ jobs:
           case "${CUSTOMER_ORGANIZATION_SLUG}" in *[!a-z0-9-]*|""|-*|*-) exit 1 ;; esac
           TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
           test "${TF_WORKSPACE}" != "default"
-          test "${REQUESTED_TERRAFORM_WORKSPACE}" = "${TF_WORKSPACE}"
-          test "${CONFIRMATION}" = "publish images ${TF_WORKSPACE}"
+          echo "terraform_workspace=${TF_WORKSPACE}" >> "${GITHUB_OUTPUT}"
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -102,7 +93,7 @@ jobs:
       - name: Resolve foundation ACR login server
         id: resolve-acr
         env:
-          TF_WORKSPACE: ${{ inputs.terraform_workspace }}
+          TF_WORKSPACE: ${{ steps.guardrails.outputs.terraform_workspace }}
         run: |
           set -euo pipefail
 
@@ -214,6 +205,6 @@ jobs:
       - name: Upload image digest artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-runtime-image-digests-${{ inputs.terraform_workspace }}-${{ github.sha }}
+          name: app-runtime-image-digests-${{ steps.guardrails.outputs.terraform_workspace }}-${{ github.sha }}
           path: image-digests/app-runtime-images.auto.tfvars.json
           if-no-files-found: error

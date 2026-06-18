@@ -21,16 +21,13 @@ on:
           - eastus2
           - westeurope
       customer_organization_slug:
-        description: Customer organization slug. Use internal for first release.
-        required: true
+        description: Customer organization slug. Defaults to internal; override when needed.
+        required: false
+        default: internal
         type: string
       terraform_stage:
         description: Optional Terraform stage. Leave blank to deploy all environment-scoped stages.
         required: false
-        type: string
-      confirmation:
-        description: Type deploy WORKSPACE for all stages or deploy STAGE WORKSPACE for one stage.
-        required: true
         type: string
 
 permissions:
@@ -70,7 +67,6 @@ jobs:
           AZURE_REGION: ${{ inputs.azure_region }}
           CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
           TERRAFORM_STAGE_INPUT: ${{ inputs.terraform_stage }}
-          CONFIRMATION: ${{ inputs.confirmation }}
         run: |
           set -euo pipefail
 
@@ -92,7 +88,6 @@ jobs:
           TERRAFORM_STAGE="$(printf '%s' "${TERRAFORM_STAGE_INPUT}" | tr -d '[:space:]')"
           if [[ -z "${TERRAFORM_STAGE}" ]]; then
             DEPLOYMENT_SCOPE="environment"
-            EXPECTED_CONFIRMATION="deploy ${TF_WORKSPACE}"
             DEPLOY_FOUNDATION=true
             DEPLOY_NETWORK_PRIVATE_DATA_PLANE=true
             DEPLOY_OBSERVABILITY_FOUNDATION=true
@@ -114,7 +109,6 @@ jobs:
                 ;;
             esac
             DEPLOYMENT_SCOPE="stage"
-            EXPECTED_CONFIRMATION="deploy ${TERRAFORM_STAGE} ${TF_WORKSPACE}"
             DEPLOY_FOUNDATION=false
             DEPLOY_NETWORK_PRIVATE_DATA_PLANE=false
             DEPLOY_OBSERVABILITY_FOUNDATION=false
@@ -134,8 +128,6 @@ jobs:
               edge) DEPLOY_EDGE=true ;;
             esac
           fi
-
-          test "${CONFIRMATION}" = "${EXPECTED_CONFIRMATION}"
 
           {
             echo "deployment_scope=${DEPLOYMENT_SCOPE}"

@@ -23,8 +23,9 @@ on:
         options:
           - eastus2
       customer_organization_slug:
-        description: Retained public DNS customer organization slug. Use internal.
-        required: true
+        description: Retained public DNS customer organization slug. Defaults to internal.
+        required: false
+        default: internal
         type: string
 permissions:
   contents: read
