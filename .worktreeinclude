@@ -1,0 +1,2 @@
+# No ignored local files are required for Codex-managed worktrees.
+# Add explicit non-secret local setup files here only when future workflows need them.

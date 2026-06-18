@@ -133,12 +133,12 @@ These docs are still useful but must not drive production MVP implementation iss
 
 | Document | Status |
 | --- | --- |
-| [Local-First MVP PRD](../prd/local-first-mvp.md) | Superseded |
-| [ADR 0001](../adr/0001-use-dotnet-aspire-and-blazor-for-local-first-mvp.md) | Superseded |
-| [Copilot OTel Field Mapping](./copilot-otel-field-mapping.md) | Historical Phase 0 reference for future Copilot adapter work |
+| [Local-First MVP PRD](../archive/local-first/local-first-mvp.md) | Superseded |
+| [ADR 0001](../archive/local-first/0001-use-dotnet-aspire-and-blazor-for-local-first-mvp.md) | Superseded |
+| [Copilot OTel Field Mapping](../archive/future-adapters/copilot-otel-field-mapping.md) | Historical Phase 0 reference for future Copilot adapter work |
 | [Idea: AI Agent Token Burn Observatory](../ideas/IDEA-ai-agent-token-observability.md) | Historical ideation background only |
-| [Spec Kit Spec-Bloat Scenario](../scenarios/spec-kit-spec-bloat.md) | Historical scenario background only |
-| [Manual Spec Kit Spec-Bloat Demo Runbook](../demos/manual-spec-kit-spec-bloat.md) | Historical demo background only |
+| [Spec Kit Spec-Bloat Scenario](../archive/demos/spec-kit-spec-bloat.md) | Historical scenario background only |
+| [Manual Spec Kit Spec-Bloat Demo Runbook](../archive/demos/manual-spec-kit-spec-bloat.md) | Historical demo background only |
 
 ## Issue Creation Recommendation
 

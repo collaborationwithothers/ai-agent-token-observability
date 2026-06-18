@@ -2,17 +2,17 @@
 
 Status: historical demo runbook. This document is not part of the Azure Production MVP implementation contract.
 
-The active production implementation scope is defined by [Azure Production MVP PRD](../prd/azure-production-mvp.md), [Production Target State Spec](../specs/production-target-state.md), and [Production Implementation Roadmap](../planning/production-implementation-roadmap.md). This runbook remains background material for a future demonstration scenario only.
+The active production implementation scope is defined by [Azure Production MVP PRD](../../prd/azure-production-mvp.md), [Production Target State Spec](../../specs/production-target-state.md), and [Production Implementation Roadmap](../../planning/production-implementation-roadmap.md). This runbook remains background material for a future demonstration scenario only.
 
 ## Purpose
 
 Run the live presentation flow for the Spec Kit spec-bloat scenario.
 
-Scenario details live in `docs/scenarios/spec-kit-spec-bloat.md`. This runbook only describes the manual presentation path.
+Scenario details live in `docs/archive/demos/spec-kit-spec-bloat.md`. This runbook only describes the manual presentation path.
 
 ## Preconditions
 
-* The presenter uses the scenario target from `docs/scenarios/spec-kit-spec-bloat.md`.
+* The presenter uses the scenario target from `docs/archive/demos/spec-kit-spec-bloat.md`.
 * Telemetry capture is ready before the live Copilot session starts.
 * The observability app can import the captured Copilot telemetry.
 * Repo Context Enrichment can run against the same repository used during the live session.
@@ -31,6 +31,6 @@ Scenario details live in `docs/scenarios/spec-kit-spec-bloat.md`. This runbook o
 
 ## Boundary
 
-This runbook is for presentation only. It does not define fixture requirements or product behavior beyond the scenario documented in `docs/scenarios/spec-kit-spec-bloat.md`.
+This runbook is for presentation only. It does not define fixture requirements or product behavior beyond the scenario documented in `docs/archive/demos/spec-kit-spec-bloat.md`.
 
 Once implementation exists, MVP acceptance requires this runbook to be executable end to end against the implemented app.
