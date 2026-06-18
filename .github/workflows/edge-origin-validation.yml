@@ -25,16 +25,9 @@ on:
           - eastus2
           - westeurope
       customer_organization_slug:
-        description: Customer organization slug. Use internal for first release.
-        required: true
-        type: string
-      terraform_workspace:
-        description: Expected workspace, formatted as environment_region_customerSlug.
-        required: true
-        type: string
-      confirmation:
-        description: Type validate-edge-origin workspace, for example validate-edge-origin dv_eastus2_internal.
-        required: true
+        description: Customer organization slug. Defaults to internal; override when needed.
+        required: false
+        default: internal
         type: string
 
 permissions:
@@ -70,8 +63,6 @@ jobs:
           ENVIRONMENT: ${{ inputs.environment }}
           AZURE_REGION: ${{ inputs.azure_region }}
           CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
-          REQUESTED_TERRAFORM_WORKSPACE: ${{ inputs.terraform_workspace }}
-          CONFIRMATION: ${{ inputs.confirmation }}
         run: |
           set -euo pipefail
 
@@ -87,8 +78,6 @@ jobs:
 
           TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
           test "${TF_WORKSPACE}" != "default"
-          test "${REQUESTED_TERRAFORM_WORKSPACE}" = "${TF_WORKSPACE}"
-          test "${CONFIRMATION}" = "validate-edge-origin ${TF_WORKSPACE}"
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -303,8 +292,6 @@ jobs:
           ENVIRONMENT: ${{ inputs.environment }}
           AZURE_REGION: ${{ inputs.azure_region }}
           CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
-          REQUESTED_TERRAFORM_WORKSPACE: ${{ inputs.terraform_workspace }}
-          CONFIRMATION: ${{ inputs.confirmation }}
         run: |
           set -euo pipefail
 
@@ -320,8 +307,6 @@ jobs:
 
           TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
           test "${TF_WORKSPACE}" != "default"
-          test "${REQUESTED_TERRAFORM_WORKSPACE}" = "${TF_WORKSPACE}"
-          test "${CONFIRMATION}" = "validate-edge-origin ${TF_WORKSPACE}"
 
       - name: Probe direct ACA origins from public runner
         env:

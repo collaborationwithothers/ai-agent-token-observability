@@ -91,6 +91,7 @@ REQUIRED_PATTERNS = {
     "environment gate": r"dv\|qa\|pp\|pd|dv.*qa.*pp.*pd",
     "region gate": r"eastus\|eastus2\|westeurope|eastus.*eastus2.*westeurope",
     "customer organization slug gate": r"CUSTOMER_ORGANIZATION_SLUG|customer_organization_slug",
+    "customer organization slug default": r"customer_organization_slug\s*:.*?default\s*:\s*internal",
     "workspace derivation": r"TF_WORKSPACE=.*ENVIRONMENT.*AZURE_REGION.*CUSTOMER_ORGANIZATION_SLUG",
     "default workspace denial": r"TF_WORKSPACE.*default|default.*TF_WORKSPACE",
     "environment protection": r"(?m)^\s*environment\s*:",
@@ -284,6 +285,21 @@ def image_publish_required_errors(content: str) -> list[str]:
         errors.append("ACR image publish workflow must not reference GHCR")
     if re.search(r"(?m)^\s*acr_login_server\s*:", content):
         errors.append("ACR image publish workflow must not expose acr_login_server as a dispatch input")
+    dispatch_inputs = dispatch_input_names(content)
+    if "terraform_workspace" in dispatch_inputs:
+        errors.append("ACR image publish workflow must not expose terraform_workspace as a dispatch input")
+    if "confirmation" in dispatch_inputs:
+        errors.append("ACR image publish workflow must not expose confirmation as a dispatch input")
+    for reference in (
+        "REQUESTED_TERRAFORM_WORKSPACE",
+        "inputs.terraform_workspace",
+        "CONFIRMATION",
+        "inputs.confirmation",
+    ):
+        if reference in content:
+            errors.append(f"ACR image publish workflow must not reference {reference}")
+    if re.search(r"terraform_workspace\s*=\s*.*TF_WORKSPACE|terraform_workspace.*GITHUB_OUTPUT|GITHUB_OUTPUT.*terraform_workspace", content, re.IGNORECASE) is None:
+        errors.append("ACR image publish workflow must publish the derived workspace as a step output")
 
     azure_login_line = first_line(content, "azure/login")
     foundation_output_line = first_line(content, "container_registry_login_server")
@@ -325,10 +341,14 @@ def terraform_plan_required_errors(content: str) -> list[str]:
     dispatch_inputs = dispatch_input_names(content)
     if "terraform_workspace" in dispatch_inputs:
         errors.append("Terraform plan workflow must not expose terraform_workspace as a dispatch input")
+    if "confirmation" in dispatch_inputs:
+        errors.append("Terraform plan workflow must not expose confirmation as a dispatch input")
     if "REQUESTED_TERRAFORM_WORKSPACE" in content:
         errors.append("Terraform plan workflow must not validate a user-entered Terraform workspace")
     if "inputs.terraform_workspace" in content:
         errors.append("Terraform plan workflow must not read inputs.terraform_workspace")
+    if "CONFIRMATION" in content or "inputs.confirmation" in content:
+        errors.append("Terraform plan workflow must not require a user-entered confirmation")
     if re.search(r"terraform_workspace\s*=\s*.*TF_WORKSPACE|terraform_workspace.*GITHUB_OUTPUT|GITHUB_OUTPUT.*terraform_workspace", content, re.IGNORECASE) is None:
         errors.append("Terraform plan workflow must publish the derived workspace as a step output")
     required_patterns = {

@@ -19,7 +19,8 @@ on:
           - eastus2
           - westeurope
       customer_organization_slug:
-        required: true
+        required: false
+        default: internal
         type: string
       deletion_target:
         required: true

@@ -198,11 +198,7 @@ Implemented workflow:
 .github/workflows/edge-origin-validation.yml
 ```
 
-Required confirmation phrase:
-
-```text
-validate-edge-origin {environment}_{azureRegion}_{customerOrganizationSlug}
-```
+The workflow derives the Terraform workspace from `environment`, `azure_region`, and `customer_organization_slug`. The customer organization slug defaults to `internal` and can be overridden when validating a different customer scope.
 
 The workflow reads the `app_runtime` and `edge` Terraform state outputs on the managed Azure runner, validates the public Front Door hostname and authentication callback contract, probes the public Front Door hostnames, and exports only sanitized generated ACA origin URLs to a separate GitHub-hosted runner job. That public runner job has no Azure login and proves generated ACA FQDNs are not reachable from a public-internet perspective. Workflow summaries must contain only sanitized status evidence.
 
