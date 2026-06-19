@@ -1,0 +1,42 @@
+name: Unsafe Terraform Deploy Fixture
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: string
+      azure_region:
+        required: true
+        type: string
+      customer_organization_slug:
+        required: false
+        default: internal
+        type: string
+      artifact_name:
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+jobs:
+  plan:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'collaborationwithothers/ai-agent-token-observability' && github.actor == 'haripraghash' && github.ref == 'refs/heads/main' }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    environment: terraform-apply
+    steps:
+      - name: Validate guardrails before privileged steps
+        run: |
+          test "${GITHUB_REPOSITORY}" = "collaborationwithothers/ai-agent-token-observability"
+          test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
+          test "${GITHUB_ACTOR}" = "haripraghash"
+          test "${GITHUB_REF}" = "refs/heads/main"
+          TF_WORKSPACE="${{ inputs.environment }}_${{ inputs.azure_region }}_${{ inputs.customer_organization_slug }}"
+          test "${TF_WORKSPACE}" != "default"
+      - uses: azure/login@v2
+      - run: terraform -chdir=infrastructure/azure/stages/app_runtime plan -input=false

@@ -166,6 +166,41 @@ def terraform_stage_deploy_helper_errors() -> list[str]:
             match.group("body"),
         ) is None:
             errors.append(f"{function_name} must redirect init_stage output to stderr")
+    if "APP_RUNTIME_IMAGES_TFVARS_PATH" not in content:
+        errors.append("terraform-stage-deploy helper must require APP_RUNTIME_IMAGES_TFVARS_PATH for app_runtime")
+    if re.search(r"app_runtime\).*?-var-file=\$\{APP_RUNTIME_IMAGES_TFVARS_PATH\}", content, re.DOTALL) is None:
+        errors.append("terraform-stage-deploy helper must pass APP_RUNTIME_IMAGES_TFVARS_PATH as an app_runtime var-file")
+    return errors
+
+
+def app_runtime_image_variable_errors() -> list[str]:
+    variables_path = pathlib.Path(os.environ["VALIDATOR_ROOT_DIR"]) / "infrastructure/azure/stages/app_runtime/variables.tf"
+    if not variables_path.exists():
+        return [f"missing app_runtime variables file: {variables_path}"]
+
+    content = variables_path.read_text(encoding="utf-8")
+    errors: list[str] = []
+    if "example.azurecr.io" in content:
+        errors.append("app_runtime image variables must not default to example.azurecr.io placeholders")
+    for variable_name, repository in {
+        "dashboard_image": "product-dashboard",
+        "product_api_image": "product-api",
+        "product_ingestion_image": "product-ingestion",
+        "shared_jobs_image": "product-jobs",
+    }.items():
+        match = re.search(
+            rf'variable\s+"{variable_name}"\s+\{{(?P<body>.*?)(?=^}})',
+            content,
+            re.MULTILINE | re.DOTALL,
+        )
+        if match is None:
+            errors.append(f"missing app_runtime image variable: {variable_name}")
+            continue
+        body = match.group("body")
+        if re.search(r"(?m)^\s*default\s*=", body):
+            errors.append(f"{variable_name} must not have a default image")
+        if repository not in body or "@sha256:" not in body:
+            errors.append(f"{variable_name} must validate digest-pinned ACR image repository {repository}")
     return errors
 
 
@@ -368,19 +403,45 @@ def terraform_plan_required_errors(content: str) -> list[str]:
         errors.append("Terraform plan workflow must not expose terraform_workspace as a dispatch input")
     if "confirmation" in dispatch_inputs:
         errors.append("Terraform plan workflow must not expose confirmation as a dispatch input")
+    for input_name in ("artifact_name", "app_runtime_image_artifact_name", "image_digest_artifact_name"):
+        if input_name in dispatch_inputs:
+            errors.append(f"Terraform plan workflow must not expose {input_name} as a dispatch input")
     if "REQUESTED_TERRAFORM_WORKSPACE" in content:
         errors.append("Terraform plan workflow must not validate a user-entered Terraform workspace")
     if "inputs.terraform_workspace" in content:
         errors.append("Terraform plan workflow must not read inputs.terraform_workspace")
     if "CONFIRMATION" in content or "inputs.confirmation" in content:
         errors.append("Terraform plan workflow must not require a user-entered confirmation")
+    if "example.azurecr.io" in content:
+        errors.append("Terraform plan workflow must not pass example.azurecr.io placeholder images")
+    if re.search(r":latest\b|latest\s*\"", content):
+        errors.append("Terraform plan workflow must not use mutable latest image references")
     if re.search(r"terraform_workspace\s*=\s*.*TF_WORKSPACE|terraform_workspace.*GITHUB_OUTPUT|GITHUB_OUTPUT.*terraform_workspace", content, re.IGNORECASE) is None:
         errors.append("Terraform plan workflow must publish the derived workspace as a step output")
     required_patterns = {
+        "GitHub Actions read permission": r"(?m)^\s*actions\s*:\s*read\s*$",
         "environment-scoped stage order": r"ENVIRONMENT_STAGE_ORDER=.*foundation.*network_private_data_plane.*observability_foundation.*data_platform.*ai_services.*app_runtime.*managed_grafana.*edge",
         "public DNS exclusion": r"public_dns.*retained shared DNS infrastructure|retained public_dns stage is excluded|EXCLUDED_SHARED_STAGES=.*public_dns",
         "derived deployment scope": r"deployment_scope.*GITHUB_OUTPUT|GITHUB_OUTPUT.*deployment_scope|deployment_scope\s*=\s*.*DEPLOYMENT_SCOPE",
         "derived stage selection": r"deploy_foundation.*GITHUB_OUTPUT|GITHUB_OUTPUT.*deploy_foundation|deploy_foundation\s*=\s*.*DEPLOY_FOUNDATION",
+        "ACR publish run dispatch input": r"acr_publish_run_id\s*:",
+        "ACR publish commit dispatch input": r"acr_publish_commit_sha\s*:",
+        "ACR publish run output": r"acr_publish_run_id.*GITHUB_OUTPUT|GITHUB_OUTPUT.*acr_publish_run_id|acr_publish_run_id\s*=\s*.*ACR_PUBLISH_RUN_ID",
+        "ACR publish commit output": r"acr_publish_commit_sha.*GITHUB_OUTPUT|GITHUB_OUTPUT.*acr_publish_commit_sha|acr_publish_commit_sha\s*=\s*.*ACR_PUBLISH_COMMIT_SHA",
+        "derived app runtime image artifact": r"app-runtime-image-digests-\$\{TF_WORKSPACE\}-\$\{ACR_PUBLISH_COMMIT_SHA\}|APP_RUNTIME_IMAGE_ARTIFACT_NAME=.*app-runtime-image-digests",
+        "ACR publish workflow validation": r"workflowName.*ACR Image Publish|ACR Image Publish.*workflowName",
+        "ACR publish run branch validation": r"headBranch.*main|main.*headBranch",
+        "ACR publish run commit validation": r"headSha.*ACR_PUBLISH_COMMIT_SHA|ACR_PUBLISH_COMMIT_SHA.*headSha",
+        "ACR publish run success validation": r"conclusion.*success|success.*conclusion",
+        "ACR publish run event validation": r"event.*workflow_dispatch|workflow_dispatch.*event",
+        "ACR image artifact lookup": r"actions/runs/.*/artifacts|APP_RUNTIME_IMAGE_ARTIFACT_NAME.*artifacts|artifacts.*APP_RUNTIME_IMAGE_ARTIFACT_NAME",
+        "ACR image artifact download": r"gh\s+run\s+download.*ACR_PUBLISH_RUN_ID|gh\s+run\s+download",
+        "pre-Azure app runtime image validation job": r"validate-app-runtime-images",
+        "plan jobs depend on app runtime image validation": r"needs:\s*\[\s*select\s*,\s*validate-app-runtime-images",
+        "plan jobs gate on app runtime image validation": r"needs\.validate-app-runtime-images\.result\s*==\s*'success'",
+        "verified same-run app runtime image artifact": r"verified-\$\{\{\s*needs\.select\.outputs\.app_runtime_image_artifact_name\s*\}\}",
+        "app runtime image tfvars validation": r"app-runtime-images\.auto\.tfvars\.json",
+        "app runtime image tfvars environment": r"APP_RUNTIME_IMAGES_TFVARS_PATH",
         "stage plan script": r"terraform-stage-deploy\.sh\s+plan",
         "plan artifact upload": r"actions/upload-artifact",
         "same-run plan dependency": r"needs\s*:\s*\[\s*select\s*,\s*plan|needs\s*:\s*plan-",
@@ -469,6 +530,8 @@ def validate_file(path: pathlib.Path) -> list[str]:
     errors.extend(required_gate_errors(content))
     if is_terraform_plan_workflow(path, content):
         errors.extend(terraform_plan_required_errors(content))
+        errors.extend(terraform_stage_deploy_helper_errors())
+        errors.extend(app_runtime_image_variable_errors())
     if is_public_dns_workflow(path, content):
         errors.extend(public_dns_required_errors(content))
     if is_destroy_capable(content):

@@ -29,8 +29,17 @@ on:
         description: Optional Terraform stage. Leave blank to deploy all environment-scoped stages.
         required: false
         type: string
+      acr_publish_run_id:
+        description: Required when app_runtime is selected. Successful ACR Image Publish workflow run ID.
+        required: false
+        type: string
+      acr_publish_commit_sha:
+        description: Required when app_runtime is selected. Commit SHA from the selected ACR Image Publish run.
+        required: false
+        type: string
 
 permissions:
+  actions: read
   contents: read
   id-token: write
 
@@ -56,6 +65,9 @@ jobs:
       deploy_data_platform: ${{ steps.guardrails.outputs.deploy_data_platform }}
       deploy_ai_services: ${{ steps.guardrails.outputs.deploy_ai_services }}
       deploy_app_runtime: ${{ steps.guardrails.outputs.deploy_app_runtime }}
+      acr_publish_run_id: ${{ steps.guardrails.outputs.acr_publish_run_id }}
+      acr_publish_commit_sha: ${{ steps.guardrails.outputs.acr_publish_commit_sha }}
+      app_runtime_image_artifact_name: ${{ steps.guardrails.outputs.app_runtime_image_artifact_name }}
       deploy_managed_grafana: ${{ steps.guardrails.outputs.deploy_managed_grafana }}
       deploy_edge: ${{ steps.guardrails.outputs.deploy_edge }}
     steps:
@@ -67,6 +79,8 @@ jobs:
           AZURE_REGION: ${{ inputs.azure_region }}
           CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
           TERRAFORM_STAGE_INPUT: ${{ inputs.terraform_stage }}
+          ACR_PUBLISH_RUN_ID_INPUT: ${{ inputs.acr_publish_run_id }}
+          ACR_PUBLISH_COMMIT_SHA_INPUT: ${{ inputs.acr_publish_commit_sha }}
         run: |
           set -euo pipefail
 
@@ -129,6 +143,18 @@ jobs:
             esac
           fi
 
+          ACR_PUBLISH_RUN_ID="$(printf '%s' "${ACR_PUBLISH_RUN_ID_INPUT}" | tr -d '[:space:]')"
+          ACR_PUBLISH_COMMIT_SHA="$(printf '%s' "${ACR_PUBLISH_COMMIT_SHA_INPUT}" | tr -d '[:space:]')"
+          APP_RUNTIME_IMAGE_ARTIFACT_NAME=""
+          if [[ "${DEPLOY_APP_RUNTIME}" == "true" ]]; then
+            case "${ACR_PUBLISH_RUN_ID}" in ''|*[!0-9]*) echo "app_runtime deploys require numeric acr_publish_run_id." >&2; exit 1 ;; esac
+            case "${ACR_PUBLISH_COMMIT_SHA}" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) echo "app_runtime deploys require a 40-character lowercase acr_publish_commit_sha." >&2; exit 1 ;; esac
+            APP_RUNTIME_IMAGE_ARTIFACT_NAME="app-runtime-image-digests-${TF_WORKSPACE}-${ACR_PUBLISH_COMMIT_SHA}"
+          elif [[ -n "${ACR_PUBLISH_RUN_ID}${ACR_PUBLISH_COMMIT_SHA}" ]]; then
+            echo "ACR publish run inputs are accepted only when app_runtime is selected." >&2
+            exit 1
+          fi
+
           {
             echo "deployment_scope=${DEPLOYMENT_SCOPE}"
             echo "terraform_workspace=${TF_WORKSPACE}"
@@ -138,6 +164,9 @@ jobs:
             echo "deploy_data_platform=${DEPLOY_DATA_PLATFORM}"
             echo "deploy_ai_services=${DEPLOY_AI_SERVICES}"
             echo "deploy_app_runtime=${DEPLOY_APP_RUNTIME}"
+            echo "acr_publish_run_id=${ACR_PUBLISH_RUN_ID}"
+            echo "acr_publish_commit_sha=${ACR_PUBLISH_COMMIT_SHA}"
+            echo "app_runtime_image_artifact_name=${APP_RUNTIME_IMAGE_ARTIFACT_NAME}"
             echo "deploy_managed_grafana=${DEPLOY_MANAGED_GRAFANA}"
             echo "deploy_edge=${DEPLOY_EDGE}"
           } >> "${GITHUB_OUTPUT}"
@@ -149,12 +178,99 @@ jobs:
             echo "Deployment scope: ${DEPLOYMENT_SCOPE}"
             echo "Environment stage order: ${ENVIRONMENT_STAGE_ORDER}"
             echo "Excluded shared stages: ${EXCLUDED_SHARED_STAGES}"
+            if [[ "${DEPLOY_APP_RUNTIME}" == "true" ]]; then
+              echo "ACR image publish run: ${ACR_PUBLISH_RUN_ID}"
+              echo "ACR image publish commit: ${ACR_PUBLISH_COMMIT_SHA}"
+              echo "App runtime image artifact: ${APP_RUNTIME_IMAGE_ARTIFACT_NAME}"
+            fi
           } >> "${GITHUB_STEP_SUMMARY}"
+
+  validate-app-runtime-images:
+    name: Validate app runtime image digest artifact
+    needs: select
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    steps:
+      - name: Validate selected ACR image publish run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOY_APP_RUNTIME: ${{ needs.select.outputs.deploy_app_runtime }}
+          ACR_PUBLISH_RUN_ID: ${{ needs.select.outputs.acr_publish_run_id }}
+          ACR_PUBLISH_COMMIT_SHA: ${{ needs.select.outputs.acr_publish_commit_sha }}
+          APP_RUNTIME_IMAGE_ARTIFACT_NAME: ${{ needs.select.outputs.app_runtime_image_artifact_name }}
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${DEPLOY_APP_RUNTIME}" != "true" ]]; then
+            echo "app_runtime not selected; no ACR image digest artifact required." >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+
+          RUN_JSON="$(gh run view "${ACR_PUBLISH_RUN_ID}" --repo "${GITHUB_REPOSITORY}" --json databaseId,workflowName,headBranch,headSha,conclusion,status,event,url)"
+          test "$(jq -r '.databaseId' <<<"${RUN_JSON}")" = "${ACR_PUBLISH_RUN_ID}"
+          test "$(jq -r '.workflowName' <<<"${RUN_JSON}")" = "ACR Image Publish"
+          test "$(jq -r '.headBranch' <<<"${RUN_JSON}")" = "main"
+          test "$(jq -r '.headSha' <<<"${RUN_JSON}")" = "${ACR_PUBLISH_COMMIT_SHA}"
+          test "$(jq -r '.conclusion' <<<"${RUN_JSON}")" = "success"
+          test "$(jq -r '.status' <<<"${RUN_JSON}")" = "completed"
+          test "$(jq -r '.event' <<<"${RUN_JSON}")" = "workflow_dispatch"
+
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${ACR_PUBLISH_RUN_ID}/artifacts" \
+            --jq ".artifacts[] | select(.name == \"${APP_RUNTIME_IMAGE_ARTIFACT_NAME}\" and .expired == false) | .name" \
+            | grep -Fx "${APP_RUNTIME_IMAGE_ARTIFACT_NAME}" >/dev/null
+
+          mkdir -p "${RUNNER_TEMP}/app-runtime-images"
+          gh run download "${ACR_PUBLISH_RUN_ID}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name "${APP_RUNTIME_IMAGE_ARTIFACT_NAME}" \
+            --dir "${RUNNER_TEMP}/app-runtime-images"
+
+          APP_RUNTIME_IMAGES_TFVARS_PATH="${RUNNER_TEMP}/app-runtime-images/app-runtime-images.auto.tfvars.json"
+          test -s "${APP_RUNTIME_IMAGES_TFVARS_PATH}"
+          jq -e '
+            .container_registry_server | test("^[a-zA-Z0-9]+[.]azurecr[.]io$")
+          ' "${APP_RUNTIME_IMAGES_TFVARS_PATH}" >/dev/null
+          jq -e '
+            .dashboard_image | test("^[a-zA-Z0-9]+[.]azurecr[.]io/product-dashboard@sha256:[0-9a-f]{64}$")
+          ' "${APP_RUNTIME_IMAGES_TFVARS_PATH}" >/dev/null
+          jq -e '
+            .product_api_image | test("^[a-zA-Z0-9]+[.]azurecr[.]io/product-api@sha256:[0-9a-f]{64}$")
+          ' "${APP_RUNTIME_IMAGES_TFVARS_PATH}" >/dev/null
+          jq -e '
+            .product_ingestion_image | test("^[a-zA-Z0-9]+[.]azurecr[.]io/product-ingestion@sha256:[0-9a-f]{64}$")
+          ' "${APP_RUNTIME_IMAGES_TFVARS_PATH}" >/dev/null
+          jq -e '
+            .shared_jobs_image | test("^[a-zA-Z0-9]+[.]azurecr[.]io/product-jobs@sha256:[0-9a-f]{64}$")
+          ' "${APP_RUNTIME_IMAGES_TFVARS_PATH}" >/dev/null
+
+          {
+            echo "## App Runtime Image Evidence"
+            echo
+            echo "ACR publish run: ${ACR_PUBLISH_RUN_ID}"
+            echo "Commit SHA: ${ACR_PUBLISH_COMMIT_SHA}"
+            echo "Workspace: ${TF_WORKSPACE}"
+            echo "Environment: ${ENVIRONMENT}"
+            echo "Region: ${AZURE_REGION}"
+            echo "Artifact: ${APP_RUNTIME_IMAGE_ARTIFACT_NAME}"
+            echo "Repositories: product-dashboard, product-api, product-ingestion, product-jobs"
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Upload verified app runtime image digest artifact
+        if: ${{ needs.select.outputs.deploy_app_runtime == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-${{ needs.select.outputs.app_runtime_image_artifact_name }}
+          path: ${{ runner.temp }}/app-runtime-images/app-runtime-images.auto.tfvars.json
+          if-no-files-found: error
+          retention-days: 14
 
   plan-foundation:
     name: Plan foundation
-    needs: select
-    if: ${{ needs.select.outputs.deploy_foundation == 'true' }}
+    needs: [select, validate-app-runtime-images]
+    if: ${{ needs.select.outputs.deploy_foundation == 'true' && needs.validate-app-runtime-images.result == 'success' }}
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
@@ -231,8 +347,8 @@ jobs:
 
   plan-network-private-data-plane:
     name: Plan network_private_data_plane
-    needs: [select, apply-foundation]
-    if: ${{ always() && needs.select.outputs.deploy_network_private_data_plane == 'true' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-foundation.result == 'success') }}
+    needs: [select, validate-app-runtime-images, apply-foundation]
+    if: ${{ always() && needs.select.outputs.deploy_network_private_data_plane == 'true' && needs.validate-app-runtime-images.result == 'success' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-foundation.result == 'success') }}
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
@@ -309,8 +425,8 @@ jobs:
 
   plan-observability-foundation:
     name: Plan observability_foundation
-    needs: [select, apply-network-private-data-plane]
-    if: ${{ always() && needs.select.outputs.deploy_observability_foundation == 'true' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-network-private-data-plane.result == 'success') }}
+    needs: [select, validate-app-runtime-images, apply-network-private-data-plane]
+    if: ${{ always() && needs.select.outputs.deploy_observability_foundation == 'true' && needs.validate-app-runtime-images.result == 'success' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-network-private-data-plane.result == 'success') }}
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
@@ -387,8 +503,8 @@ jobs:
 
   plan-data-platform:
     name: Plan data_platform
-    needs: [select, apply-observability-foundation]
-    if: ${{ always() && needs.select.outputs.deploy_data_platform == 'true' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-observability-foundation.result == 'success') }}
+    needs: [select, validate-app-runtime-images, apply-observability-foundation]
+    if: ${{ always() && needs.select.outputs.deploy_data_platform == 'true' && needs.validate-app-runtime-images.result == 'success' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-observability-foundation.result == 'success') }}
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
@@ -465,8 +581,8 @@ jobs:
 
   plan-ai-services:
     name: Plan ai_services
-    needs: [select, apply-data-platform]
-    if: ${{ always() && needs.select.outputs.deploy_ai_services == 'true' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-data-platform.result == 'success') }}
+    needs: [select, validate-app-runtime-images, apply-data-platform]
+    if: ${{ always() && needs.select.outputs.deploy_ai_services == 'true' && needs.validate-app-runtime-images.result == 'success' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-data-platform.result == 'success') }}
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
@@ -543,13 +659,17 @@ jobs:
 
   plan-app-runtime:
     name: Plan app_runtime
-    needs: [select, apply-ai-services]
-    if: ${{ always() && needs.select.outputs.deploy_app_runtime == 'true' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-ai-services.result == 'success') }}
+    needs: [select, validate-app-runtime-images, apply-ai-services]
+    if: ${{ always() && needs.select.outputs.deploy_app_runtime == 'true' && needs.validate-app-runtime-images.result == 'success' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-ai-services.result == 'success') }}
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v5
+        with:
+          name: verified-${{ needs.select.outputs.app_runtime_image_artifact_name }}
+          path: ${{ runner.temp }}/app-runtime-images
       - uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -566,6 +686,7 @@ jobs:
           CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
           TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
           PLAN_ARTIFACT_DIR: ${{ runner.temp }}/terraform-plans
+          APP_RUNTIME_IMAGES_TFVARS_PATH: ${{ runner.temp }}/app-runtime-images/app-runtime-images.auto.tfvars.json
           TF_STATE_RESOURCE_GROUP_NAME: ${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}
           TF_STATE_STORAGE_ACCOUNT_NAME: ${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}
           TF_STATE_CONTAINER_NAME: ${{ vars.TF_STATE_CONTAINER_NAME }}
@@ -621,8 +742,8 @@ jobs:
 
   plan-managed-grafana:
     name: Plan managed_grafana
-    needs: [select, apply-app-runtime]
-    if: ${{ always() && needs.select.outputs.deploy_managed_grafana == 'true' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-app-runtime.result == 'success') }}
+    needs: [select, validate-app-runtime-images, apply-app-runtime]
+    if: ${{ always() && needs.select.outputs.deploy_managed_grafana == 'true' && needs.validate-app-runtime-images.result == 'success' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-app-runtime.result == 'success') }}
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
@@ -699,8 +820,8 @@ jobs:
 
   plan-edge:
     name: Plan edge
-    needs: [select, apply-managed-grafana]
-    if: ${{ always() && needs.select.outputs.deploy_edge == 'true' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-managed-grafana.result == 'success') }}
+    needs: [select, validate-app-runtime-images, apply-managed-grafana]
+    if: ${{ always() && needs.select.outputs.deploy_edge == 'true' && needs.validate-app-runtime-images.result == 'success' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-managed-grafana.result == 'success') }}
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]

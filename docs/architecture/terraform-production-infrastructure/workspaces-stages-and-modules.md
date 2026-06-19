@@ -10,6 +10,7 @@ The repository now contains the Terraform stage tree and the first deployment-ad
 - `.github/workflows/terraform-destroy-plan.yml` creates guarded destroy plans and applies approved same-run destroy plan artifacts for disposable stages.
 - `.github/workflows/edge-origin-validation.yml` validates Front Door hostnames and direct Azure Container Apps origin isolation.
 - `.github/workflows/acr-image-publish.yml` builds and publishes the Product Dashboard, Product API, Product Ingestion Endpoint, and Product Jobs images to ACR and emits digest-pinned Terraform inputs.
+- `scripts/terraform-app-runtime-images.sh` lists successful ACR Image Publish runs for a workspace and dispatches `.github/workflows/terraform-plan.yml` with the selected run ID and derived commit SHA.
 
 Image build and publish is a separate production path from Terraform plan and apply. Terraform stages consume reviewed image references or digests; they do not build or publish container images.
 

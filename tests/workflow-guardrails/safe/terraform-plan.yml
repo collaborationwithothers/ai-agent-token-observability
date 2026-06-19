@@ -25,8 +25,15 @@ on:
       terraform_stage:
         required: false
         type: string
+      acr_publish_run_id:
+        required: false
+        type: string
+      acr_publish_commit_sha:
+        required: false
+        type: string
 
 permissions:
+  actions: read
   contents: read
   id-token: write
 
@@ -47,6 +54,9 @@ jobs:
       terraform_workspace: ${{ steps.guardrails.outputs.terraform_workspace }}
       deploy_foundation: ${{ steps.guardrails.outputs.deploy_foundation }}
       deploy_app_runtime: ${{ steps.guardrails.outputs.deploy_app_runtime }}
+      acr_publish_run_id: ${{ steps.guardrails.outputs.acr_publish_run_id }}
+      acr_publish_commit_sha: ${{ steps.guardrails.outputs.acr_publish_commit_sha }}
+      app_runtime_image_artifact_name: ${{ steps.guardrails.outputs.app_runtime_image_artifact_name }}
     steps:
       - name: Validate guardrails before privileged steps
         id: guardrails
@@ -56,6 +66,8 @@ jobs:
           AZURE_REGION: ${{ inputs.azure_region }}
           CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
           TERRAFORM_STAGE_INPUT: ${{ inputs.terraform_stage }}
+          ACR_PUBLISH_RUN_ID_INPUT: ${{ inputs.acr_publish_run_id }}
+          ACR_PUBLISH_COMMIT_SHA_INPUT: ${{ inputs.acr_publish_commit_sha }}
         run: |
           set -euo pipefail
           ENVIRONMENT_STAGE_ORDER="foundation network_private_data_plane observability_foundation data_platform ai_services app_runtime managed_grafana edge"
@@ -74,26 +86,72 @@ jobs:
           DEPLOYMENT_SCOPE="stage"
           DEPLOY_FOUNDATION=false
           DEPLOY_APP_RUNTIME=true
+          ACR_PUBLISH_RUN_ID="${ACR_PUBLISH_RUN_ID_INPUT}"
+          ACR_PUBLISH_COMMIT_SHA="${ACR_PUBLISH_COMMIT_SHA_INPUT}"
+          APP_RUNTIME_IMAGE_ARTIFACT_NAME="app-runtime-image-digests-${TF_WORKSPACE}-${ACR_PUBLISH_COMMIT_SHA}"
           echo "deployment_scope=${DEPLOYMENT_SCOPE}" >> "${GITHUB_OUTPUT}"
           echo "terraform_workspace=${TF_WORKSPACE}" >> "${GITHUB_OUTPUT}"
           echo "deploy_foundation=${DEPLOY_FOUNDATION}" >> "${GITHUB_OUTPUT}"
           echo "deploy_app_runtime=${DEPLOY_APP_RUNTIME}" >> "${GITHUB_OUTPUT}"
+          echo "acr_publish_run_id=${ACR_PUBLISH_RUN_ID}" >> "${GITHUB_OUTPUT}"
+          echo "acr_publish_commit_sha=${ACR_PUBLISH_COMMIT_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "app_runtime_image_artifact_name=${APP_RUNTIME_IMAGE_ARTIFACT_NAME}" >> "${GITHUB_OUTPUT}"
           echo "Excluded shared stages: ${EXCLUDED_SHARED_STAGES}" >> "${GITHUB_STEP_SUMMARY}"
 
+  validate-app-runtime-images:
+    needs: select
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    steps:
+      - name: Validate selected ACR image publish run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOY_APP_RUNTIME: ${{ needs.select.outputs.deploy_app_runtime }}
+          ACR_PUBLISH_RUN_ID: ${{ needs.select.outputs.acr_publish_run_id }}
+          ACR_PUBLISH_COMMIT_SHA: ${{ needs.select.outputs.acr_publish_commit_sha }}
+          APP_RUNTIME_IMAGE_ARTIFACT_NAME: ${{ needs.select.outputs.app_runtime_image_artifact_name }}
+          TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+        run: |
+          RUN_JSON="$(gh run view "${ACR_PUBLISH_RUN_ID}" --repo "${GITHUB_REPOSITORY}" --json databaseId,workflowName,headBranch,headSha,conclusion,status,event,url)"
+          test "$(jq -r '.workflowName' <<<"${RUN_JSON}")" = "ACR Image Publish"
+          test "$(jq -r '.headBranch' <<<"${RUN_JSON}")" = "main"
+          test "$(jq -r '.headSha' <<<"${RUN_JSON}")" = "${ACR_PUBLISH_COMMIT_SHA}"
+          test "$(jq -r '.conclusion' <<<"${RUN_JSON}")" = "success"
+          test "$(jq -r '.event' <<<"${RUN_JSON}")" = "workflow_dispatch"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${ACR_PUBLISH_RUN_ID}/artifacts" --jq ".artifacts[] | select(.name == \"${APP_RUNTIME_IMAGE_ARTIFACT_NAME}\") | .name"
+          gh run download "${ACR_PUBLISH_RUN_ID}" --repo "${GITHUB_REPOSITORY}" --name "${APP_RUNTIME_IMAGE_ARTIFACT_NAME}" --dir "${RUNNER_TEMP}/app-runtime-images"
+          APP_RUNTIME_IMAGES_TFVARS_PATH="${RUNNER_TEMP}/app-runtime-images/app-runtime-images.auto.tfvars.json"
+          jq -e '.shared_jobs_image | test("^[a-zA-Z0-9]+[.]azurecr[.]io/product-jobs@sha256:[0-9a-f]{64}$")' "${APP_RUNTIME_IMAGES_TFVARS_PATH}"
+          echo "Environment: ${ENVIRONMENT}" >> "${GITHUB_STEP_SUMMARY}"
+          echo "Region: ${AZURE_REGION}" >> "${GITHUB_STEP_SUMMARY}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-${{ needs.select.outputs.app_runtime_image_artifact_name }}
+          path: ${{ runner.temp }}/app-runtime-images/app-runtime-images.auto.tfvars.json
+
   plan-app-runtime:
-    needs: [select, apply-foundation]
-    if: ${{ always() && needs.select.outputs.deploy_app_runtime == 'true' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-foundation.result == 'success') }}
+    needs: [select, validate-app-runtime-images, apply-foundation]
+    if: ${{ always() && needs.select.outputs.deploy_app_runtime == 'true' && needs.validate-app-runtime-images.result == 'success' && (needs.select.outputs.deployment_scope == 'stage' || needs.apply-foundation.result == 'success') }}
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v5
+        with:
+          name: verified-${{ needs.select.outputs.app_runtime_image_artifact_name }}
+          path: ${{ runner.temp }}/app-runtime-images
       - uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: Terraform plan
+        env:
+          APP_RUNTIME_IMAGES_TFVARS_PATH: ${{ runner.temp }}/app-runtime-images/app-runtime-images.auto.tfvars.json
         run: TERRAFORM_STAGE="app_runtime" bash scripts/terraform-stage-deploy.sh plan
       - uses: actions/upload-artifact@v4
         with:

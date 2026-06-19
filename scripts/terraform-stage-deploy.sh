@@ -17,6 +17,9 @@ Required environment:
   TF_STATE_RESOURCE_GROUP_NAME
   TF_STATE_STORAGE_ACCOUNT_NAME
   TF_STATE_CONTAINER_NAME
+
+Optional environment:
+  APP_RUNTIME_IMAGES_TFVARS_PATH
 USAGE
 }
 
@@ -153,6 +156,17 @@ case "${mode}" in
         )"
         var_args+=("-var=postgresql_ad_administrators=${postgresql_ad_administrators}")
         var_args+=("-var=diagnostic_destinations=${diagnostic_destinations}")
+        ;;
+      app_runtime)
+        if [[ -z "${APP_RUNTIME_IMAGES_TFVARS_PATH:-}" ]]; then
+          echo "Missing APP_RUNTIME_IMAGES_TFVARS_PATH for app_runtime plan. Select a successful ACR Image Publish run and pass its app-runtime-images.auto.tfvars.json artifact." >&2
+          exit 1
+        fi
+        if [[ ! -s "${APP_RUNTIME_IMAGES_TFVARS_PATH}" ]]; then
+          echo "APP_RUNTIME_IMAGES_TFVARS_PATH does not reference a readable non-empty file: ${APP_RUNTIME_IMAGES_TFVARS_PATH}" >&2
+          exit 1
+        fi
+        var_args+=("-var-file=${APP_RUNTIME_IMAGES_TFVARS_PATH}")
         ;;
       edge)
         app_runtime_container_app_fqdns="$(terraform_output_json app_runtime "${TF_WORKSPACE}" container_app_fqdns)"

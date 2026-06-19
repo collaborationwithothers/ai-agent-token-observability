@@ -149,44 +149,40 @@ variable "log_analytics_workspace_id" {
 variable "dashboard_image" {
   description = "Container image for the Product Dashboard Container App."
   type        = string
-  default     = "example.azurecr.io/product-dashboard:0000000000000000000000000000000000000000"
 
   validation {
-    condition     = length(trimspace(var.dashboard_image)) > 0
-    error_message = "dashboard_image must not be empty."
+    condition     = can(regex("^[A-Za-z0-9]+[.]azurecr[.]io/product-dashboard@sha256:[0-9a-f]{64}$", var.dashboard_image))
+    error_message = "dashboard_image must be a digest-pinned ACR image for product-dashboard, for example registry.azurecr.io/product-dashboard@sha256:<64 lowercase hex characters>."
   }
 }
 
 variable "product_api_image" {
   description = "Container image for the Product API Container App."
   type        = string
-  default     = "example.azurecr.io/product-api:0000000000000000000000000000000000000000"
 
   validation {
-    condition     = length(trimspace(var.product_api_image)) > 0
-    error_message = "product_api_image must not be empty."
+    condition     = can(regex("^[A-Za-z0-9]+[.]azurecr[.]io/product-api@sha256:[0-9a-f]{64}$", var.product_api_image))
+    error_message = "product_api_image must be a digest-pinned ACR image for product-api, for example registry.azurecr.io/product-api@sha256:<64 lowercase hex characters>."
   }
 }
 
 variable "product_ingestion_image" {
   description = "Container image for the Product Ingestion Endpoint Container App."
   type        = string
-  default     = "example.azurecr.io/product-ingestion:0000000000000000000000000000000000000000"
 
   validation {
-    condition     = length(trimspace(var.product_ingestion_image)) > 0
-    error_message = "product_ingestion_image must not be empty."
+    condition     = can(regex("^[A-Za-z0-9]+[.]azurecr[.]io/product-ingestion@sha256:[0-9a-f]{64}$", var.product_ingestion_image))
+    error_message = "product_ingestion_image must be a digest-pinned ACR image for product-ingestion, for example registry.azurecr.io/product-ingestion@sha256:<64 lowercase hex characters>."
   }
 }
 
 variable "shared_jobs_image" {
   description = "Shared container image for finite Product Jobs commands."
   type        = string
-  default     = "example.azurecr.io/product-jobs:0000000000000000000000000000000000000000"
 
   validation {
-    condition     = length(trimspace(var.shared_jobs_image)) > 0
-    error_message = "shared_jobs_image must not be empty."
+    condition     = can(regex("^[A-Za-z0-9]+[.]azurecr[.]io/product-jobs@sha256:[0-9a-f]{64}$", var.shared_jobs_image))
+    error_message = "shared_jobs_image must be a digest-pinned ACR image for product-jobs, for example registry.azurecr.io/product-jobs@sha256:<64 lowercase hex characters>."
   }
 }
 
