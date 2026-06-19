@@ -6,7 +6,7 @@ Infrastructure deletion is defined separately in [Infrastructure Deletion Workfl
 
 The normal Terraform deploy workflow produces a saved plan artifact for each selected stage, waits on the `terraform-apply` GitHub environment, downloads the approved same-run artifact, verifies stage and workspace, and applies only that saved plan file. In an all-stage deploy, the workflow plans, reviews, and applies one stage before moving to the next dependent stage, so downstream stages can read remote state outputs produced earlier in the same run.
 
-Runtime image publishing is also separate from Terraform plan. The image publish workflow builds the Product Dashboard, Product API, Product Ingestion Endpoint, and shared Product Jobs images, publishes them to Azure Container Registry with immutable commit SHA tags, and emits digest-pinned app runtime Terraform inputs. App runtime deploys must select a successful ACR Image Publish run and consume its validated digest artifact before planning.
+Runtime image publishing is also separate from Terraform plan. The image publish workflow builds the Product Dashboard, Product API, Product Ingestion Endpoint, and shared Product Jobs images, publishes them to Azure Container Registry with immutable commit SHA tags, and emits digest-pinned app runtime Terraform inputs. App runtime deploys consume a validated ACR Image Publish digest artifact before planning. By default, the deploy workflow selects the latest successful matching publish run for the derived workspace. Operators can optionally supply a specific ACR publish run ID as an override.
 
 Allowed trigger:
 
@@ -29,8 +29,7 @@ Required normal deploy workflow inputs:
 - `azure_region`
 - optional `customer_organization_slug`, defaulting to `internal`
 - optional `terraform_stage`
-- `acr_publish_run_id`, required when `app_runtime` is included
-- `acr_publish_commit_sha`, required when `app_runtime` is included and normally derived by `scripts/terraform-app-runtime-images.sh`
+- optional `acr_publish_run_id` when `app_runtime` is included, used only as an advanced override
 
 Required validations before Azure login:
 
@@ -46,7 +45,7 @@ Required validations before Azure login:
 - Derived workspace equals `{environment}_{azureRegion}_{customerOrganizationSlug}`.
 - The workflow publishes the derived workspace as an internal job output for downstream plan and apply jobs.
 - The workflow does not require a manual confirmation phrase because the workspace is derived from validated inputs and apply jobs still require protected environment approval.
-- If `app_runtime` is selected, the workflow validates the selected ACR Image Publish run ID before Azure login. The run must belong to this repository, use the `ACR Image Publish` workflow, run on `main`, complete successfully from `workflow_dispatch`, match the supplied commit SHA, and contain the derived `app-runtime-image-digests-{workspace}-{sha}` artifact.
+- If `app_runtime` is selected, the workflow validates ACR Image Publish evidence before Azure login. With no override, it selects the latest successful `ACR Image Publish` run on `main` that contains the non-expired derived `app-runtime-image-digests-{workspace}-{sha}` artifact. With an override, it validates the supplied run ID. In both cases, the run must belong to this repository, use the `ACR Image Publish` workflow, run on `main`, complete successfully from `workflow_dispatch`, derive the commit SHA from the selected run, and contain the derived workspace artifact.
 
 The retained public DNS workflow is not a normal deployment workflow. Its controls are a fixed `public_dns` stage, the single owner workspace `pd_eastus2_internal`, repository, actor, branch, `pd`, `eastus2`, and `internal` gates, same-run saved plan artifact apply, the protected `terraform-public-dns-apply` GitHub environment, Cloudflare delegation output only, and public NS verification before edge deployment depends on the delegated zone.
 
@@ -83,7 +82,7 @@ Guardrail validator:
 - The validator must fail if the retained public DNS workflow lacks its documented retained-stage controls.
 - The validator must fail if `terraform apply -auto-approve` appears in deployment-capable workflows.
 - The validator must fail if the normal Terraform deploy workflow can apply without the `terraform-apply` environment, without downloading the saved plan artifact, or with `public_dns` in normal target stages.
-- The validator must fail if the normal Terraform deploy workflow can plan `app_runtime` without selected ACR publish run validation, accepts image artifact names as dispatch input, uses mutable `latest`, or allows placeholder app runtime images.
+- The validator must fail if the normal Terraform deploy workflow can plan `app_runtime` without ACR publish run validation, accepts image artifact names or commit SHAs as dispatch input, uses mutable `latest`, or allows placeholder app runtime images.
 - The validator must fail if the retained public DNS workflow can target non-`pd_eastus2_internal` scope, manage Cloudflare API/provider state, handle certificate material, omit public NS verification, or plan a public DNS destroy.
 - The validator must have tests with unsafe workflow fixtures.
 
@@ -133,11 +132,10 @@ scripts/terraform-app-runtime-images.sh list \
 scripts/terraform-app-runtime-images.sh dispatch \
   --environment dv \
   --azure-region eastus2 \
-  --customer-organization-slug internal \
-  --acr-publish-run-id RUN_ID
+  --customer-organization-slug internal
 ```
 
-The helper lists successful `ACR Image Publish` runs with the expected workspace artifact, derives the selected run commit SHA, and dispatches `.github/workflows/terraform-plan.yml` with `acr_publish_run_id` and `acr_publish_commit_sha`. Use `--terraform-stage all` only when intentionally running the full environment stage chain.
+The helper lists successful `ACR Image Publish` runs with the expected workspace artifact and dispatches `.github/workflows/terraform-plan.yml`. By default, the workflow selects the latest successful matching publish run when `app_runtime` is included. Use `--acr-publish-run-id RUN_ID` only when intentionally pinning a known publish run. Use `--terraform-stage all` only when intentionally running the full environment stage chain.
 
 Rules:
 

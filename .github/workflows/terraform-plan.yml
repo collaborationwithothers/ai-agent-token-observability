@@ -30,11 +30,7 @@ on:
         required: false
         type: string
       acr_publish_run_id:
-        description: Required when app_runtime is selected. Successful ACR Image Publish workflow run ID.
-        required: false
-        type: string
-      acr_publish_commit_sha:
-        description: Required when app_runtime is selected. Commit SHA from the selected ACR Image Publish run.
+        description: Optional app_runtime ACR Image Publish run override. Leave blank to use the latest successful matching run.
         required: false
         type: string
 
@@ -66,8 +62,6 @@ jobs:
       deploy_ai_services: ${{ steps.guardrails.outputs.deploy_ai_services }}
       deploy_app_runtime: ${{ steps.guardrails.outputs.deploy_app_runtime }}
       acr_publish_run_id: ${{ steps.guardrails.outputs.acr_publish_run_id }}
-      acr_publish_commit_sha: ${{ steps.guardrails.outputs.acr_publish_commit_sha }}
-      app_runtime_image_artifact_name: ${{ steps.guardrails.outputs.app_runtime_image_artifact_name }}
       deploy_managed_grafana: ${{ steps.guardrails.outputs.deploy_managed_grafana }}
       deploy_edge: ${{ steps.guardrails.outputs.deploy_edge }}
     steps:
@@ -80,7 +74,6 @@ jobs:
           CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
           TERRAFORM_STAGE_INPUT: ${{ inputs.terraform_stage }}
           ACR_PUBLISH_RUN_ID_INPUT: ${{ inputs.acr_publish_run_id }}
-          ACR_PUBLISH_COMMIT_SHA_INPUT: ${{ inputs.acr_publish_commit_sha }}
         run: |
           set -euo pipefail
 
@@ -144,14 +137,10 @@ jobs:
           fi
 
           ACR_PUBLISH_RUN_ID="$(printf '%s' "${ACR_PUBLISH_RUN_ID_INPUT}" | tr -d '[:space:]')"
-          ACR_PUBLISH_COMMIT_SHA="$(printf '%s' "${ACR_PUBLISH_COMMIT_SHA_INPUT}" | tr -d '[:space:]')"
-          APP_RUNTIME_IMAGE_ARTIFACT_NAME=""
           if [[ "${DEPLOY_APP_RUNTIME}" == "true" ]]; then
-            case "${ACR_PUBLISH_RUN_ID}" in ''|*[!0-9]*) echo "app_runtime deploys require numeric acr_publish_run_id." >&2; exit 1 ;; esac
-            case "${ACR_PUBLISH_COMMIT_SHA}" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) echo "app_runtime deploys require a 40-character lowercase acr_publish_commit_sha." >&2; exit 1 ;; esac
-            APP_RUNTIME_IMAGE_ARTIFACT_NAME="app-runtime-image-digests-${TF_WORKSPACE}-${ACR_PUBLISH_COMMIT_SHA}"
-          elif [[ -n "${ACR_PUBLISH_RUN_ID}${ACR_PUBLISH_COMMIT_SHA}" ]]; then
-            echo "ACR publish run inputs are accepted only when app_runtime is selected." >&2
+            case "${ACR_PUBLISH_RUN_ID}" in ''|*[!0-9]*) [[ -z "${ACR_PUBLISH_RUN_ID}" ]] || { echo "acr_publish_run_id must be numeric when supplied." >&2; exit 1; } ;; esac
+          elif [[ -n "${ACR_PUBLISH_RUN_ID}" ]]; then
+            echo "acr_publish_run_id is accepted only when app_runtime is selected." >&2
             exit 1
           fi
 
@@ -165,8 +154,6 @@ jobs:
             echo "deploy_ai_services=${DEPLOY_AI_SERVICES}"
             echo "deploy_app_runtime=${DEPLOY_APP_RUNTIME}"
             echo "acr_publish_run_id=${ACR_PUBLISH_RUN_ID}"
-            echo "acr_publish_commit_sha=${ACR_PUBLISH_COMMIT_SHA}"
-            echo "app_runtime_image_artifact_name=${APP_RUNTIME_IMAGE_ARTIFACT_NAME}"
             echo "deploy_managed_grafana=${DEPLOY_MANAGED_GRAFANA}"
             echo "deploy_edge=${DEPLOY_EDGE}"
           } >> "${GITHUB_OUTPUT}"
@@ -179,26 +166,32 @@ jobs:
             echo "Environment stage order: ${ENVIRONMENT_STAGE_ORDER}"
             echo "Excluded shared stages: ${EXCLUDED_SHARED_STAGES}"
             if [[ "${DEPLOY_APP_RUNTIME}" == "true" ]]; then
-              echo "ACR image publish run: ${ACR_PUBLISH_RUN_ID}"
-              echo "ACR image publish commit: ${ACR_PUBLISH_COMMIT_SHA}"
-              echo "App runtime image artifact: ${APP_RUNTIME_IMAGE_ARTIFACT_NAME}"
+              if [[ -n "${ACR_PUBLISH_RUN_ID}" ]]; then
+                echo "ACR image publish run override: ${ACR_PUBLISH_RUN_ID}"
+              else
+                echo "ACR image publish run override: latest successful matching run"
+              fi
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
 
   validate-app-runtime-images:
     name: Validate app runtime image digest artifact
     needs: select
+    outputs:
+      acr_publish_run_id: ${{ steps.resolve-images.outputs.acr_publish_run_id }}
+      acr_publish_commit_sha: ${{ steps.resolve-images.outputs.acr_publish_commit_sha }}
+      app_runtime_image_artifact_name: ${{ steps.resolve-images.outputs.app_runtime_image_artifact_name }}
+      verified_app_runtime_image_artifact_name: ${{ steps.resolve-images.outputs.verified_app_runtime_image_artifact_name }}
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
     steps:
-      - name: Validate selected ACR image publish run
+      - name: Resolve and validate ACR image publish run
+        id: resolve-images
         env:
           GH_TOKEN: ${{ github.token }}
           DEPLOY_APP_RUNTIME: ${{ needs.select.outputs.deploy_app_runtime }}
           ACR_PUBLISH_RUN_ID: ${{ needs.select.outputs.acr_publish_run_id }}
-          ACR_PUBLISH_COMMIT_SHA: ${{ needs.select.outputs.acr_publish_commit_sha }}
-          APP_RUNTIME_IMAGE_ARTIFACT_NAME: ${{ needs.select.outputs.app_runtime_image_artifact_name }}
           TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
           ENVIRONMENT: ${{ inputs.environment }}
           AZURE_REGION: ${{ inputs.azure_region }}
@@ -210,11 +203,50 @@ jobs:
             exit 0
           fi
 
+          find_latest_matching_run() {
+            gh api --paginate \
+              -X GET \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/acr-image-publish.yml/runs" \
+              -f branch=main \
+              -f event=workflow_dispatch \
+              -f status=success \
+              -f per_page=100 \
+              --jq '.workflow_runs[] | [.id, .head_sha] | @tsv' \
+              | while IFS=$'\t' read -r candidate_run_id candidate_sha; do
+                  candidate_artifact_name="app-runtime-image-digests-${TF_WORKSPACE}-${candidate_sha}"
+                  if gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate_run_id}/artifacts" \
+                    --jq ".artifacts[] | select(.name == \"${candidate_artifact_name}\" and .expired == false) | .name" \
+                    | grep -Fx "${candidate_artifact_name}" >/dev/null; then
+                    jq -n \
+                      --arg run_id "${candidate_run_id}" \
+                      --arg sha "${candidate_sha}" \
+                      --arg artifact_name "${candidate_artifact_name}" \
+                      '{run_id: $run_id, sha: $sha, artifact_name: $artifact_name}'
+                    return 0
+                  fi
+                done
+          }
+
+          SELECTION_MODE="explicit"
+          if [[ -z "${ACR_PUBLISH_RUN_ID}" ]]; then
+            SELECTION_MODE="latest-successful"
+            SELECTED_RUN="$(find_latest_matching_run)"
+            if [[ -z "${SELECTED_RUN}" ]]; then
+              echo "No successful ACR Image Publish run with a non-expired app runtime image artifact was found for workspace ${TF_WORKSPACE}." >&2
+              exit 1
+            fi
+            ACR_PUBLISH_RUN_ID="$(jq -r '.run_id' <<<"${SELECTED_RUN}")"
+          fi
+
           RUN_JSON="$(gh run view "${ACR_PUBLISH_RUN_ID}" --repo "${GITHUB_REPOSITORY}" --json databaseId,workflowName,headBranch,headSha,conclusion,status,event,url)"
+          ACR_PUBLISH_COMMIT_SHA="$(jq -r '.headSha' <<<"${RUN_JSON}")"
+          APP_RUNTIME_IMAGE_ARTIFACT_NAME="app-runtime-image-digests-${TF_WORKSPACE}-${ACR_PUBLISH_COMMIT_SHA}"
+          VERIFIED_APP_RUNTIME_IMAGE_ARTIFACT_NAME="verified-${APP_RUNTIME_IMAGE_ARTIFACT_NAME}"
+
           test "$(jq -r '.databaseId' <<<"${RUN_JSON}")" = "${ACR_PUBLISH_RUN_ID}"
           test "$(jq -r '.workflowName' <<<"${RUN_JSON}")" = "ACR Image Publish"
           test "$(jq -r '.headBranch' <<<"${RUN_JSON}")" = "main"
-          test "$(jq -r '.headSha' <<<"${RUN_JSON}")" = "${ACR_PUBLISH_COMMIT_SHA}"
+          case "${ACR_PUBLISH_COMMIT_SHA}" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) echo "Selected ACR Image Publish run does not have a 40-character lowercase commit SHA." >&2; exit 1 ;; esac
           test "$(jq -r '.conclusion' <<<"${RUN_JSON}")" = "success"
           test "$(jq -r '.status' <<<"${RUN_JSON}")" = "completed"
           test "$(jq -r '.event' <<<"${RUN_JSON}")" = "workflow_dispatch"
@@ -248,9 +280,17 @@ jobs:
           ' "${APP_RUNTIME_IMAGES_TFVARS_PATH}" >/dev/null
 
           {
+            echo "acr_publish_run_id=${ACR_PUBLISH_RUN_ID}"
+            echo "acr_publish_commit_sha=${ACR_PUBLISH_COMMIT_SHA}"
+            echo "app_runtime_image_artifact_name=${APP_RUNTIME_IMAGE_ARTIFACT_NAME}"
+            echo "verified_app_runtime_image_artifact_name=${VERIFIED_APP_RUNTIME_IMAGE_ARTIFACT_NAME}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
             echo "## App Runtime Image Evidence"
             echo
             echo "ACR publish run: ${ACR_PUBLISH_RUN_ID}"
+            echo "Selection mode: ${SELECTION_MODE}"
             echo "Commit SHA: ${ACR_PUBLISH_COMMIT_SHA}"
             echo "Workspace: ${TF_WORKSPACE}"
             echo "Environment: ${ENVIRONMENT}"
@@ -262,7 +302,7 @@ jobs:
         if: ${{ needs.select.outputs.deploy_app_runtime == 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: verified-${{ needs.select.outputs.app_runtime_image_artifact_name }}
+          name: ${{ steps.resolve-images.outputs.verified_app_runtime_image_artifact_name }}
           path: ${{ runner.temp }}/app-runtime-images/app-runtime-images.auto.tfvars.json
           if-no-files-found: error
           retention-days: 14
@@ -668,7 +708,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v5
         with:
-          name: verified-${{ needs.select.outputs.app_runtime_image_artifact_name }}
+          name: ${{ needs.validate-app-runtime-images.outputs.verified_app_runtime_image_artifact_name }}
           path: ${{ runner.temp }}/app-runtime-images
       - uses: azure/login@v2
         with:
