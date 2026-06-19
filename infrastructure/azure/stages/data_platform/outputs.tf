@@ -31,7 +31,7 @@ output "postgresql_server_name" {
 }
 
 output "postgresql_server_fqdn" {
-  description = "PostgreSQL Flexible Server FQDN for private DNS-aware runtime configuration."
+  description = "PostgreSQL Flexible Server FQDN for public firewall allowlisted runtime configuration."
   value       = module.product_metadata_store.fqdn
 }
 
@@ -63,7 +63,7 @@ output "storage_account_name" {
 }
 
 output "storage_blob_fqdn" {
-  description = "Blob service FQDN for private DNS-aware runtime configuration."
+  description = "Blob service FQDN for public network allowlisted runtime configuration."
   value       = try(module.product_storage.fqdn.blob, null)
 }
 

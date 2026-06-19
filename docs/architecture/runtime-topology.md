@@ -21,9 +21,9 @@ The Azure Production MVP uses three long-running Azure Container Apps:
 
 | Container App | Ingress | Primary responsibility |
 | --- | --- | --- |
-| Product Dashboard | Public through Azure Front Door Premium WAF; ACA origin private through Front Door Private Link | User-facing dashboard shell and static or server-rendered frontend |
-| Product API | Private to Product Dashboard or public only through Azure Front Door Premium WAF when required; ACA origin private through Front Door Private Link | Product API, admin API surfaces, session investigation, identity, content review, recommendations, pricing, budgets, and audit routes |
-| Product Ingestion Endpoint | Public only through Azure Front Door Premium WAF; ACA origin private through Front Door Private Link | OTLP/HTTP ingestion for Codex CLI Agent Telemetry Signals |
+| Product Dashboard | Public through Azure Front Door Premium WAF to generated ACA FQDN origin | User-facing dashboard shell and static or server-rendered frontend |
+| Product API | Private to Product Dashboard or public only through Azure Front Door Premium WAF when required, routed to generated ACA FQDN origin | Product API, admin API surfaces, session investigation, identity, content review, recommendations, pricing, budgets, and audit routes |
+| Product Ingestion Endpoint | Public only through Azure Front Door Premium WAF to generated ACA FQDN origin | OTLP/HTTP ingestion for Codex CLI Agent Telemetry Signals |
 
 The MVP uses one shared jobs container image with explicit job commands for bounded background work.
 
@@ -50,10 +50,10 @@ The three-app split keeps different traffic and security profiles separate witho
 Production ingress rule:
 
 - Public users and harnesses reach product services only through Azure Front Door.
-- Azure Container Apps generated FQDNs must not remain publicly reachable in production.
-- Azure Front Door Premium Private Link is the first-release origin isolation pattern.
+- Azure Front Door routes to generated Azure Container Apps FQDN origins in the current deployable path.
+- Origin isolation beyond public Front Door routing is deferred to a later network hardening slice.
 - Front Door managed certificates protect the public hostnames; ACA origin TLS uses the generated ACA hostname and certificate.
-- Managed Azure VNet GitHub runners may validate private resources, but runner placement does not replace Front Door and ACA origin isolation.
+- Managed Azure VNet GitHub runners may validate allowlisted resources, but runner placement does not replace Front Door controls.
 
 Admin API routes are part of Product API in the MVP. They are not a separate Container App unless future scale, isolation, or compliance requirements justify that split.
 
@@ -165,7 +165,7 @@ Likely future splits:
 - Admin API routes are implemented as Product API routes for MVP.
 - Product Ingestion Endpoint is the only public harness telemetry ingestion service.
 - Product public traffic reaches Container Apps only through Azure Front Door Premium.
-- Direct public access to generated ACA FQDNs is blocked in production.
+- Direct-origin blocking is deferred to a later origin isolation hardening slice.
 - Background processing uses one shared jobs image with explicit commands.
 - Job commands are independently configurable even when the image is shared.
 - Product Dashboard does not query data stores or telemetry stores directly.
@@ -176,9 +176,9 @@ Likely future splits:
 
 - Azure Container Apps hosts containerized applications and microservices: https://learn.microsoft.com/en-us/azure/container-apps/overview
 - Azure Container Apps supports ingress for application traffic: https://learn.microsoft.com/en-us/azure/container-apps/ingress-overview
-- Azure Container Apps ingress with `external` is accessible through its FQDN, which is why production origins need private isolation: https://learn.microsoft.com/en-us/azure/container-apps/ingress-overview
-- Azure Front Door Premium can connect to origins through Private Link: https://learn.microsoft.com/en-us/azure/frontdoor/private-link
-- Azure Container Apps can be exposed through Azure Front Door Premium with public network access disabled: https://learn.microsoft.com/en-us/azure/container-apps/front-door-custom-virtual-network-private-link
+- Azure Container Apps ingress with `external` is accessible through its FQDN, which is why origin isolation remains deferred hardening work: https://learn.microsoft.com/en-us/azure/container-apps/ingress-overview
+- Azure Front Door Premium supports origin isolation options that are deferred from the current deployable path: https://learn.microsoft.com/en-us/azure/frontdoor/private-link
+- Azure Container Apps supports Front Door integration patterns that can be reconsidered in the deferred hardening slice: https://learn.microsoft.com/en-us/azure/container-apps/front-door-custom-virtual-network-private-link
 - Azure Container Apps supports built-in authentication and authorization for external ingress-enabled apps: https://learn.microsoft.com/en-us/azure/container-apps/authentication
 - Azure Container Apps Jobs run finite-duration tasks and support manual, scheduled, and event-driven triggers: https://learn.microsoft.com/en-us/azure/container-apps/jobs
 - Azure Container Apps containers support startup command arguments and environment variables: https://learn.microsoft.com/en-us/azure/container-apps/containers

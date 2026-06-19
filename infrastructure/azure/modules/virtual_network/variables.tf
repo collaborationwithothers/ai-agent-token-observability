@@ -25,7 +25,6 @@ variable "subnets" {
     address_prefixes                              = optional(list(string))
     name                                          = string
     network_security_group                        = optional(object({ id = string }))
-    private_endpoint_network_policies             = optional(string, "Enabled")
     private_link_service_network_policies_enabled = optional(bool, true)
     service_endpoints_with_location               = optional(list(object({ service = string, locations = optional(list(string), ["*"]) })))
     delegations                                   = optional(list(object({ name = string, service_delegation = object({ name = string }) })))

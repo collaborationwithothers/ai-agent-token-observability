@@ -78,12 +78,6 @@ variable "allowed_customer_organization_slugs" {
   default     = ["internal"]
 }
 
-variable "enable_private_endpoints" {
-  description = "Whether this stage should prefer private endpoints when resources are added."
-  type        = bool
-  default     = true
-}
-
 variable "enable_zone_redundancy" {
   description = "Whether this stage should enable zone redundancy for resources that support it."
   type        = bool
@@ -130,18 +124,14 @@ variable "virtual_network_address_space" {
 }
 
 variable "subnet_address_prefixes" {
-  description = "Stable address prefixes for downstream private data plane subnets."
+  description = "Stable address prefixes for downstream network subnets."
   type = object({
     container_apps_infrastructure = string
-    private_endpoints             = string
-    postgresql_delegated          = string
     reserved                      = string
     shared_networking             = string
   })
   default = {
     container_apps_infrastructure = "10.40.0.0/23"
-    private_endpoints             = "10.40.2.0/24"
-    postgresql_delegated          = "10.40.3.0/27"
     reserved                      = "10.40.8.0/21"
     shared_networking             = "10.40.4.0/24"
   }
@@ -149,19 +139,5 @@ variable "subnet_address_prefixes" {
   validation {
     condition     = alltrue([for prefix in values(var.subnet_address_prefixes) : can(cidrhost(prefix, 0))])
     error_message = "subnet_address_prefixes values must be valid CIDR prefixes."
-  }
-}
-
-variable "additional_private_dns_zones" {
-  description = "Additional private DNS zones owned by this stage, keyed by stable downstream contract key."
-  type = map(object({
-    domain_name = string
-    purpose     = optional(string, "Additional downstream private endpoint DNS zone.")
-  }))
-  default = {}
-
-  validation {
-    condition     = alltrue([for zone in values(var.additional_private_dns_zones) : can(regex("^[a-z0-9][a-z0-9.-]*[a-z0-9]$", zone.domain_name))])
-    error_message = "additional_private_dns_zones domain_name values must be valid lowercase DNS zone names."
   }
 }

@@ -64,8 +64,8 @@ The MVP must show:
 - Azure Container Apps for services and Azure Container Apps Jobs for background work.
 - Azure Front Door Premium WAF as the production edge.
 - Azure Front Door managed certificates for explicit first-release product hostnames.
-- Azure Front Door Private Link to Azure Container Apps origins so generated ACA FQDNs cannot bypass the edge in production.
-- Private Data Plane for PostgreSQL, Blob Storage, Key Vault, and internal dependencies where feasible.
+- Public Azure Front Door routing to Azure Container Apps generated FQDN origins for the current deployable path.
+- Public data-store access constrained by approved firewall and network allowlists until deferred network hardening is implemented.
 - Platform-Managed Encryption only. Customer Managed Keys are not offered.
 - Day-1 Operable Baseline covering health probes, internal SLOs, Azure Monitor alerts, private action groups, restore validation, lifecycle validation, audit export, and incident runbooks.
 - Production codebase transition that deletes, replaces, retains, or quarantines local-first implementation pieces instead of evolving local-only mode in place.
@@ -133,8 +133,8 @@ The MVP must show:
 - The retained public DNS workflow uses a fixed `public_dns` stage, the single owner workspace `pd_eastus2_internal`, protected public DNS apply environment, same-run saved plan artifact, Cloudflare delegation output only, and public NS verification.
 - A committed workflow guardrail validator and tests detect unsafe workflow triggers or missing deployment guards.
 - Public product hostnames serve through Azure Front Door managed certificates.
-- Front Door origin health succeeds through Private Link to Azure Container Apps.
-- Direct public access to generated Azure Container Apps FQDNs fails in production.
+- Front Door origin health succeeds against generated Azure Container Apps FQDN origins.
+- Direct-origin blocking is deferred to a later origin isolation hardening slice.
 - Health and readiness endpoints are implemented for each long-running production service.
 - Azure Container Apps liveness and readiness probes are configured.
 - Day-1 internal SLOs and minimum Azure Monitor alerts are implemented.

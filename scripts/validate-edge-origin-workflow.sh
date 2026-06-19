@@ -25,16 +25,15 @@ required_fragments = {
     "api hostname": "api.tokenobs.consultwithcloud.com",
     "ingest hostname": "ingest.tokenobs.consultwithcloud.com",
     "app runtime output": "direct_origin_validation_targets",
-    "edge private link output": "front_door_private_link_origin_approval_requests",
     "edge hostname output": "front_door_custom_domain_hostnames",
     "auth callback output": "public_auth_callback_base_urls",
     "sanitized summary": "GITHUB_STEP_SUMMARY",
     "public endpoint probe": "validate_public_endpoint",
     "direct origin probe": "validate_direct_origin",
-    "public runner direct origin job": "public-direct-origin-probe",
+    "public runner origin evidence job": "public-direct-origin-probe",
     "github hosted public runner": "runs-on: ubuntu-latest",
     "public job without Azure OIDC": "permissions:\n      contents: read",
-    "pp pd bypass enforcement": 'case "${ENVIRONMENT}" in pp|pd)',
+    "current public origin evidence": "current public-origin evidence only",
 }
 
 forbidden_fragments = {

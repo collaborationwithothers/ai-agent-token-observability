@@ -16,7 +16,7 @@ This retained shared stage owns:
 - The optional foundation deployment user-assigned managed identity.
 - Key Vault scoped RBAC assignments for created or referenced deployment identities and any explicitly supplied Key Vault role assignment foundations.
 
-It does not create remote state storage, networks, private endpoints, data platform resources, AI services, app runtime resources, Managed Grafana resources, edge resources, public DNS, secrets, keys, or certificates.
+It does not create remote state storage, networks, deferred network-hardening resources, data platform resources, AI services, app runtime resources, Managed Grafana resources, edge resources, public DNS, secrets, keys, or certificates.
 
 ## Downstream Outputs
 

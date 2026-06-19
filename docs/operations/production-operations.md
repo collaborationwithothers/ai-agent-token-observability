@@ -147,7 +147,7 @@ Minimum alert set:
 | Recommendation queue age above threshold | Warning | Oldest pending recommendation age |
 | Audit write failure | Critical | Governance Audit Event write failure |
 | Pricing refresh failure | Warning | Pricing refresh job result |
-| Direct ACA bypass validation succeeds in `pp` or `pd` | Critical | Edge Origin Validation result |
+| Deferred ACA origin isolation proof fails after hardening is reintroduced | Critical | Edge Origin Validation result |
 
 ## Data Protection Validation
 
@@ -207,7 +207,7 @@ Required runbooks:
 | Runbook | Minimum content |
 | --- | --- |
 | Product ingestion down | Symptoms, first checks, Front Door health, ACA health, credential validation, telemetry write path, rollback decision |
-| Front Door origin unhealthy | DNS check, managed certificate state, Private Link origin state, ACA readiness, direct ACA bypass check |
+| Front Door origin unhealthy | DNS check, managed certificate state, Front Door origin state, ACA readiness, and deferred direct-origin hardening status |
 | Redaction blocked | Failure classes, Azure AI dependency checks, manual review path, retry and discard policy |
 | Recommendation queue stuck | Job health, queue age, model dependency status, retry limits, unavailable recommendation handling |
 | PostgreSQL restore | Restore to new server, validation checks, cutover decision boundaries, rollback notes |

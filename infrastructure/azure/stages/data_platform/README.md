@@ -1,6 +1,6 @@
 # Data Platform Stage
 
-Responsibility: Product Metadata Store, product Blob Storage foundations, backup settings, lifecycle settings, private access, diagnostics, and non-secret downstream contracts.
+Responsibility: Product Metadata Store, product Blob Storage foundations, backup settings, lifecycle settings, public allowlisted access, diagnostics, and non-secret downstream contracts.
 
 Backend key: `data_platform.tfstate`
 
@@ -36,13 +36,15 @@ Outputs expose only non-secret values:
 - Storage account resource ID, name, Blob FQDN, container names, content storage contract, operational storage contract, and lifecycle settings.
 - Resource group IDs and expected workspace name.
 
-App runtime and jobs must use managed identity and private DNS-aware endpoints. Runtime managed identity principal IDs are supplied by downstream runtime issues.
+App runtime and jobs must use managed identity and public service FQDNs constrained by firewall and network allowlists. Runtime managed identity principal IDs are supplied by downstream runtime issues.
 
 ## Provider And AVM Choices
 
 The stage calls only local wrapper modules. The local PostgreSQL wrapper uses `Azure/avm-res-dbforpostgresql-flexibleserver/azurerm` version `0.2.2`. The local Storage Account wrapper uses `Azure/avm-res-storage-storageaccount/azurerm` version `0.7.2`.
 
-The Storage Account AVM manages child containers, private endpoints, diagnostics, and lifecycle management through AzAPI-backed AVM internals. The stage does not use direct AzureRM container resources and does not enable shared key access.
+The Storage Account AVM manages child containers, diagnostics, network rules, and lifecycle management through AzAPI-backed AVM internals. The stage does not use direct AzureRM container resources and does not enable shared key access.
+
+Private endpoint hardening is deferred to a later issue and is not part of the current deployable Terraform path.
 
 No direct AzureRM or AzAPI resource exception is added by this stage beyond existing local wrappers. If a future provider gap appears, document it here before adding the exception.
 
@@ -59,8 +61,6 @@ terraform plan -input=false -lock=false \
   -var="resource_instance=core" \
   -var='tags={environment="dv",region="eastus2",product="token-observability",owner="platform",data_classification="internal",managed_by="terraform"}' \
   -var='postgresql_ad_administrators={deployment={tenant_id="00000000-0000-0000-0000-000000000000",object_id="00000000-0000-0000-0000-000000000000",principal_name="deployment-identity",principal_type="ServicePrincipal"}}' \
-  -var='network_subnet_ids={postgresql_delegated="/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example/providers/Microsoft.Network/virtualNetworks/vnet-example/subnets/postgres",private_endpoints="/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example/providers/Microsoft.Network/virtualNetworks/vnet-example/subnets/private-endpoints"}' \
-  -var='private_dns_zone_ids={postgresql_private_access="/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example/providers/Microsoft.Network/privateDnsZones/example.postgres.database.azure.com",blob="/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example/providers/Microsoft.Network/privateDnsZones/privatelink.blob.core.windows.net"}' \
   -var='diagnostic_destinations={data_platform={log_analytics_workspace_resource_id="/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example/providers/Microsoft.OperationalInsights/workspaces/log-example",destination_type="Dedicated"}}'
 ```
 

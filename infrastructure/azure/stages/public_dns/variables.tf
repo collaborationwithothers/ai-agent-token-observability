@@ -78,12 +78,6 @@ variable "allowed_customer_organization_slugs" {
   default     = ["internal"]
 }
 
-variable "enable_private_endpoints" {
-  description = "Whether this stage should prefer private endpoints when resources are added."
-  type        = bool
-  default     = true
-}
-
 variable "enable_zone_redundancy" {
   description = "Whether this stage should enable zone redundancy for resources that support it."
   type        = bool

@@ -78,12 +78,6 @@ variable "allowed_customer_organization_slugs" {
   default     = ["internal"]
 }
 
-variable "enable_private_endpoints" {
-  description = "Whether this stage should prefer private endpoints when resources are added."
-  type        = bool
-  default     = true
-}
-
 variable "enable_zone_redundancy" {
   description = "Whether this stage should enable zone redundancy for resources that support it."
   type        = bool
@@ -130,7 +124,7 @@ variable "container_app_environment_logs_destination" {
 }
 
 variable "container_app_environment_public_network_access" {
-  description = "Public network access for the Container Apps environment. Must be Disabled in pp and pd so generated ACA FQDNs cannot bypass Front Door."
+  description = "Public network access for the Container Apps environment. Keep Enabled until deferred origin isolation hardening is implemented."
   type        = string
   default     = "Enabled"
 

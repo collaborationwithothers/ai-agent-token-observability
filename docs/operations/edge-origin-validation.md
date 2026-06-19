@@ -4,7 +4,7 @@
 
 This runbook defines the proof required before the Azure Front Door and Azure Container Apps edge design is considered implementation-ready.
 
-The goal is to prove that users and harnesses can reach product services through Azure Front Door, while generated Azure Container Apps FQDNs cannot be used as a public bypass path in production.
+The goal is to prove that users and harnesses can reach product services through Azure Front Door, while generated Azure Container Apps FQDN origins are recorded as sanitized current-path evidence. Direct-origin blocking is deferred to a later origin isolation hardening slice.
 
 ## Scope
 
@@ -25,7 +25,7 @@ Azure Front Door Premium WAF
 First-release origin isolation:
 
 ```text
-Azure Front Door Premium Private Link to Azure Container Apps
+Public Front Door routes to generated Azure Container Apps FQDN origins until origin network hardening is implemented.
 ```
 
 First-release certificate model:
@@ -87,7 +87,7 @@ The validation must prove:
 - HTTPS requests to first-release product hostnames succeed through Azure Front Door.
 - HTTP requests redirect to HTTPS or are rejected according to the Front Door route policy.
 - Front Door WAF and route logs show the request entered through Front Door.
-- Origin health is healthy through the Private Link origin.
+- Origin health is healthy through the configured generated ACA FQDN origin.
 
 Command contract:
 
@@ -102,15 +102,13 @@ Expected result:
 - Health endpoints return the documented success status through Front Door.
 - Response headers and diagnostic logs show the public path went through Front Door.
 
-### 4. ACA Direct Bypass Proof
+### 4. ACA Origin Evidence
 
 The validation must prove:
 
-- The generated Azure Container Apps FQDN for each public product service is not reachable from the public internet in production.
-- Public network access is disabled on the Azure Container Apps environment for production.
-- Private endpoint connections required for the Front Door origin are approved.
-- Terraform app runtime output `direct_origin_validation_targets.public_network_access` is `Disabled` in `pp` and `pd`.
-- Terraform edge output `front_door_private_link_origin_approval_requests` identifies the Product Dashboard, Product API, and Product Ingestion Endpoint origins covered by the Container Apps managed environment Private Link approval.
+- The generated Azure Container Apps FQDN for each public product service is captured as current public-origin evidence.
+- Terraform app runtime output `direct_origin_validation_targets.public_network_access` is recorded as current-path evidence.
+- Direct-origin blocking is deferred to a later origin isolation hardening slice.
 
 Command contract:
 
@@ -122,16 +120,15 @@ curl -I --max-time 15 "https://$INGEST_ACA_FQDN/health/ready"
 
 Expected production result:
 
-- Direct public requests to generated ACA FQDNs fail, time out, or return an explicit platform rejection.
-- Direct generated ACA FQDN access must not return the application health response from the public internet.
-- Any HTTP response served by the application, including `404`, proves the generated ACA FQDN is publicly reachable and is a failed direct-origin proof in `pp` or `pd`.
+- Direct public requests to generated ACA FQDNs are recorded as evidence for the current deployable path.
+- Direct-origin blocking is not a current release gate.
+- Any HTTP response served by the application records current public-origin reachability and is not a failed proof until deferred origin isolation hardening is reintroduced.
 
 Failure rule:
 
-- If a generated ACA FQDN returns a successful application response from the public internet in `pp` or `pd`, the release is not production-ready.
-- If a generated ACA FQDN returns any application-served HTTP response from the public internet in `pp` or `pd`, the release is not production-ready.
-- If the Container Apps environment public network access is not `Disabled` in `pp` or `pd`, the release is not production-ready.
-- If a Front Door Private Link origin approval remains pending or rejected, the release is not production-ready.
+- If a generated ACA FQDN returns a successful application response from the public internet, record the result as current public-origin evidence.
+- If deferred origin isolation hardening is reintroduced, this runbook must add a separate blocking direct-origin proof.
+- Container Apps environment public network access remains `Enabled` in the current deployable path.
 
 ### 5. Origin Host Header Proof
 
@@ -140,8 +137,6 @@ The validation must prove:
 - Front Door origin host name uses the generated ACA FQDN.
 - Front Door origin host header uses the generated ACA FQDN unless a later tested design changes the TLS origin contract.
 - End-to-end HTTPS succeeds from Front Door to the ACA origin.
-- Front Door origin Private Link target is the Azure Container Apps managed environment.
-- The Private Link target type is `managedEnvironments`.
 
 Rationale:
 
@@ -151,10 +146,8 @@ Rationale:
 
 Required audit evidence:
 
-- Store the sanitized `front_door_private_link_origin_approval_requests` output with the deployment record.
-- Record the final approved state for one or more Azure-managed private endpoint connection requests on the Container Apps managed environment, correlated to the three Front Door origin outputs.
-- Record who approved each Private Link connection request and when approval completed.
 - Record the public direct-origin proof result without cookies, bearer tokens, request payloads, or response bodies.
+Private endpoint hardening is deferred to a later issue and is not part of the current deployable Terraform path.
 
 ### 6. Authentication Callback Proof
 
@@ -190,7 +183,7 @@ The first implementation may run this proof manually from an operator machine fo
 
 For `qa`, `pp`, and `pd`, validation should be represented as a guarded GitHub Actions workflow or workflow job using the same public-repository gates as Terraform deployment workflows.
 
-Managed Azure VNet runners may be used for private-resource validation and Azure API checks. They do not prove public-origin isolation by themselves. Direct-bypass checks must include a public-internet perspective or another documented equivalent.
+Managed Azure VNet runners may be used for allowlisted-resource validation and Azure API checks. They do not prove deferred public-origin isolation by themselves.
 
 Implemented workflow:
 
@@ -200,15 +193,15 @@ Implemented workflow:
 
 The workflow derives the Terraform workspace from `environment`, `azure_region`, and `customer_organization_slug`. The customer organization slug defaults to `internal` and can be overridden when validating a different customer scope.
 
-The workflow reads the `app_runtime` and `edge` Terraform state outputs on the managed Azure runner, validates the public Front Door hostname and authentication callback contract, probes the public Front Door hostnames, and exports only sanitized generated ACA origin URLs to a separate GitHub-hosted runner job. That public runner job has no Azure login and proves generated ACA FQDNs are not reachable from a public-internet perspective. Workflow summaries must contain only sanitized status evidence.
+The workflow reads the `app_runtime` and `edge` Terraform state outputs on the managed Azure runner, validates the public Front Door hostname and authentication callback contract, probes the public Front Door hostnames, and exports only sanitized generated ACA origin URLs to a separate GitHub-hosted runner job. That public runner job has no Azure login and records current public-origin evidence from a public-internet perspective. Workflow summaries must contain only sanitized status evidence.
 
 ## Acceptance Criteria
 
 - DNS delegation and public hostname records are correct.
 - Front Door managed certificates are deployed for `app`, `api`, and `ingest`.
 - Public Front Door HTTPS health checks succeed.
-- Front Door origin health succeeds through Private Link.
-- Direct public requests to generated ACA FQDNs do not reach the application in `pp` or `pd`.
+- Front Door origin health succeeds through the configured generated ACA FQDN origins.
+- Direct public requests to generated ACA FQDNs are recorded as current public-origin evidence.
 - Auth callbacks and browser-visible URLs use public Front Door hostnames.
 - ACA product custom domains and product certificates are not required for the first release.
 - Validation outputs are sanitized before being stored in workflow summaries or issues.
@@ -217,7 +210,5 @@ The workflow reads the `app_runtime` and `edge` Terraform state outputs on the m
 
 - Azure Front Door managed certificates use DNS TXT validation for custom domains: https://learn.microsoft.com/en-us/azure/frontdoor/domain
 - Azure Front Door supports managed certificates and customer-managed certificates for custom domains: https://learn.microsoft.com/en-us/azure/frontdoor/standard-premium/how-to-configure-https-custom-domain
-- Azure Front Door Premium can connect to origins through Private Link, removing the need for origins to be publicly accessible: https://learn.microsoft.com/en-us/azure/frontdoor/private-link
 - Azure Container Apps ingress with `external` is accessible through its FQDN: https://learn.microsoft.com/en-us/azure/container-apps/ingress-overview
-- Azure Container Apps can be exposed through Azure Front Door Premium with public network access disabled: https://learn.microsoft.com/en-us/azure/container-apps/front-door-custom-virtual-network-private-link
 - Azure Front Door supports `X-Forwarded-For`, `X-Forwarded-Host`, and `X-Forwarded-Proto` headers: https://learn.microsoft.com/en-us/azure/frontdoor/front-door-faq

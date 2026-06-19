@@ -78,12 +78,6 @@ variable "allowed_customer_organization_slugs" {
   default     = ["internal"]
 }
 
-variable "enable_private_endpoints" {
-  description = "Whether this stage should prefer private endpoints when resources are added."
-  type        = bool
-  default     = true
-}
-
 variable "enable_zone_redundancy" {
   description = "Whether this stage should enable zone redundancy for resources that support it."
   type        = bool
@@ -194,37 +188,9 @@ variable "waf_rate_limits" {
   }
 }
 
-variable "enable_front_door_private_link_origins" {
-  description = "Whether Front Door origins should connect to the Container Apps managed environment through Private Link. Must be true in pp and pd."
-  type        = bool
-  default     = false
-}
-
 variable "container_app_fqdns" {
   description = "Container App generated FQDNs by app_runtime output key."
   type        = map(string)
-}
-
-variable "container_app_environment_id" {
-  description = "Container Apps managed environment resource ID used as the Front Door Private Link origin target."
-  type        = string
-  default     = null
-
-  validation {
-    condition     = var.container_app_environment_id == null || can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.App/managedEnvironments/[^/]+$", var.container_app_environment_id))
-    error_message = "container_app_environment_id must be a Container Apps managed environment resource ID when supplied."
-  }
-}
-
-variable "front_door_private_link_request_message" {
-  description = "Auditable request message submitted for Front Door Private Link origin approval."
-  type        = string
-  default     = "Token Observability Front Door origin Private Link approval"
-
-  validation {
-    condition     = length(var.front_door_private_link_request_message) >= 1 && length(var.front_door_private_link_request_message) <= 140
-    error_message = "front_door_private_link_request_message must be between 1 and 140 characters."
-  }
 }
 
 variable "log_analytics_workspace_id" {

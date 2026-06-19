@@ -46,7 +46,7 @@ These areas are specific enough to become implementation issues.
 | Credential-derived identity | Ready | Ingestion and identity docs agree that Scoped Ingestion Credential is authoritative |
 | Product metadata model | Ready | Production data model defines tenant-aware logical entities |
 | Product API route contract | Ready | Product API Contract defines route prefixes, authorization actions, route responsibilities, errors, idempotency, and MVP acceptance criteria |
-| Runtime service topology | Ready | Runtime Service Topology defines three long-running Container Apps, one shared jobs image with explicit commands, Front Door-only public ingress, and production blocking of direct public ACA generated FQDN access |
+| Runtime service topology | Ready | Runtime Service Topology defines three long-running Container Apps, one shared jobs image with explicit commands, Front Door public ingress, generated ACA FQDN origins, and deferred origin isolation hardening |
 | Product Dashboard frontend | Ready | Product Dashboard UX Architecture defines React, TypeScript, Vite, route map, role visibility, content states, and UX acceptance criteria |
 | Managed Grafana dashboard contract | Ready | Managed Grafana Dashboards and Aggregate Metrics Contract define Azure Monitor workspace or managed Prometheus as the first-release aggregate metrics data source, four first-release dashboards, required panel families, forbidden panels, exact dashboard UIDs, JSON artifact paths, aggregate metric names, labels, PromQL query contracts, Terraform-managed provisioning with repo-versioned dashboard JSON, Provider Authentication Proof Gate, service-account-token fallback constraints, coarse Grafana Admin/Editor/Viewer RBAC, environment-scoped Entra group object ID variables, production human Viewer-only default, and limits Log Analytics or Application Insights to later aggregate operational panels |
 | No store-then-redact | Ready | Content architecture and data model both forbid raw durable storage before redaction |
@@ -54,9 +54,9 @@ These areas are specific enough to become implementation issues.
 | LLM authority boundary | Ready | Recommendation docs distinguish confirmed findings from LLM-inferred candidates |
 | Recommendation engine contract | Ready | Recommendation Engine Architecture defines deterministic rules, evidence packet schema, structured LLM output schema, validation gates, prompt templates, deployment aliases, evaluator set, and candidate review workflow |
 | Non-punitive product posture | Ready | Target spec, PRD, identity, recommendation, and data model align |
-| Terraform production infrastructure | Ready | Terraform Production Infrastructure defines stage directories, manually created remote state foundation, backend rules, workspace validation, AVM/AzureRM/AzAPI selection, resource group boundaries, workflow gates, Front Door Premium Private Link origin variables, managed certificate variables, ACA public-network-disable validation, and guardrail validator rules |
-| Public DNS, certificate, and edge-origin boundary | Ready at boundary level | Public DNS And Certificates defines Cloudflare apex ownership, Azure DNS delegated product zone, product hostnames, Azure Front Door managed certificates for explicit hostnames, Front Door Premium Private Link to ACA origins, ACA direct-bypass prevention, and retained shared DNS resources |
-| Edge-origin validation | Ready | Edge Origin Validation defines DNS, managed certificate, Front Door route, Private Link origin, direct ACA bypass, origin host header, auth callback, and sanitized-output proof requirements |
+| Terraform production infrastructure | Ready | Terraform Production Infrastructure defines stage directories, manually created remote state foundation, backend rules, workspace validation, AVM/AzureRM/AzAPI selection, resource group boundaries, workflow gates, managed certificate variables, current public-origin routing, and guardrail validator rules |
+| Public DNS, certificate, and edge-origin boundary | Ready at boundary level | Public DNS And Certificates defines Cloudflare apex ownership, Azure DNS delegated product zone, product hostnames, Azure Front Door managed certificates for explicit hostnames, public Front Door routing to generated ACA FQDN origins, and retained shared DNS resources |
+| Edge-origin validation | Ready | Edge Origin Validation defines DNS, managed certificate, Front Door route, generated ACA FQDN origin health, origin host header, auth callback, and sanitized-output proof requirements |
 | Day-1 operations baseline | Ready | Production Operations defines health and readiness endpoints, Container Apps probes, internal SLOs, minimum Azure Monitor alerts, private action groups, PostgreSQL restore drill, Blob lifecycle validation, audit export, and required incident runbooks |
 | Codebase transition | Ready | Production Codebase Transition inventories current local-first projects and assigns delete, replace, retain, or quarantine disposition so production issues do not evolve local-only mode in place |
 | Implementation roadmap | Ready | Production Implementation Roadmap defines milestone-based vertical slices, issue shape requirements, label model, and first milestone as Production Skeleton And Guardrails |
@@ -84,14 +84,13 @@ Recommended next step: create implementation issues for Grafana Terraform provis
 
 ### 2. Edge And Origin Proof
 
-Status: DNS delegation, explicit hostname certificate scope, Front Door managed certificate use, Front Door Premium Private Link origins, ACA direct-bypass prevention, and the end-to-end proof contract are defined. The remaining work is implementation, not requirements discovery.
+Status: DNS delegation, explicit hostname certificate scope, Front Door managed certificate use, public Front Door routing to generated ACA FQDN origins, and the end-to-end proof contract are defined. The remaining work is implementation, not requirements discovery.
 
 Implementation issue creation needs:
 
 - Front Door managed certificate domain validation records for `app`, `api`, and `ingest`.
-- Front Door Premium Private Link origin Terraform implementation for Azure Container Apps.
-- ACA environment configuration that disables public network access in production.
-- Proof execution showing Front Door hostnames work while generated ACA FQDNs are not publicly reachable.
+- Deferred origin isolation hardening issue for Azure Container Apps.
+- Current proof execution showing Front Door hostnames work with generated ACA FQDN origins.
 - Auth callback and forwarded host validation through Front Door.
 
 Recommended next step: create implementation issues for the edge stage, app runtime origin settings, DNS records, and validation workflow.
@@ -174,9 +173,9 @@ Create issues as vertical slices, not component-only tasks. Each issue should na
 - Azure DNS delegation uses NS records in the parent zone to delegate a child zone to Azure DNS authoritative name servers: https://learn.microsoft.com/en-us/azure/dns/dns-domain-delegation
 - Cloudflare supports subdomain delegation by creating NS records for a subdomain in the parent zone: https://developers.cloudflare.com/dns/zone-setups/subdomain-setup/setup/
 - Azure Front Door managed certificates use DNS TXT validation for custom domains: https://learn.microsoft.com/en-us/azure/frontdoor/domain
-- Azure Front Door Premium supports Private Link origins: https://learn.microsoft.com/en-us/azure/frontdoor/private-link
-- Azure Container Apps ingress with `external` is reachable by FQDN, which is why production origins need private isolation: https://learn.microsoft.com/en-us/azure/container-apps/ingress-overview
-- Azure Container Apps can be exposed through Azure Front Door Premium with public network access disabled: https://learn.microsoft.com/en-us/azure/container-apps/front-door-custom-virtual-network-private-link
+- Azure Front Door Premium supports origin isolation options that are deferred from the current deployable path: https://learn.microsoft.com/en-us/azure/frontdoor/private-link
+- Azure Container Apps ingress with `external` is reachable by FQDN, which is why origin isolation remains deferred hardening work: https://learn.microsoft.com/en-us/azure/container-apps/ingress-overview
+- Azure Container Apps supports Front Door integration patterns that can be reconsidered in the deferred hardening slice: https://learn.microsoft.com/en-us/azure/container-apps/front-door-custom-virtual-network-private-link
 - GitHub Actions supports manually triggered workflows with `workflow_dispatch` inputs: https://docs.github.com/actions/using-workflows/workflow-syntax-for-github-actions#onworkflow_dispatch
 - GitHub and Microsoft document OIDC authentication from GitHub Actions to Azure without long-lived cloud credentials: https://docs.github.com/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-azure and https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect
 - Terraform `destroy` deprovisions objects managed by a Terraform configuration and is commonly suited to temporary infrastructure cleanup rather than long-lived production resources: https://developer.hashicorp.com/terraform/cli/commands/destroy

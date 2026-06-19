@@ -26,33 +26,18 @@ resource "terraform_data" "upstream_contract_guard" {
 
   lifecycle {
     precondition {
-      condition     = !var.enable_private_endpoints || local.postgresql_delegated_subnet_id != null
-      error_message = "network_subnet_ids must include postgresql_delegated when private data platform access is enabled."
-    }
-
-    precondition {
-      condition     = !var.enable_private_endpoints || local.storage_private_endpoint_subnet_id != null
-      error_message = "network_subnet_ids must include private_endpoints when private data platform access is enabled."
-    }
-
-    precondition {
-      condition     = !var.enable_private_endpoints || local.postgresql_private_dns_zone_id != null
-      error_message = "private_dns_zone_ids must include postgresql_private_access when private data platform access is enabled."
-    }
-
-    precondition {
-      condition     = !var.enable_private_endpoints || local.blob_private_dns_zone_id != null
-      error_message = "private_dns_zone_ids must include blob when private data platform access is enabled."
-    }
-
-    precondition {
       condition     = local.diagnostic_workspace_resource_id != null
       error_message = "diagnostic_destinations must include data_platform.log_analytics_workspace_resource_id from observability_foundation."
     }
 
     precondition {
-      condition     = length(var.postgresql_ad_administrators) > 0
-      error_message = "postgresql_ad_administrators must include at least one Microsoft Entra administrator because password authentication is disabled."
+      condition     = length(local.postgresql_ad_administrators) > 0
+      error_message = "PostgreSQL must include at least one Microsoft Entra administrator because password authentication is disabled."
+    }
+
+    precondition {
+      condition     = contains(keys(var.postgresql_firewall_rules), "github_actions_runner_nat")
+      error_message = "postgresql_firewall_rules must include github_actions_runner_nat for the managed VNet runner NAT gateway public IP."
     }
   }
 }
@@ -74,8 +59,7 @@ module "product_metadata_store" {
   resource_group_name                      = module.data_resource_group.name
   location                                 = module.data_resource_group.location
   tenant_id                                = data.azurerm_client_config.current.tenant_id
-  delegated_subnet_id                      = local.postgresql_delegated_subnet_id
-  private_dns_zone_id                      = local.postgresql_private_dns_zone_id
+  delegated_subnet_id                      = null
   server_version                           = var.postgresql_server_version
   sku_name                                 = var.postgresql_sku_name
   storage_mb                               = var.postgresql_storage_mb
@@ -84,8 +68,9 @@ module "product_metadata_store" {
   geo_redundant_backup_enabled             = var.postgresql_geo_redundant_backup_enabled
   auto_grow_enabled                        = var.postgresql_auto_grow_enabled
   zone_redundant_high_availability_enabled = var.enable_zone_redundancy
-  ad_administrators                        = var.postgresql_ad_administrators
+  ad_administrators                        = local.postgresql_ad_administrators
   diagnostic_settings                      = local.postgresql_diagnostic_settings
+  firewall_rules                           = var.postgresql_firewall_rules
   role_assignments                         = var.postgresql_role_assignments
   user_assigned_identity_resource_ids      = var.postgresql_user_assigned_identity_resource_ids
   tags                                     = local.common_tags
@@ -113,7 +98,6 @@ module "product_storage" {
   diagnostic_settings_blob            = local.storage_blob_diagnostic_settings
   diagnostic_settings_storage_account = local.storage_account_diagnostic_settings
   network_rules                       = var.storage_network_rules
-  private_endpoints                   = local.storage_private_endpoints
   role_assignments                    = var.storage_account_role_assignments
   storage_management_policy_rule      = local.storage_management_policy_rules
   tags                                = local.common_tags

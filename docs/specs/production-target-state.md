@@ -80,11 +80,11 @@ Jobs include:
 - Tenant maintenance.
 - Pricing refresh.
 
-The production ingress boundary uses public HTTPS for the Product Dashboard and Product Ingestion Endpoint through the Production Edge. These entry points are protected by authentication, tenant validation, rate limits, and WAF or front-door controls. Direct public origin bypass is not allowed in production.
+The production ingress boundary uses public HTTPS for the Product Dashboard and Product Ingestion Endpoint through the Production Edge. These entry points are protected by authentication, tenant validation, rate limits, and WAF or front-door controls. Direct-origin blocking is deferred to a later origin isolation hardening slice.
 
-The first-release production edge is Azure Front Door Premium WAF routing to Azure Container Apps through Private Link. Azure API Management is a future API gateway option for API lifecycle management, productized API access, policy centralization, partner access, and scale needs. APIM is not a first-release dependency.
+The current deployable production edge is Azure Front Door Premium WAF routing to generated Azure Container Apps FQDN origins. Azure API Management is a future API gateway option for API lifecycle management, productized API access, policy centralization, partner access, and scale needs. APIM is not a first-release dependency.
 
-The private data plane keeps PostgreSQL, Blob Storage, Key Vault, and other product stores or internal dependencies on private access paths where feasible. Public data-store endpoints should be disabled where feasible. App-to-store access should use managed identity and least privilege.
+The current deployable data plane uses public access constrained by approved firewall and network allowlists until deferred network hardening is implemented. App-to-store access should use managed identity and least privilege.
 
 ## Observability Backend Split
 

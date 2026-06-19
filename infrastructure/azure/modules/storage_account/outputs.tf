@@ -18,11 +18,6 @@ output "name" {
   value       = module.storage_account.name
 }
 
-output "private_endpoint_ids" {
-  description = "Storage private endpoint resource IDs by key."
-  value       = { for key, endpoint in module.storage_account.private_endpoints : key => endpoint.id }
-}
-
 output "resource_id" {
   description = "Resource ID of the Storage Account."
   value       = module.storage_account.resource_id

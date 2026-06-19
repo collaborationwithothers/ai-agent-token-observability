@@ -44,10 +44,11 @@ required_stage_patterns = {
     "data resource group wrapper": r'module\s+"data_resource_group"\s+\{[^}]*source\s*=\s*"\.\./\.\./modules/resource_group"',
     "local PostgreSQL wrapper": r'module\s+"product_metadata_store"\s+\{[^}]*source\s*=\s*"\.\./\.\./modules/postgresql_flexible_server"',
     "local Storage Account wrapper": r'module\s+"product_storage"\s+\{[^}]*source\s*=\s*"\.\./\.\./modules/storage_account"',
-    "PostgreSQL delegated subnet contract": r'network_subnet_ids\["postgresql_delegated"\]',
-    "Storage private endpoint subnet contract": r'network_subnet_ids\["private_endpoints"\]',
-    "PostgreSQL private DNS contract": r'private_dns_zone_ids\["postgresql_private_access"\]',
-    "Blob private DNS contract": r'private_dns_zone_ids\["blob"\]',
+    "PostgreSQL firewall rules": r'postgresql_firewall_rules',
+    "PostgreSQL NAT firewall rule": r'74\.234\.84\.247',
+    "PostgreSQL sql-admins group admin": r'principal_name\s*=\s*"sql-admins"',
+    "PostgreSQL sql-admins object ID": r'ed0a42c6-80ec-45d4-b1fd-3ecd108d0a9f',
+    "Storage runner subnet allowlist": r'snet-github-actions-private-runner-neu',
     "observability diagnostic contract": r'diagnostic_destinations\["data_platform"\]',
     "PostgreSQL resource ID output": r'output\s+"postgresql_server_resource_id"',
     "PostgreSQL restore output": r'output\s+"postgresql_restore_contract"',
@@ -85,7 +86,11 @@ required_module_patterns = {
     ),
     "PostgreSQL public access disabled": (
         module_content["postgresql_flexible_server"],
-        r'public_network_access_enabled\s*=\s*false',
+        r'public_network_access_enabled\s*=\s*true',
+    ),
+    "PostgreSQL firewall rules passthrough": (
+        module_content["postgresql_flexible_server"],
+        r'firewall_rules\s*=\s*var\.firewall_rules',
     ),
     "PostgreSQL backup retention": (
         module_content["postgresql_flexible_server"],
@@ -109,7 +114,7 @@ required_module_patterns = {
     ),
     "Storage public access disabled": (
         module_content["storage_account"],
-        r'public_network_access_enabled\s*=\s*false',
+        r'public_network_access_enabled\s*=\s*true',
     ),
     "Storage shared key disabled": (
         module_content["storage_account"],
@@ -128,6 +133,20 @@ required_module_patterns = {
 for name, (content, pattern) in required_module_patterns.items():
     if re.search(pattern, content, re.IGNORECASE | re.MULTILINE | re.DOTALL) is None:
         errors.append(f"missing {name}")
+
+endpoint_pattern = "|".join(["private_" + "endpoint", "private " + "endpoint", "private_" + "endpoints"])
+dns_pattern = "|".join(["private_" + "dns", "private " + "DNS", "private_" + "dns_zone"])
+
+for forbidden_name, forbidden_pattern in {
+    "data platform deferred network endpoint contract": endpoint_pattern,
+    "data platform deferred DNS contract": dns_pattern,
+}.items():
+    if re.search(forbidden_pattern, stage_content, re.IGNORECASE | re.MULTILINE | re.DOTALL):
+        errors.append(f"forbidden {forbidden_name}")
+
+for module_name in ["postgresql_flexible_server", "storage_account"]:
+    if re.search(f"{endpoint_pattern}|{dns_pattern}", module_content[module_name], re.IGNORECASE | re.MULTILINE | re.DOTALL):
+        errors.append(f"{module_name} module must not expose deferred network endpoint or DNS contracts")
 
 for forbidden in [
     r'output\s+"[^"]*(connection_string|storage_key|access_key|sas|credential|password|secret|token)[^"]*"',
@@ -148,6 +167,7 @@ required_readme_terms = [
     "Downstream Outputs",
     "Provider And AVM Choices",
     "Runtime managed identity principal IDs are supplied by downstream runtime issues.",
+    "Private endpoint hardening is deferred",
     "Do not add .NET, xUnit, or C# tests for Terraform behavior.",
 ]
 

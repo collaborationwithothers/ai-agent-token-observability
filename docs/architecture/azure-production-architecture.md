@@ -29,7 +29,7 @@ Developer machine
         v
 Azure Front Door Premium WAF
   managed certificates for product hostnames
-  Private Link to ACA origins
+  public routing to generated ACA FQDN origins
         |
         v
 Azure Container Apps
@@ -70,7 +70,7 @@ Azure Managed Grafana
 
 ## Edge And Ingress
 
-Azure Front Door Premium WAF is the first-release production edge. It protects public HTTPS traffic, terminates public TLS with Azure Front Door managed certificates, and routes to Azure Container Apps origins over Private Link.
+Azure Front Door Premium WAF is the first-release production edge. It protects public HTTPS traffic, terminates public TLS with Azure Front Door managed certificates, and routes to generated Azure Container Apps FQDN origins.
 
 Public DNS and certificates are defined in [public-dns-and-certificates.md](./public-dns-and-certificates.md). The first-release product DNS zone is `tokenobs.consultwithcloud.com`, delegated from the Cloudflare-managed apex zone `consultwithcloud.com` to Azure DNS.
 
@@ -89,8 +89,8 @@ Required edge behavior:
 - Tenant-aware request routing where needed.
 - Health probes.
 - Logs and metrics for edge traffic.
-- Azure Front Door Premium Private Link to Azure Container Apps origins.
-- Azure Container Apps public network access disabled in production so generated ACA FQDNs cannot bypass Front Door.
+- Public Front Door routing to generated Azure Container Apps FQDN origins.
+- Direct origin access controls are deferred to the later network hardening slice.
 - ACA origins configured with generated ACA FQDN as the origin host name and origin host header.
 
 Azure API Management is a future API gateway option, not a first-release dependency. It can be introduced later behind Azure Front Door WAF when API lifecycle management, policy centralization, partner access, quotas, subscriptions, or API product packaging becomes a requirement.
@@ -101,8 +101,8 @@ Verified platform facts:
 
 - Azure Front Door provides global application delivery and WAF integration: https://learn.microsoft.com/en-us/azure/frontdoor/front-door-overview
 - Azure Front Door WAF supports rate limiting rules: https://learn.microsoft.com/en-us/azure/web-application-firewall/afds/waf-front-door-rate-limit
-- Azure Front Door Premium can connect to origins through Private Link and removes the need for the origin to be publicly accessible: https://learn.microsoft.com/en-us/azure/frontdoor/private-link
-- Azure Container Apps can be exposed through Azure Front Door Premium with public network access disabled: https://learn.microsoft.com/en-us/azure/container-apps/front-door-custom-virtual-network-private-link
+- Azure Front Door Premium supports origin isolation options that are deferred from the current deployable path: https://learn.microsoft.com/en-us/azure/frontdoor/private-link
+- Azure Container Apps supports public ingress with generated FQDN origins for the current Front Door path: https://learn.microsoft.com/en-us/azure/container-apps/ingress-overview
 - Azure Container Apps supports ingress and built-in authentication for external ingress-enabled apps: https://learn.microsoft.com/en-us/azure/container-apps/ingress-overview and https://learn.microsoft.com/en-us/azure/container-apps/authentication
 
 ## Compute
@@ -368,7 +368,7 @@ Resolved by current docs:
 - Public-repository workflow guardrail validator rules.
 - Product subdomain delegation to Azure DNS.
 - Public TLS through Front Door managed certificates.
-- Front Door Premium Private Link origin isolation.
+- Public Front Door routing to generated ACA FQDN origins, with origin isolation deferred.
 - Deferred BYOC certificate renewal runtime.
 - Infrastructure deletion workflow and retained shared-resource boundary.
 - Day-1 operations baseline.
@@ -379,4 +379,4 @@ Implementation proof or environment-specific items:
 - PostgreSQL row-level security implementation strategy, if used in addition to application-level tenant scoping.
 - Exact Azure OpenAI model SKU per deployment alias after regional capacity and structured-output support validation.
 - Exact Managed Grafana environment-specific Entra group object ID values, Entra token provider compatibility proof, and Product Dashboard link allowlist implementation.
-- Exact Front Door Premium Private Link Terraform shape and end-to-end origin-bypass proof.
+- Deferred origin isolation hardening design and end-to-end proof.
