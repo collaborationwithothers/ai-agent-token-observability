@@ -27,4 +27,4 @@ issue_arg="${1:-the next infrastructure-readiness ready-for-agent issue}"
 
 cd "$ROOT_DIR"
 
-printf 'Use $infrastructure-readiness-issue.\n\nWork %s. Use a compact issue packet, then Issue Planner, then one Issue Implementor High only after the planner handoff exists. Do not spawn explorer agents unless blocked. Keep Terraform, validation, issue-list, and worktree output narrow. Run focused validation before Code Reviewer, one Code Reviewer pass, one targeted rereview only if required, then the PR gate and create a PR closing only the intended issue.\n' "$issue_arg" | codex exec -
+printf 'Use $infrastructure-readiness-issue.\n\nWork %s. Use a compact issue packet, produce the planning handoff in the main thread, implement narrowly from that handoff, and do not spawn planner or implementor subagents. Do not spawn explorer agents unless blocked by a specific independent unknown. Keep Terraform, validation, issue-list, and worktree output narrow. Run focused validation before Code Reviewer, one Code Reviewer pass, one targeted rereview only if required, then the PR gate and create a PR closing only the intended issue.\n' "$issue_arg" | codex exec -

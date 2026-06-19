@@ -77,18 +77,20 @@ Use `scripts/session-digest.sh ISSUE_NUMBER` or `scripts/issue-start.sh --compac
 
 ## Subagents
 
-Use subagents only for parallel review or independent research unless the user explicitly asks for planner or implementation subagents.
+Use subagents only for parallel review, independent research, or Code Reviewer.
 
-For requested ready-for-agent planning and implementation:
+Do not use planner or implementor subagents for normal ready-for-agent issue work. The issue planning, risk classification, implementation handoff, and narrow implementation loop live in the repo skills:
 
-- Run `Issue Planner` first and wait for its `IMPLEMENTOR HANDOFF`.
-- Run exactly one implementation agent after the handoff.
-- Use `Issue Implementor High` for security, privacy, tenant-boundary, authorization, persistence, migration, Terraform provider behavior, production architecture, token metric state changes, or Azure infrastructure behavior.
-- Do not spawn explorer agents unless a specific independent unknown remains after planner handoff.
+- `.agents/skills/review-worktree-issue-pr/SKILL.md`
+- `.agents/skills/infrastructure-readiness-issue/SKILL.md`
+
+Use the main agent to produce the planning handoff and implement from it. Escalate internally to the high-risk workflow in the relevant skill for security, privacy, tenant-boundary, authorization, persistence, migration, Terraform provider behavior, production architecture, token metric state changes, or Azure infrastructure behavior.
+
+Do not spawn explorer agents unless a specific independent unknown remains after the skill-driven planning handoff.
 
 If a subagent wait or close attempt fails once, stop waiting and continue with verified local evidence.
 
-Implementation agents must not run Code Reviewer, write `Comments.md`, commit, push, or create PRs unless explicitly instructed. The main agent remains responsible for final validation, review orchestration, PR creation, and closing-reference verification.
+Only Code Reviewer should write `Comments.md`. The main agent remains responsible for final validation, review orchestration, PR creation, and closing-reference verification.
 
 ## Validation And Review
 
