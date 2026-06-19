@@ -1,4 +1,4 @@
 interface:
   display_name: "Infrastructure Readiness Issue"
   short_description: "Compact infra issue PR workflow."
-  default_prompt: "Use this skill to work the next infrastructure-readiness ready-for-agent issue with a compact issue packet, one planner handoff, one implementor, focused Terraform validation, Code Reviewer, and a PR."
+  default_prompt: "Use this skill to work the next infrastructure-readiness ready-for-agent issue with a compact issue packet, a main-thread planning handoff, narrow implementation, focused Terraform validation, Code Reviewer, and a PR."

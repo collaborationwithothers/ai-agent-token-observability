@@ -1,6 +1,6 @@
 ---
 name: infrastructure-readiness-issue
-description: Use when working the next infrastructure-readiness ready-for-agent GitHub issue in this repo, especially Terraform, deployment, networking, Azure resource, validation, or PR-ready infrastructure work where token budget matters. Provides a compact issue workflow with bounded context, planner/implementor sequencing, focused Terraform validation, Code Reviewer gating, and PR creation.
+description: Use when working the next infrastructure-readiness ready-for-agent GitHub issue in this repo, especially Terraform, deployment, networking, Azure resource, validation, or PR-ready infrastructure work where token budget matters.
 ---
 
 # Infrastructure Readiness Issue
@@ -24,23 +24,25 @@ This skill refines the repo ready-for-agent issue workflow for infrastructure wo
    - If output is noisy, summarize only: issue metadata, acceptance criteria, current worktree, branch/status, diff stat, untracked files, acceptance matrix, and focused validation commands.
    - Do not paste full worktree lists when many stale worktrees exist. Report current worktree plus matching issue worktree only.
 
-3. Use subagents only in this sequence when the user asks for planner/implementor agents.
-   - Spawn `Issue Planner` first.
-   - Wait for its `IMPLEMENTOR HANDOFF`.
-   - Spawn exactly one implementor after the handoff.
-   - Use `Issue Implementor High` for Terraform provider behavior, production architecture, networking, security, privacy, tenant-boundary, authorization, persistence, migration, or token metric state changes.
-   - Do not spawn explorer agents unless a specific independent unknown remains after the planner handoff.
+3. Produce the planning handoff in the main thread.
+   - Do not spawn planner or implementor subagents for the sequential infrastructure workflow.
+   - Map each acceptance criterion to intended Terraform, workflow, docs, or script files.
+   - List source documents read and source documents intentionally not loaded.
+   - Identify risks for Terraform provider behavior, production architecture, networking, security, privacy, tenant-boundary, authorization, persistence, migration, token metric state changes, and Azure infrastructure behavior.
+   - Include a do not touch list for neighboring stages, modules, or workflows.
+   - Include focused Terraform validation commands and any required plan evidence.
 
-4. Keep main-thread context small while the implementor works.
-   - Do not reread every file the implementor is reading.
-   - Prepare only integration checks, validation commands, and PR gate steps.
-   - When the implementor returns, inspect diff stat, changed files, and targeted snippets before deciding whether more reading is needed.
+4. Keep main-thread context small while implementing.
+   - Do not reread every source-of-truth document.
+   - Prepare integration checks, validation commands, and PR gate steps from the handoff.
+   - Inspect diff stat, changed files, and targeted snippets before deciding whether more reading is needed.
 
 5. Implement or integrate narrowly.
    - Read only source-of-truth docs for the touched infrastructure boundary.
    - Prefer existing Terraform stage and module patterns over new structure.
    - Preserve state-sensitive Terraform addresses unless the issue explicitly requires replacement.
    - For Azure resource additions, prefer AVM through local wrapper modules when an appropriate AVM exists.
+   - If local evidence proves the handoff is wrong, stop and update the handoff before broadening scope.
 
 6. Validate with bounded output.
    - Run the narrowest relevant focused validation first, usually `scripts/validate-focused.sh terraform`.
@@ -110,5 +112,5 @@ Use this when starting the task:
 ```text
 Use $infrastructure-readiness-issue.
 
-Work the next infrastructure-readiness ready-for-agent issue. Use a compact issue packet, then Issue Planner, then one Issue Implementor High only after the planner handoff exists. Do not spawn explorer agents unless blocked. Keep Terraform, validation, issue-list, and worktree output narrow. Run focused validation before Code Reviewer, one Code Reviewer pass, one targeted rereview only if required, then the PR gate and create a PR closing only the intended issue.
+Work the next infrastructure-readiness ready-for-agent issue. Use a compact issue packet, produce the planning handoff in the main thread, implement narrowly from that handoff, and do not spawn planner or implementor subagents. Do not spawn explorer agents unless blocked by a specific independent unknown. Keep Terraform, validation, issue-list, and worktree output narrow. Run focused validation before Code Reviewer, one Code Reviewer pass, one targeted rereview only if required, then the PR gate and create a PR closing only the intended issue.
 ```

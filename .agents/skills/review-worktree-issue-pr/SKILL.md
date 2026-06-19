@@ -1,6 +1,6 @@
 ---
 name: review-worktree-issue-pr
-description: Use when working a ready-for-agent GitHub issue in this repository, especially when the user says next issue, worktree, review, Code Reviewer, create a PR, or fix reviewer feedback. Produces an issue-start packet, keeps review scope narrow, and ships only after validation.
+description: Use when working a ready-for-agent GitHub issue in this repository, especially when the user says next issue, worktree, review, Code Reviewer, create a PR, or fix reviewer feedback.
 ---
 
 # Review Worktree Issue PR
@@ -43,12 +43,41 @@ If there is no issue number, manually collect the same facts:
 
 Stop and ask only if the issue target cannot be identified from local context or GitHub.
 
+## Planning Handoff
+
+Before editing, produce a concise planning handoff in the main thread. Do not spawn planner or implementor subagents for this sequential work.
+
+Include:
+
+- Issue summary and acceptance criteria.
+- Source documents read.
+- Current state evidence.
+- Acceptance matrix with criterion, intended implementation file, required validation, and docs or schema evidence.
+- Risk classification.
+- Implementation steps small enough for one main-agent implementation pass.
+- Do not touch list for out-of-scope files or neighboring issues.
+- Focused validation plan.
+
+Use the high-risk path when the issue touches security, privacy, tenant-boundary, authorization, persistence, migrations, Terraform provider behavior, production architecture, token metric state semantics, or Azure infrastructure behavior.
+
+High-risk path:
+
+- Re-check the handoff against the relevant source-of-truth docs before editing.
+- Keep architecture boundaries explicit.
+- For Terraform changes, use Terraform-native validation only. Do not add .NET tests to validate Terraform file structure or Terraform behavior.
+- Preserve metadata-only capture by default.
+- Do not persist prompt text, code content, command output, tool results, secrets, or unrelated local data.
+- Represent unavailable token metrics as null, not zero.
+- Keep observed, estimated, unavailable, not_applicable, and mixed states distinct.
+
 ## Implementation Loop
 
 1. Confirm the actual worktree or branch before editing.
-2. Read only the source-of-truth docs relevant to the changed boundary.
-3. Implement narrowly against the acceptance matrix.
-4. Run focused validation before first review:
+2. Complete the planning handoff.
+3. Read only the source-of-truth docs relevant to the changed boundary.
+4. Implement narrowly against the acceptance matrix and the do not touch list.
+5. If local evidence proves the handoff is wrong, stop and update the handoff before broadening scope.
+6. Run focused validation before first review:
 
 ```bash
 scripts/validate-focused.sh PROFILE
@@ -56,9 +85,9 @@ scripts/validate-focused.sh PROFILE
 
 Use `ingestion`, `api`, `dashboard`, `terraform`, `docs`, or `all` for `PROFILE`.
 
-5. Request Code Reviewer against the current branch diff.
-6. Keep Code Reviewer output in `Comments.md` only.
-7. If review returns `CHANGES_REQUESTED`, create a findings ledger:
+7. Request Code Reviewer against the current branch diff.
+8. Keep Code Reviewer output in `Comments.md` only.
+9. If review returns `CHANGES_REQUESTED`, create a findings ledger:
 
 ```text
 Finding:
@@ -68,14 +97,14 @@ Fixed files:
 Tests or validation:
 ```
 
-8. Fix accepted findings, rerun validation, then ask for targeted rereview. Use full-diff rereview only for architecture, security, privacy, tenant-boundary, persistence, Terraform deployment, or product authorization changes.
-9. After approval, run the PR gate:
+10. Fix accepted findings, rerun validation, then ask for targeted rereview. Use full-diff rereview only for architecture, security, privacy, tenant-boundary, persistence, Terraform deployment, or product authorization changes.
+11. After approval, run the PR gate:
 
 ```bash
 scripts/validate-pr.sh
 ```
 
-10. Commit, push, create the PR, and verify closing references:
+12. Commit, push, create the PR, and verify closing references:
 
 ```bash
 gh pr view PR_NUMBER --json closingIssuesReferences
@@ -93,7 +122,8 @@ gh pr view PR_NUMBER --json closingIssuesReferences
 
 ## Subagent Rules
 
-- Use implementation subagents only when the user explicitly asks for them or the work is truly parallel.
+- Use subagents only for parallel review, independent research, or Code Reviewer.
+- Do not use planner or implementor subagents for the sequential issue workflow.
 - Use Code Reviewer as a review gate, not as an acceptance-criteria discovery tool.
 - If a subagent wait or close attempt fails once, stop waiting and continue with local evidence.
 
