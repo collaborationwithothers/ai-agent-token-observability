@@ -1,0 +1,58 @@
+name: Unsafe Terraform Deploy Fixture
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: string
+      azure_region:
+        required: true
+        type: string
+      customer_organization_slug:
+        required: false
+        default: internal
+        type: string
+      acr_publish_run_id:
+        required: true
+        type: string
+      acr_publish_commit_sha:
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+jobs:
+  select:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'collaborationwithothers/ai-agent-token-observability' && github.actor == 'haripraghash' && github.ref == 'refs/heads/main' }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    outputs:
+      terraform_workspace: ${{ steps.guardrails.outputs.terraform_workspace }}
+      deploy_app_runtime: "true"
+      acr_publish_run_id: ${{ inputs.acr_publish_run_id }}
+      acr_publish_commit_sha: ${{ inputs.acr_publish_commit_sha }}
+    steps:
+      - name: Validate guardrails before privileged steps
+        id: guardrails
+        run: |
+          test "${GITHUB_REPOSITORY}" = "collaborationwithothers/ai-agent-token-observability"
+          test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
+          test "${GITHUB_ACTOR}" = "haripraghash"
+          test "${GITHUB_REF}" = "refs/heads/main"
+          TF_WORKSPACE="${{ inputs.environment }}_${{ inputs.azure_region }}_${{ inputs.customer_organization_slug }}"
+          echo "terraform_workspace=${TF_WORKSPACE}" >> "${GITHUB_OUTPUT}"
+  plan-app-runtime:
+    needs: select
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    environment: terraform-apply
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+      - run: TERRAFORM_STAGE="app_runtime" bash scripts/terraform-stage-deploy.sh plan

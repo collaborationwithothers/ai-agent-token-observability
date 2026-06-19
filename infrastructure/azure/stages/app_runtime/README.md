@@ -10,7 +10,7 @@ This stage deploys the long-running runtime services:
 
 It also models the shared Product Jobs image as distinct Azure Container Apps Jobs through a local wrapper around the Azure Verified Module `Azure/avm-res-app-job/azurerm`.
 
-The shared jobs image default is a non-deployable `example.azurecr.io` placeholder. The guarded ACR image publish workflow emits `app-runtime-images.auto.tfvars.json` with digest-pinned image references for the Product Dashboard, Product API, Product Ingestion Endpoint, shared Product Jobs image, and `container_registry_server`. Each job uses the same image with explicit `dotnet TokenObservability.Jobs.dll <command>` arguments:
+The app runtime image inputs have no deployable defaults. The guarded ACR image publish workflow emits `app-runtime-images.auto.tfvars.json` with digest-pinned image references for the Product Dashboard, Product API, Product Ingestion Endpoint, shared Product Jobs image, and `container_registry_server`. The Terraform deploy workflow validates and downloads that artifact from the selected successful ACR Image Publish run before planning `app_runtime`. Each job uses the same image with explicit `dotnet TokenObservability.Jobs.dll <command>` arguments:
 
 - `normalize-telemetry`.
 - `detect-hotspots`.

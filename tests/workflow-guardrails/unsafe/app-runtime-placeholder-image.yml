@@ -1,0 +1,27 @@
+name: Unsafe Terraform Deploy Fixture
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+jobs:
+  plan:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'collaborationwithothers/ai-agent-token-observability' && github.actor == 'haripraghash' && github.ref == 'refs/heads/main' }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    environment: terraform-apply
+    steps:
+      - name: Validate guardrails before privileged steps
+        run: |
+          TF_WORKSPACE="dv_eastus2_internal"
+          test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
+          test "${GITHUB_REPOSITORY}" = "collaborationwithothers/ai-agent-token-observability"
+          test "${GITHUB_ACTOR}" = "haripraghash"
+          test "${GITHUB_REF}" = "refs/heads/main"
+      - uses: azure/login@v2
+      - run: terraform -chdir=infrastructure/azure/stages/app_runtime plan -var='shared_jobs_image=example.azurecr.io/product-jobs:0000000000000000000000000000000000000000'
