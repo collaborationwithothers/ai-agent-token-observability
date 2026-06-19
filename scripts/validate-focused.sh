@@ -47,6 +47,7 @@ run_docs_checks() {
   bash -n scripts/validate-markdown-links.sh
   bash -n scripts/workflow-digest.sh
   bash -n scripts/validate-edge-origin-workflow.sh
+  bash -n scripts/validate-terraform-app-runtime.sh
   bash -n scripts/validate-terraform-ai-services.sh
   bash -n scripts/validate-focused.sh
   bash -n scripts/validate-pr.sh
@@ -94,6 +95,7 @@ case "$profile" in
     scripts/validate-terraform-observability-foundation.sh
     scripts/validate-terraform-data-platform.sh
     scripts/validate-terraform-ai-services.sh
+    scripts/validate-terraform-app-runtime.sh
     scripts/terraform-stage-check.sh ai_services
     scripts/validate-terraform-workflow-guardrails.sh
     scripts/validate-edge-origin-workflow.sh

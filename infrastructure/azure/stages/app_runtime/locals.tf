@@ -18,7 +18,7 @@ locals {
   container_app_diagnostic_targets   = merge({ environment = azurerm_container_app_environment.this.id }, { for key, app in azurerm_container_app.services : key => app.id }, { for key, job in module.container_app_jobs : key => job.resource_id })
   diagnostic_settings_enabled        = var.log_analytics_workspace_id != null
   log_analytics_environment_required = var.container_app_environment_logs_destination == "log-analytics"
-  container_registry_identity        = "System"
+  acr_pull_role_assignments_enabled  = var.container_registry_server != null && var.container_registry_id != null
 
   long_running_container_apps = {
     product_dashboard = {
@@ -226,20 +226,13 @@ locals {
     )
   }
 
-  container_app_job_registries = var.container_registry_server == null ? [] : [
-    {
-      server   = var.container_registry_server
-      identity = local.container_registry_identity
-    }
-  ]
-
   container_app_job_key_vault_secrets = {
     for job_key, secrets in var.container_app_job_key_vault_secret_ids :
     job_key => [
       for secret_name, secret_id in secrets : {
         name                = secret_name
         key_vault_secret_id = secret_id
-        identity            = local.container_registry_identity
+        identity            = azurerm_user_assigned_identity.jobs[job_key].id
       }
     ]
   }

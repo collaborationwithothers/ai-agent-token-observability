@@ -220,9 +220,20 @@ variable "product_ingestion_target_port" {
 }
 
 variable "container_registry_server" {
-  description = "Optional private container registry server. When supplied, each Container App uses its managed identity for image pulls."
+  description = "Optional private container registry server. When supplied, each Container App uses its managed identity for image pulls and container_registry_id must also be supplied."
   type        = string
   default     = null
+}
+
+variable "container_registry_id" {
+  description = "Resource ID of the private Azure Container Registry. Required when container_registry_server is supplied so runtime managed identities receive AcrPull."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.container_registry_id == null || can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft[.]ContainerRegistry/registries/[^/]+$", var.container_registry_id))
+    error_message = "container_registry_id must be an Azure Container Registry resource ID when supplied."
+  }
 }
 
 variable "container_app_additional_environment" {

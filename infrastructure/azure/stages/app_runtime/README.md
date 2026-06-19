@@ -10,7 +10,7 @@ This stage deploys the long-running runtime services:
 
 It also models the shared Product Jobs image as distinct Azure Container Apps Jobs through a local wrapper around the Azure Verified Module `Azure/avm-res-app-job/azurerm`.
 
-The app runtime image inputs have no deployable defaults. The guarded ACR image publish workflow emits `app-runtime-images.auto.tfvars.json` with digest-pinned image references for the Product Dashboard, Product API, Product Ingestion Endpoint, shared Product Jobs image, and `container_registry_server`. The Terraform deploy workflow validates and downloads that artifact from the selected successful ACR Image Publish run before planning `app_runtime`. Each job uses the same image with explicit `dotnet TokenObservability.Jobs.dll <command>` arguments:
+The app runtime image inputs have no deployable defaults. The guarded ACR image publish workflow emits `app-runtime-images.auto.tfvars.json` with digest-pinned image references for the Product Dashboard, Product API, Product Ingestion Endpoint, shared Product Jobs image, and `container_registry_server`. The Terraform deploy workflow validates and downloads that artifact from the selected successful ACR Image Publish run before planning `app_runtime`, then supplies the foundation `container_registry_id` so runtime identities receive `AcrPull` on the shared Azure Container Registry. Each job uses the same image with explicit `dotnet TokenObservability.Jobs.dll <command>` arguments:
 
 - `normalize-telemetry`.
 - `detect-hotspots`.
@@ -21,7 +21,7 @@ The app runtime image inputs have no deployable defaults. The guarded ACR image 
 - `reprocess-session`.
 - `tenant-maintenance`.
 
-Jobs use separate Container Apps Job resources and system-assigned managed identities. Job settings support non-secret environment overrides, Key Vault backed secret references, retry limits, timeouts, and independent CPU or memory sizing. The stage does not accept plain secret values for job configuration.
+Jobs use separate Container Apps Job resources and user-assigned managed identities. Job settings support non-secret environment overrides, Key Vault backed secret references, retry limits, timeouts, and independent CPU or memory sizing. The stage does not accept plain secret values for job configuration.
 
 The runtime proof uses manual triggers only. Event or scheduled trigger policies can be added in later issues that own queue and scheduler decisions.
 
@@ -42,12 +42,13 @@ terraform plan -input=false -lock=false \
   -var="customer_organization_slug=internal" \
   -var="terraform_workspace_name=dv_eastus2_internal" \
   -var="resource_instance=core" \
+  -var="container_registry_id=/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-to-dv-eastus2-internal-foundation/providers/Microsoft.ContainerRegistry/registries/todveastus2internalcoreacr" \
   -var='tags={environment="dv",region="eastus2",product="token-observability",owner="platform",data_classification="internal",managed_by="terraform"}'
 ```
 
 Use `tfswitch 1.14.7` locally when the system `terraform` binary is older than the stage `required_version`.
 
-The stage intentionally uses Container App managed identities and secret references rather than hardcoded secret values. Supply digest-pinned ACR image names, optional Log Analytics workspace ID, and Key Vault secret IDs through environment-specific workflow inputs or variable files.
+The stage intentionally uses Container App user-assigned managed identities and secret references rather than hardcoded secret values. Supply digest-pinned ACR image names, `container_registry_id`, optional Log Analytics workspace ID, and Key Vault secret IDs through environment-specific workflow inputs or variable files.
 
 Origin evidence:
 
