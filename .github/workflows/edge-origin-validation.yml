@@ -164,11 +164,6 @@ jobs:
             (.fqdns.product_ingestion_endpoint | length > 0)
           ' "${DIRECT_ORIGINS}" > /dev/null
 
-          case "${ENVIRONMENT}" in pp|pd)
-            test "$(jq -r '.public_network_access' "${DIRECT_ORIGINS}")" = "Disabled"
-            ;;
-          esac
-
       - name: Export public origin probe targets
         id: public-origin-targets
         run: |
@@ -259,7 +254,7 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
 
   public-direct-origin-probe:
-    name: Public direct ACA origin validation
+    name: Public ACA origin evidence
     needs: validate-edge-origin
     if: >-
       ${{
@@ -297,7 +292,7 @@ jobs:
           TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
           test "${TF_WORKSPACE}" != "default"
 
-      - name: Probe direct ACA origins from public runner
+      - name: Probe ACA origins from public runner
         env:
           ENVIRONMENT: ${{ inputs.environment }}
           DASHBOARD_ORIGIN_URL: ${{ needs.validate-edge-origin.outputs.dashboard_origin_url }}
@@ -324,21 +319,15 @@ jobs:
             set -e
 
             if [[ "${curl_exit}" -ne 0 || "${status}" == "000" || -z "${status}" ]]; then
-              printf '| %s | %s | not publicly reachable from GitHub-hosted runner |\n' "${label}" "${url}" >> "${GITHUB_STEP_SUMMARY}"
+              printf '| %s | %s | no HTTP response from GitHub-hosted runner |\n' "${label}" "${url}" >> "${GITHUB_STEP_SUMMARY}"
               return 0
             fi
 
-            case "${ENVIRONMENT}" in pp|pd)
-              echo "Direct ACA origin returned HTTP ${status} for ${label}; public bypass proof failed." >&2
-              return 1
-              ;;
-            esac
-
-            printf '| %s | %s | HTTP %s, non-production evidence only |\n' "${label}" "${url}" "${status}" >> "${GITHUB_STEP_SUMMARY}"
+            printf '| %s | %s | HTTP %s, current public-origin evidence only |\n' "${label}" "${url}" "${status}" >> "${GITHUB_STEP_SUMMARY}"
           }
 
           {
-            echo "## Public Direct ACA Origin Validation"
+            echo "## Public ACA Origin Evidence"
             echo
             echo "Environment: ${ENVIRONMENT}"
             echo

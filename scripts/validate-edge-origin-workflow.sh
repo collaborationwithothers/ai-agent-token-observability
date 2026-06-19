@@ -30,10 +30,10 @@ required_fragments = {
     "sanitized summary": "GITHUB_STEP_SUMMARY",
     "public endpoint probe": "validate_public_endpoint",
     "direct origin probe": "validate_direct_origin",
-    "public runner direct origin job": "public-direct-origin-probe",
+    "public runner origin evidence job": "public-direct-origin-probe",
     "github hosted public runner": "runs-on: ubuntu-latest",
     "public job without Azure OIDC": "permissions:\n      contents: read",
-    "pp pd bypass enforcement": 'case "${ENVIRONMENT}" in pp|pd)',
+    "current public origin evidence": "current public-origin evidence only",
 }
 
 forbidden_fragments = {

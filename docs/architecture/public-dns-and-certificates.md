@@ -129,7 +129,7 @@ Azure Front Door Premium with WAF
 Origin path:
 
 ```text
-Azure Front Door Premium Private Link to Azure Container Apps
+Azure Front Door Premium to generated Azure Container Apps FQDN origins
 ```
 
 Origin certificate model:
@@ -145,17 +145,17 @@ First-release decisions:
 - Do not bind product custom domains or product certificates directly to Azure Container Apps for the first release.
 - Configure public DNS records under `tokenobs.consultwithcloud.com` to point to the Azure Front Door endpoint.
 - Configure Front Door origins with the Azure Container Apps generated FQDN as the origin host name and origin host header.
-- Use Azure Front Door Premium Private Link to reach Azure Container Apps origins.
-- Disable public network access on the Azure Container Apps environment in production so direct access to the generated ACA FQDN cannot bypass Front Door.
-- Treat any public ACA origin path as a failed production-readiness check.
+- Use public Front Door routing to reach generated Azure Container Apps FQDN origins in the current deployable path.
+- Defer direct origin access hardening to a later network hardening slice.
+- Treat direct public ACA origin blocking as deferred hardening until that slice reintroduces an enforceable origin isolation design.
 
 Tradeoff:
 
 - Azure Front Door managed certificates avoid operating ACME account state, private key import, Key Vault certificate rotation, and long-running edge certificate verification in the first release.
 - The cost is that certificate issuance is per explicit hostname rather than one wildcard certificate.
-- Azure Front Door Premium is required for Private Link origin isolation.
+- Azure Front Door Premium remains the WAF and managed certificate edge.
 - Front Door managed certificates solve public TLS only. They do not prevent origin bypass by themselves.
-- Origin bypass is prevented by the Private Link and disabled-public-network-access design, not by DNS or certificate configuration.
+- Origin bypass prevention is deferred to a later network hardening slice and is not provided by DNS or certificate configuration alone.
 - Managed Grafana is intentionally excluded from this certificate lifecycle for the first release because it uses the native Azure Managed Grafana endpoint.
 
 Deferred target-state option:
@@ -171,8 +171,8 @@ Terraform should manage:
 - Azure DNS records inside `tokenobs.consultwithcloud.com`.
 - Azure Front Door custom domain bindings.
 - Azure Front Door managed certificate settings for explicit product hostnames.
-- Azure Front Door Premium Private Link origin configuration.
-- Azure Container Apps origin settings required to prevent direct public bypass.
+- Azure Front Door origin configuration for generated ACA FQDN origins.
+- Deferred origin isolation hardening is out of the current Terraform ownership scope.
 
 Terraform should not manage:
 
@@ -212,8 +212,8 @@ The first implementation must prove in a non-production environment:
 - Azure Front Door serves managed certificates for `app`, `api`, and `ingest`.
 - Public DNS points product hostnames to the Azure Front Door endpoint.
 - Public delegation for `tokenobs.consultwithcloud.com` has been verified after the manual Cloudflare NS record change.
-- Front Door origin health succeeds over Private Link.
-- Direct HTTPS access to the generated Azure Container Apps FQDN fails or is unreachable from the public internet after public network access is disabled.
+- Front Door origin health succeeds against generated Azure Container Apps FQDN origins.
+- Deferred origin isolation hardening has a separate proof requirement when it is reintroduced.
 - Product authentication and redirect URI behavior uses the public Front Door hostnames, not generated ACA hostnames.
 - WAF, rate limits, tenant validation, and application authentication are reached only through the Front Door path.
 
@@ -227,8 +227,8 @@ Deferred BYOC certificate renewal is defined in [../operations/certificate-renew
 - Cloudflare supports subdomain delegation by creating NS records for a subdomain in the parent zone: https://developers.cloudflare.com/dns/zone-setups/subdomain-setup/setup/
 - Azure Front Door managed certificates use DNS TXT validation for custom domains: https://learn.microsoft.com/en-us/azure/frontdoor/domain
 - Azure Front Door supports managed certificates and customer-managed certificates for custom domains: https://learn.microsoft.com/en-us/azure/frontdoor/standard-premium/how-to-configure-https-custom-domain
-- Azure Front Door Premium can connect to origins through Private Link, removing the need for origins to be publicly accessible: https://learn.microsoft.com/en-us/azure/frontdoor/private-link
+- Azure Front Door Premium supports origin isolation options that are deferred from the current deployable path: https://learn.microsoft.com/en-us/azure/frontdoor/private-link
 - Azure Container Apps ingress with `external` is reachable by FQDN from outside the environment: https://learn.microsoft.com/en-us/azure/container-apps/ingress-overview
-- Azure Container Apps can be exposed securely through Azure Front Door Premium with private endpoints and public network access disabled: https://learn.microsoft.com/en-us/azure/container-apps/front-door-custom-virtual-network-private-link
+- Azure Container Apps supports ingress and generated FQDN origins for the current Front Door path: https://learn.microsoft.com/en-us/azure/container-apps/ingress-overview
 - Azure Managed Grafana workspaces expose a native Endpoint URL and use Microsoft Entra single sign-on: https://learn.microsoft.com/en-us/azure/managed-grafana/quickstart-managed-grafana-portal
 - Azure Managed Grafana roles can be assigned to Microsoft Entra users, groups, service principals, and managed identities: https://learn.microsoft.com/en-us/azure/managed-grafana/how-to-manage-access-permissions-users-identities

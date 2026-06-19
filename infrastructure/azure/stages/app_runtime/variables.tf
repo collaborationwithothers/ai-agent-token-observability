@@ -124,7 +124,7 @@ variable "container_app_environment_logs_destination" {
 }
 
 variable "container_app_environment_public_network_access" {
-  description = "Public network access for the Container Apps environment. Must be Disabled in pp and pd so generated ACA FQDNs cannot bypass Front Door."
+  description = "Public network access for the Container Apps environment. Keep Enabled until deferred origin isolation hardening is implemented."
   type        = string
   default     = "Enabled"
 

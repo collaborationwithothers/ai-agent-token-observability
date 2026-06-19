@@ -14,7 +14,7 @@ Terraform implementation issues must verify:
 - Front Door Premium WAF protects public product ingress.
 - Front Door managed certificates serve the first-release product hostnames.
 - Container Apps origin hardening is deferred and must not rely on approval-based origin isolation in the current Terraform path.
-- Direct public access to generated ACA FQDNs is blocked in production.
+- Direct-origin blocking is deferred to a later origin isolation hardening slice.
 - Container Apps host product services and Container Apps Jobs host bounded background work.
 - Managed Grafana is wired to Azure Monitor workspace or managed Prometheus aggregate metrics as the first-release data source.
 - Managed Grafana dashboard JSON is versioned in the repo and deployed through Terraform; production dashboards are not manual UI-only state.

@@ -41,10 +41,10 @@ output "container_app_fqdns" {
 }
 
 output "direct_origin_validation_targets" {
-  description = "Generated ACA FQDNs and expected direct-origin proof result for edge-origin validation."
+  description = "Generated ACA FQDNs and expected origin evidence result for edge-origin validation."
   value = {
     public_network_access = azurerm_container_app_environment.this.public_network_access
-    expected_result       = contains(["pp", "pd"], var.environment) ? "Direct public requests to these generated ACA FQDNs must fail, time out, or return a platform rejection." : "Direct public origin bypass proof is required before promoting this topology to pp or pd."
+    expected_result       = "Front Door origin health should succeed against these generated ACA FQDN origins. Direct-origin blocking is deferred hardening."
     fqdns                 = { for key, app in azurerm_container_app.services : key => app.ingress[0].fqdn }
   }
 }

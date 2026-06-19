@@ -263,22 +263,20 @@ Every stage must accept:
 | `enable_zone_redundancy` | Environment-specific | Required decision for `pp` and `pd` where supported |
 | `public_ingress_hostnames` | Stage-specific | Used by edge and app runtime |
 
-Edge and origin isolation variables:
+Edge and origin evidence variables:
 
 | Variable | Required | Notes |
 | --- | --- | --- |
 | `front_door_sku` | Yes | Must be `Premium_AzureFrontDoor` for production edge capabilities |
-| `disable_container_apps_public_network_access` | Yes | Must be true for `pp` and `pd` |
 | `front_door_custom_domains` | Yes | Explicit first-release hostnames: `app`, `api`, and `ingest` under `tokenobs.consultwithcloud.com` |
 | `use_front_door_managed_certificates` | Yes | Must be true for first release unless the certificate decision is reopened |
 | `aca_origin_fqdns` | Stage output/input | Generated ACA FQDNs used as Front Door origin host names and origin host headers |
 
-Edge and origin isolation validation:
+Edge and origin evidence validation:
 
 - `front_door_sku` must be `Premium_AzureFrontDoor` in `pp` and `pd`.
-- `disable_container_apps_public_network_access` must be true in `pp` and `pd`.
 - `use_front_door_managed_certificates` must be true for first-release hostnames unless a later ADR reopens the certificate decision.
-- App runtime and edge stages must expose a non-production proof command or test showing direct generated ACA FQDN access is blocked while Front Door access succeeds.
+- App runtime and edge stages must expose a proof command or test showing Front Door access succeeds against generated ACA FQDN origins.
 
 Managed Grafana stage variables:
 
@@ -323,7 +321,6 @@ Stages may use `terraform_remote_state` only for stable platform outputs:
 
 - Resource group IDs.
 - VNet and subnet IDs.
-- Private DNS zone IDs.
 - Log Analytics workspace IDs.
 - Azure Monitor workspace IDs.
 - Managed identity principal IDs.

@@ -49,11 +49,10 @@ Use `tfswitch 1.14.7` locally when the system `terraform` binary is older than t
 
 The stage intentionally uses Container App managed identities and secret references rather than hardcoded secret values. Supply digest-pinned ACR image names, optional Log Analytics workspace ID, and Key Vault secret IDs through environment-specific workflow inputs or variable files.
 
-Origin bypass guardrail:
+Origin evidence:
 
-- `container_app_environment_public_network_access` defaults to `Enabled` for early non-production proof work.
-- `pp` and `pd` plans fail unless `container_app_environment_public_network_access` is `Disabled`.
+- `container_app_environment_public_network_access` defaults to `Enabled` for the current deployable path.
 - Use the `direct_origin_validation_targets` output as the sanitized stable Container App ingress FQDN input to the edge stage and edge-origin validation runbook.
-- Direct requests to generated ACA FQDNs must not return application responses in `pp` or `pd`.
+- Direct-origin blocking is deferred to a later origin isolation hardening slice.
 
 Do not use `terraform apply -auto-approve`. Production applies must use the guarded manual workflow path defined by the Terraform production infrastructure architecture.
