@@ -70,7 +70,7 @@ locals {
   trace_log_data_source = {
     type                                = "application_insights_log_analytics"
     application_insights_resource_id    = module.application_insights.resource_id
-    application_insights_app_id         = nonsensitive(module.application_insights.app_id)
+    application_insights_app_id         = module.application_insights.app_id
     log_analytics_workspace_resource_id = module.log_analytics_workspace.resource_id
     log_analytics_workspace_id          = module.log_analytics_workspace.workspace_id
     consumer_stages                     = ["app_runtime", "data_platform", "ai_services", "alerts"]
