@@ -58,7 +58,9 @@ This skill refines the repo ready-for-agent issue workflow for infrastructure wo
    - If review returns `CHANGES_REQUESTED`, create a concise findings ledger, fix accepted findings, rerun focused validation, then request one targeted rereview.
 
 8. Finish with the PR gate.
-   - Run `scripts/validate-pr.sh` once after reviewer approval unless the issue is docs-only and acceptance criteria do not require build/test evidence.
+   - Run `scripts/validate-pr.sh` once after reviewer approval for product runtime, authorization, persistence, migrations, deployed resource definitions, tenant/security boundaries, or broad cross-cutting changes.
+   - Use `scripts/validate-pr.sh --changed origin/main` for narrow docs, process, validation-script, GitHub Actions guardrail, or Terraform workflow-script fixes where changed-file validation is sufficient.
+   - If validation is silent for more than 90 seconds in a sandboxed environment, stop waiting and diagnose the specific command. If the likely cause is sandboxed cache, package, or network access, rerun that specific command with the required permission.
    - Commit only relevant files.
    - Create the PR.
    - Verify `closingIssuesReferences` closes only the intended issue.
