@@ -98,10 +98,11 @@ Tests or validation:
 ```
 
 10. Fix accepted findings, rerun validation, then ask for targeted rereview. Use full-diff rereview only for architecture, security, privacy, tenant-boundary, persistence, Terraform deployment, or product authorization changes.
-11. After approval, run the PR gate:
+11. After approval, run the PR gate. Use the full gate for product runtime, authorization, persistence, migrations, deployed resource definitions, tenant/security boundaries, or broad cross-cutting changes. Use changed-file validation for narrow docs, process, validation-script, GitHub Actions guardrail, or Terraform workflow-script fixes:
 
 ```bash
 scripts/validate-pr.sh
+scripts/validate-pr.sh --changed origin/main
 ```
 
 12. Commit, push, create the PR, and verify closing references:
@@ -114,7 +115,8 @@ gh pr view PR_NUMBER --json closingIssuesReferences
 
 - Treat full validation, Terraform plans, and subagent reviews as expensive. Use them deliberately and keep their output narrow.
 - Before the first edit, confirm `git worktree list --porcelain` and `git status --short --branch` for the target worktree. If edits land in the wrong checkout, stop and fix the workspace before continuing.
-- During implementation, run the narrowest useful `scripts/validate-focused.sh PROFILE`. Reserve `scripts/validate-pr.sh` for after reviewer approval and before PR creation or PR update, unless a risky fix invalidates the prior full validation.
+- During implementation, run the narrowest useful `scripts/validate-focused.sh PROFILE`. Reserve the PR gate for after reviewer approval and before PR creation or PR update, unless a risky fix invalidates the prior full validation.
+- If validation is silent for more than 90 seconds in a sandboxed environment, stop waiting and diagnose the specific command. If the likely cause is sandboxed cache, package, or network access, rerun that specific command with the required permission.
 - For Terraform changes, avoid streaming full plan output by default. Prefer `terraform show -json` with `jq` assertions, targeted plan summaries, or narrow grep checks. Use full plan text only when the full plan is the artifact being reviewed.
 - Cap noisy command output. If the first output is too broad, rerun with narrower filters instead of expanding the transcript.
 - Do not use Code Reviewer, broad source searches, or full file reads to discover acceptance criteria. Use the Issue Start Packet and the smallest relevant source-of-truth document set.

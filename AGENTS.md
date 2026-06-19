@@ -122,7 +122,9 @@ If Code Reviewer reports `CHANGES_REQUESTED`, track each finding as accepted or 
 Before creating or updating a PR:
 
 - `Comments.md` must be untracked or ignored and must not be staged.
-- Run `scripts/validate-pr.sh` unless the change is documentation-only and acceptance criteria do not require build/test evidence.
+- Run a PR gate. Use `scripts/validate-pr.sh` for full local validation. Use `scripts/validate-pr.sh --changed origin/main` for narrow changes where the changed-file profile is sufficient.
+- For narrow docs, process, validation-script, GitHub Actions guardrail, or Terraform workflow-script fixes that do not change product runtime behavior, authorization, persistence, migrations, deployed resource definitions, or tenant/security boundaries, focused local validation plus PR CI is acceptable.
+- If a validation command is silent for more than 90 seconds in a sandboxed environment, stop waiting and diagnose the specific command. If the likely cause is sandboxed cache, package, or network access, rerun that specific command with the required permission instead of repeatedly polling.
 - Code Reviewer must report `APPROVE`, or remaining findings must be explicitly rejected with defensible reasons.
 - The PR body must close only intended issue or issues.
 - After `gh pr create`, run `gh pr view PR_NUMBER --json closingIssuesReferences` and verify closing references.
