@@ -8,6 +8,11 @@ resource "azurerm_resource_group" "app_runtime" {
       condition     = local.workspace_name_matches_context
       error_message = "The selected Terraform workspace must match {environment}_{azureRegion}_{customerOrganizationSlug}, must not be default, and terraform_workspace_name must match it when supplied."
     }
+
+    precondition {
+      condition     = var.container_registry_server == null || var.container_registry_id != null
+      error_message = "container_registry_id is required when container_registry_server is supplied so Container Apps identities can receive AcrPull."
+    }
   }
 }
 
@@ -56,6 +61,41 @@ resource "azurerm_user_assigned_identity" "services" {
   tags                = local.common_tags
 }
 
+resource "azurerm_user_assigned_identity" "jobs" {
+  for_each = local.container_app_jobs
+
+  name                = "${each.value.name}-mi"
+  location            = azurerm_resource_group.app_runtime.location
+  resource_group_name = azurerm_resource_group.app_runtime.name
+  tags                = local.common_tags
+}
+
+resource "azurerm_role_assignment" "container_app_services_acr_pull" {
+  for_each = {
+    for key, identity in azurerm_user_assigned_identity.services : key => identity
+    if local.acr_pull_role_assignments_enabled
+  }
+
+  scope                            = var.container_registry_id
+  role_definition_name             = "AcrPull"
+  principal_id                     = each.value.principal_id
+  principal_type                   = "ServicePrincipal"
+  skip_service_principal_aad_check = true
+}
+
+resource "azurerm_role_assignment" "container_app_jobs_acr_pull" {
+  for_each = {
+    for key, identity in azurerm_user_assigned_identity.jobs : key => identity
+    if local.acr_pull_role_assignments_enabled
+  }
+
+  scope                            = var.container_registry_id
+  role_definition_name             = "AcrPull"
+  principal_id                     = each.value.principal_id
+  principal_type                   = "ServicePrincipal"
+  skip_service_principal_aad_check = true
+}
+
 resource "azurerm_container_app" "services" {
   for_each = local.long_running_container_apps
 
@@ -65,6 +105,10 @@ resource "azurerm_container_app" "services" {
   revision_mode                = "Single"
   workload_profile_name        = "Consumption"
   tags                         = local.common_tags
+
+  depends_on = [
+    azurerm_role_assignment.container_app_services_acr_pull
+  ]
 
   identity {
     type         = "UserAssigned"
@@ -165,14 +209,23 @@ module "container_app_jobs" {
   tags                                  = local.common_tags
 
   managed_identities = {
-    system_assigned = true
+    user_assigned_resource_ids = [azurerm_user_assigned_identity.jobs[each.key].id]
   }
 
-  registries                 = local.container_app_job_registries
+  registries = var.container_registry_server == null ? [] : [
+    {
+      server   = var.container_registry_server
+      identity = azurerm_user_assigned_identity.jobs[each.key].id
+    }
+  ]
   key_vault_secrets          = lookup(local.container_app_job_key_vault_secrets, each.key, [])
   replica_retry_limit        = each.value.retry
   replica_timeout_in_seconds = each.value.timeout
   trigger_config             = each.value.trigger
+
+  depends_on = [
+    azurerm_role_assignment.container_app_jobs_acr_pull
+  ]
 
   template = {
     min_replicas = 0

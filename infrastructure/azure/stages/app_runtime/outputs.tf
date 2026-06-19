@@ -65,6 +65,14 @@ output "container_app_job_names" {
 }
 
 output "container_app_job_identities" {
-  description = "Managed identity details by finite job key."
-  value       = { for key, job in module.container_app_jobs : key => job.managed_identities }
+  description = "User-assigned managed identity details by finite job key."
+  value = {
+    for key, identity in azurerm_user_assigned_identity.jobs : key => {
+      client_id    = identity.client_id
+      id           = identity.id
+      name         = identity.name
+      principal_id = identity.principal_id
+      tenant_id    = identity.tenant_id
+    }
+  }
 }

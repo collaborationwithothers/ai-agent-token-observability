@@ -166,6 +166,8 @@ case "${mode}" in
           echo "APP_RUNTIME_IMAGES_TFVARS_PATH does not reference a readable non-empty file: ${APP_RUNTIME_IMAGES_TFVARS_PATH}" >&2
           exit 1
         fi
+        container_registry_id="$(terraform_output_raw foundation "${TF_WORKSPACE}" container_registry_id)"
+        var_args+=("-var=container_registry_id=${container_registry_id}")
         var_args+=("-var-file=${APP_RUNTIME_IMAGES_TFVARS_PATH}")
         ;;
       edge)
