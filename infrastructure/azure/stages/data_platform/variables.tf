@@ -103,8 +103,13 @@ variable "data_resource_group_name" {
 
 variable "diagnostic_destinations" {
   description = "Diagnostic destination contracts from observability_foundation outputs."
-  type        = map(any)
-  default     = {}
+  type = object({
+    data_platform = optional(object({
+      log_analytics_workspace_resource_id = string
+      destination_type                    = optional(string, "Dedicated")
+    }))
+  })
+  default = {}
 }
 
 variable "postgresql_server_name" {
