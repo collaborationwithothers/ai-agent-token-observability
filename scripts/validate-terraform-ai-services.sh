@@ -5,8 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAGE_DIR="$ROOT_DIR/infrastructure/azure/stages/ai_services"
 MODULES_DIR="$ROOT_DIR/infrastructure/azure/modules"
 README="$STAGE_DIR/README.md"
+DEPLOY_SCRIPT="$ROOT_DIR/scripts/terraform-stage-deploy.sh"
 
-python3 - "$STAGE_DIR" "$MODULES_DIR" "$README" <<'PY'
+python3 - "$STAGE_DIR" "$MODULES_DIR" "$README" "$DEPLOY_SCRIPT" <<'PY'
 from __future__ import annotations
 
 import pathlib
@@ -16,12 +17,14 @@ import sys
 stage_dir = pathlib.Path(sys.argv[1])
 modules_dir = pathlib.Path(sys.argv[2])
 readme_path = pathlib.Path(sys.argv[3])
+deploy_script_path = pathlib.Path(sys.argv[4])
 
 stage_content = "\n".join(
     path.read_text(encoding="utf-8")
     for path in sorted(stage_dir.glob("*.tf"))
 )
 readme_content = readme_path.read_text(encoding="utf-8")
+deploy_script_content = deploy_script_path.read_text(encoding="utf-8")
 
 module_names = ["cognitive_services_account", "resource_group"]
 module_content = {
@@ -138,6 +141,15 @@ required_readme_terms = [
 for term in required_readme_terms:
     if term not in readme_content:
         errors.append(f"README missing required term: {term}")
+
+required_deploy_patterns = {
+    "AI services stage derives observability diagnostic destinations": r'(?ms)ai_services\).*?diagnostic_destinations="\$\(terraform_output_json observability_foundation "\$\{TF_WORKSPACE\}" diagnostic_destinations\)"',
+    "AI services stage passes diagnostic destinations var": r'(?ms)ai_services\).*?var_args\+=\("-var=diagnostic_destinations=\$\{diagnostic_destinations\}"\)',
+}
+
+for name, pattern in required_deploy_patterns.items():
+    if re.search(pattern, deploy_script_content) is None:
+        errors.append(f"deploy script missing {name}")
 
 code_blocks = re.findall(r"```(?:[a-zA-Z0-9_-]+)?\n(.*?)```", readme_content, re.DOTALL)
 for index, block in enumerate(code_blocks, start=1):
