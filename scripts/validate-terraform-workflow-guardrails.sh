@@ -406,6 +406,8 @@ def terraform_plan_required_errors(content: str) -> list[str]:
     for input_name in ("artifact_name", "app_runtime_image_artifact_name", "image_digest_artifact_name"):
         if input_name in dispatch_inputs:
             errors.append(f"Terraform plan workflow must not expose {input_name} as a dispatch input")
+    if "acr_publish_commit_sha" in dispatch_inputs:
+        errors.append("Terraform plan workflow must not expose acr_publish_commit_sha as a dispatch input")
     if "REQUESTED_TERRAFORM_WORKSPACE" in content:
         errors.append("Terraform plan workflow must not validate a user-entered Terraform workspace")
     if "inputs.terraform_workspace" in content:
@@ -425,9 +427,9 @@ def terraform_plan_required_errors(content: str) -> list[str]:
         "derived deployment scope": r"deployment_scope.*GITHUB_OUTPUT|GITHUB_OUTPUT.*deployment_scope|deployment_scope\s*=\s*.*DEPLOYMENT_SCOPE",
         "derived stage selection": r"deploy_foundation.*GITHUB_OUTPUT|GITHUB_OUTPUT.*deploy_foundation|deploy_foundation\s*=\s*.*DEPLOY_FOUNDATION",
         "ACR publish run dispatch input": r"acr_publish_run_id\s*:",
-        "ACR publish commit dispatch input": r"acr_publish_commit_sha\s*:",
         "ACR publish run output": r"acr_publish_run_id.*GITHUB_OUTPUT|GITHUB_OUTPUT.*acr_publish_run_id|acr_publish_run_id\s*=\s*.*ACR_PUBLISH_RUN_ID",
         "ACR publish commit output": r"acr_publish_commit_sha.*GITHUB_OUTPUT|GITHUB_OUTPUT.*acr_publish_commit_sha|acr_publish_commit_sha\s*=\s*.*ACR_PUBLISH_COMMIT_SHA",
+        "paginated latest ACR publish run selection": r"gh\s+api\s+--paginate.*actions/workflows/acr-image-publish\.yml/runs|actions/workflows/acr-image-publish\.yml/runs.*gh\s+api\s+--paginate",
         "derived app runtime image artifact": r"app-runtime-image-digests-\$\{TF_WORKSPACE\}-\$\{ACR_PUBLISH_COMMIT_SHA\}|APP_RUNTIME_IMAGE_ARTIFACT_NAME=.*app-runtime-image-digests",
         "ACR publish workflow validation": r"workflowName.*ACR Image Publish|ACR Image Publish.*workflowName",
         "ACR publish run branch validation": r"headBranch.*main|main.*headBranch",
@@ -435,11 +437,12 @@ def terraform_plan_required_errors(content: str) -> list[str]:
         "ACR publish run success validation": r"conclusion.*success|success.*conclusion",
         "ACR publish run event validation": r"event.*workflow_dispatch|workflow_dispatch.*event",
         "ACR image artifact lookup": r"actions/runs/.*/artifacts|APP_RUNTIME_IMAGE_ARTIFACT_NAME.*artifacts|artifacts.*APP_RUNTIME_IMAGE_ARTIFACT_NAME",
+        "non-expired ACR image artifact lookup": r"expired\s*==\s*false",
         "ACR image artifact download": r"gh\s+run\s+download.*ACR_PUBLISH_RUN_ID|gh\s+run\s+download",
         "pre-Azure app runtime image validation job": r"validate-app-runtime-images",
         "plan jobs depend on app runtime image validation": r"needs:\s*\[\s*select\s*,\s*validate-app-runtime-images",
         "plan jobs gate on app runtime image validation": r"needs\.validate-app-runtime-images\.result\s*==\s*'success'",
-        "verified same-run app runtime image artifact": r"verified-\$\{\{\s*needs\.select\.outputs\.app_runtime_image_artifact_name\s*\}\}",
+        "verified same-run app runtime image artifact": r"verified_app_runtime_image_artifact_name|verified-\$\{\{\s*needs\.select\.outputs\.app_runtime_image_artifact_name\s*\}\}",
         "app runtime image tfvars validation": r"app-runtime-images\.auto\.tfvars\.json",
         "app runtime image tfvars environment": r"APP_RUNTIME_IMAGES_TFVARS_PATH",
         "stage plan script": r"terraform-stage-deploy\.sh\s+plan",

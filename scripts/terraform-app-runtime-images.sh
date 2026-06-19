@@ -5,18 +5,19 @@ usage() {
   cat <<'USAGE'
 Usage:
   scripts/terraform-app-runtime-images.sh list --environment ENV --azure-region REGION [OPTIONS]
-  scripts/terraform-app-runtime-images.sh dispatch --environment ENV --azure-region REGION --acr-publish-run-id RUN_ID [OPTIONS]
+  scripts/terraform-app-runtime-images.sh dispatch --environment ENV --azure-region REGION [OPTIONS]
 
 Options:
   --customer-organization-slug SLUG  Defaults to internal.
   --branch BRANCH                    Defaults to main.
   --limit COUNT                      Defaults to 20 for list.
   --terraform-stage STAGE            Defaults to app_runtime. Use all for full environment deploy.
+  --acr-publish-run-id RUN_ID        Optional override. Leave blank to use the latest successful matching run.
   --repo OWNER/REPO                  Defaults to the current GitHub repository.
 
 The helper lists successful ACR Image Publish runs that produced the expected
-app runtime image digest artifact, then dispatches Terraform Deploy with the
-selected run ID and derived commit SHA. Operators never type artifact names.
+app runtime image digest artifact, then dispatches Terraform Deploy. Operators
+never type artifact names or commit SHAs.
 USAGE
 }
 
@@ -132,6 +133,7 @@ case "${command}" in
       --repo "${repo}" \
       --workflow "ACR Image Publish" \
       --branch "${branch}" \
+      --event workflow_dispatch \
       --status success \
       --limit "${limit}" \
       --json databaseId,headSha,createdAt,url)"
@@ -147,17 +149,20 @@ case "${command}" in
       done
     ;;
   dispatch)
-    case "${acr_publish_run_id}" in ''|*[!0-9]*) echo "dispatch requires numeric --acr-publish-run-id." >&2; exit 1 ;; esac
+    if [[ -n "${acr_publish_run_id}" ]]; then
+      case "${acr_publish_run_id}" in *[!0-9]*) echo "Invalid --acr-publish-run-id: ${acr_publish_run_id}" >&2; exit 1 ;; esac
+      case "${terraform_stage}" in all|app_runtime) ;; *) echo "--acr-publish-run-id is accepted only when app_runtime is selected." >&2; exit 1 ;; esac
 
-    selected_run_json="$(run_json "${acr_publish_run_id}")"
-    test "$(jq -r '.workflowName' <<<"${selected_run_json}")" = "ACR Image Publish"
-    test "$(jq -r '.headBranch' <<<"${selected_run_json}")" = "${branch}"
-    test "$(jq -r '.conclusion' <<<"${selected_run_json}")" = "success"
-    test "$(jq -r '.status' <<<"${selected_run_json}")" = "completed"
-    test "$(jq -r '.event' <<<"${selected_run_json}")" = "workflow_dispatch"
+      selected_run_json="$(run_json "${acr_publish_run_id}")"
+      test "$(jq -r '.workflowName' <<<"${selected_run_json}")" = "ACR Image Publish"
+      test "$(jq -r '.headBranch' <<<"${selected_run_json}")" = "${branch}"
+      test "$(jq -r '.conclusion' <<<"${selected_run_json}")" = "success"
+      test "$(jq -r '.status' <<<"${selected_run_json}")" = "completed"
+      test "$(jq -r '.event' <<<"${selected_run_json}")" = "workflow_dispatch"
 
-    acr_publish_commit_sha="$(jq -r '.headSha' <<<"${selected_run_json}")"
-    artifact_exists "${acr_publish_run_id}" "${acr_publish_commit_sha}"
+      acr_publish_commit_sha="$(jq -r '.headSha' <<<"${selected_run_json}")"
+      artifact_exists "${acr_publish_run_id}" "${acr_publish_commit_sha}"
+    fi
 
     workflow_args=(
       terraform-plan.yml
@@ -166,18 +171,23 @@ case "${command}" in
       -f "environment=${environment}"
       -f "azure_region=${azure_region}"
       -f "customer_organization_slug=${customer_organization_slug}"
-      -f "acr_publish_run_id=${acr_publish_run_id}"
-      -f "acr_publish_commit_sha=${acr_publish_commit_sha}"
     )
+    if [[ -n "${acr_publish_run_id}" ]]; then
+      workflow_args+=(-f "acr_publish_run_id=${acr_publish_run_id}")
+    fi
     if [[ "${terraform_stage}" != "all" ]]; then
       workflow_args+=(-f "terraform_stage=${terraform_stage}")
     fi
 
     gh workflow run "${workflow_args[@]}"
 
-    printf 'Dispatched Terraform Deploy for workspace %s with ACR publish run %s at commit %s.\n' \
-      "${workspace}" \
-      "${acr_publish_run_id}" \
-      "${acr_publish_commit_sha}"
+    if [[ -n "${acr_publish_run_id}" ]]; then
+      printf 'Dispatched Terraform Deploy for workspace %s with ACR publish run override %s.\n' \
+        "${workspace}" \
+        "${acr_publish_run_id}"
+    else
+      printf 'Dispatched Terraform Deploy for workspace %s. The workflow will use the latest successful matching ACR Image Publish run if app_runtime is selected.\n' \
+        "${workspace}"
+    fi
     ;;
 esac
