@@ -209,6 +209,8 @@ run_full_gate() {
   run_step "terraform network private data plane validation" scripts/validate-terraform-network-private-data-plane.sh
   run_step "terraform observability foundation validation" scripts/validate-terraform-observability-foundation.sh
   run_step "terraform data platform validation" scripts/validate-terraform-data-platform.sh
+  run_step "terraform AI services validation" scripts/validate-terraform-ai-services.sh
+  run_step "terraform AI services stage check" scripts/terraform-stage-check.sh ai_services
   run_step "terraform workflow guardrail validation" scripts/validate-terraform-workflow-guardrails.sh
   run_step "edge origin workflow validation" scripts/validate-edge-origin-workflow.sh
   run_step "git diff whitespace check" git diff --check
