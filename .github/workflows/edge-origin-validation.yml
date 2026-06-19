@@ -129,7 +129,6 @@ jobs:
 
           init_stage edge
           terraform -chdir="infrastructure/azure/stages/edge" output -json front_door_custom_domain_hostnames > "${EVIDENCE_DIR}/front_door_custom_domain_hostnames.json"
-          terraform -chdir="infrastructure/azure/stages/edge" output -json front_door_private_link_origin_approval_requests > "${EVIDENCE_DIR}/front_door_private_link_origin_approval_requests.json"
           terraform -chdir="infrastructure/azure/stages/edge" output -json public_auth_callback_base_urls > "${EVIDENCE_DIR}/public_auth_callback_base_urls.json"
 
           {
@@ -145,7 +144,6 @@ jobs:
 
           HOSTNAMES="${EVIDENCE_DIR}/front_door_custom_domain_hostnames.json"
           DIRECT_ORIGINS="${EVIDENCE_DIR}/direct_origin_validation_targets.json"
-          PRIVATE_LINK="${EVIDENCE_DIR}/front_door_private_link_origin_approval_requests.json"
           AUTH_CALLBACKS="${EVIDENCE_DIR}/public_auth_callback_base_urls.json"
 
           jq -e '
@@ -165,13 +163,6 @@ jobs:
             (.fqdns.product_api | length > 0) and
             (.fqdns.product_ingestion_endpoint | length > 0)
           ' "${DIRECT_ORIGINS}" > /dev/null
-
-          jq -e '
-            length == 3 and
-            all(.[]; .target_type == "managedEnvironments") and
-            all(.[]; (.private_link_target_id | test("/providers/Microsoft.App/managedEnvironments/"))) and
-            all(.[]; .origin_host_name == .origin_host_header)
-          ' "${PRIVATE_LINK}" > /dev/null
 
           case "${ENVIRONMENT}" in pp|pd)
             test "$(jq -r '.public_network_access' "${DIRECT_ORIGINS}")" = "Disabled"
@@ -256,14 +247,12 @@ jobs:
           set -euo pipefail
 
           PUBLIC_NETWORK_ACCESS="$(jq -r '.public_network_access' "${EVIDENCE_DIR}/direct_origin_validation_targets.json")"
-          PRIVATE_LINK_COUNT="$(jq 'length' "${EVIDENCE_DIR}/front_door_private_link_origin_approval_requests.json")"
 
           {
             echo
             echo "### Sanitized Terraform Evidence"
             echo
             echo "- Container Apps environment public network access: ${PUBLIC_NETWORK_ACCESS}"
-            echo "- Front Door Private Link approval request entries: ${PRIVATE_LINK_COUNT}"
             echo "- Auth callback base URLs use Front Door public hostnames."
             echo
             echo "No response bodies, headers, cookies, tokens, or Terraform output values containing validation tokens were written to this summary."

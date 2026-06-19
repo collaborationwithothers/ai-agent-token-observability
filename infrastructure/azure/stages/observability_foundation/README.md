@@ -18,7 +18,7 @@ This stage creates an observability resource group and three destination resourc
 
 The stage also outputs diagnostic destination contracts for downstream resources. Downstream stages own the actual `azurerm_monitor_diagnostic_setting` resources for their resource scopes because supported categories vary by resource type.
 
-Public ingestion and query access remains enabled by default for Log Analytics, Application Insights, and Azure Monitor workspace so downstream stages can emit diagnostics and query aggregate metrics after this stage is applied. Private-only observability connectivity requires Azure Monitor Private Link Scope, scoped resource associations, private endpoints, private DNS, and Azure Monitor workspace data collection wiring. That plumbing is not created by this issue, so operators must not set the public access variables to `false` until a later implementation provides the private path.
+Public ingestion and query access remains enabled by default for Log Analytics, Application Insights, and Azure Monitor workspace so downstream stages can emit diagnostics and query aggregate metrics after this stage is applied. Network-restricted observability connectivity is deferred, so operators must not set the public access variables to `false` until a later implementation provides that path.
 
 ## Metric And Log Boundaries
 

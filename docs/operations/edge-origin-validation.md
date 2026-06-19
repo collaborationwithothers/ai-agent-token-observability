@@ -25,7 +25,7 @@ Azure Front Door Premium WAF
 First-release origin isolation:
 
 ```text
-Azure Front Door Premium Private Link to Azure Container Apps
+Public Front Door routes to generated Azure Container Apps FQDN origins until origin network hardening is implemented.
 ```
 
 First-release certificate model:
@@ -87,7 +87,7 @@ The validation must prove:
 - HTTPS requests to first-release product hostnames succeed through Azure Front Door.
 - HTTP requests redirect to HTTPS or are rejected according to the Front Door route policy.
 - Front Door WAF and route logs show the request entered through Front Door.
-- Origin health is healthy through the Private Link origin.
+- Origin health is healthy through the configured generated ACA FQDN origin.
 
 Command contract:
 
@@ -108,9 +108,7 @@ The validation must prove:
 
 - The generated Azure Container Apps FQDN for each public product service is not reachable from the public internet in production.
 - Public network access is disabled on the Azure Container Apps environment for production.
-- Private endpoint connections required for the Front Door origin are approved.
 - Terraform app runtime output `direct_origin_validation_targets.public_network_access` is `Disabled` in `pp` and `pd`.
-- Terraform edge output `front_door_private_link_origin_approval_requests` identifies the Product Dashboard, Product API, and Product Ingestion Endpoint origins covered by the Container Apps managed environment Private Link approval.
 
 Command contract:
 
@@ -131,7 +129,6 @@ Failure rule:
 - If a generated ACA FQDN returns a successful application response from the public internet in `pp` or `pd`, the release is not production-ready.
 - If a generated ACA FQDN returns any application-served HTTP response from the public internet in `pp` or `pd`, the release is not production-ready.
 - If the Container Apps environment public network access is not `Disabled` in `pp` or `pd`, the release is not production-ready.
-- If a Front Door Private Link origin approval remains pending or rejected, the release is not production-ready.
 
 ### 5. Origin Host Header Proof
 
@@ -140,8 +137,6 @@ The validation must prove:
 - Front Door origin host name uses the generated ACA FQDN.
 - Front Door origin host header uses the generated ACA FQDN unless a later tested design changes the TLS origin contract.
 - End-to-end HTTPS succeeds from Front Door to the ACA origin.
-- Front Door origin Private Link target is the Azure Container Apps managed environment.
-- The Private Link target type is `managedEnvironments`.
 
 Rationale:
 
@@ -151,10 +146,8 @@ Rationale:
 
 Required audit evidence:
 
-- Store the sanitized `front_door_private_link_origin_approval_requests` output with the deployment record.
-- Record the final approved state for one or more Azure-managed private endpoint connection requests on the Container Apps managed environment, correlated to the three Front Door origin outputs.
-- Record who approved each Private Link connection request and when approval completed.
 - Record the public direct-origin proof result without cookies, bearer tokens, request payloads, or response bodies.
+Private endpoint hardening is deferred to a later issue and is not part of the current deployable Terraform path.
 
 ### 6. Authentication Callback Proof
 
@@ -207,7 +200,7 @@ The workflow reads the `app_runtime` and `edge` Terraform state outputs on the m
 - DNS delegation and public hostname records are correct.
 - Front Door managed certificates are deployed for `app`, `api`, and `ingest`.
 - Public Front Door HTTPS health checks succeed.
-- Front Door origin health succeeds through Private Link.
+- Front Door origin health succeeds through the configured generated ACA FQDN origins.
 - Direct public requests to generated ACA FQDNs do not reach the application in `pp` or `pd`.
 - Auth callbacks and browser-visible URLs use public Front Door hostnames.
 - ACA product custom domains and product certificates are not required for the first release.
@@ -217,7 +210,5 @@ The workflow reads the `app_runtime` and `edge` Terraform state outputs on the m
 
 - Azure Front Door managed certificates use DNS TXT validation for custom domains: https://learn.microsoft.com/en-us/azure/frontdoor/domain
 - Azure Front Door supports managed certificates and customer-managed certificates for custom domains: https://learn.microsoft.com/en-us/azure/frontdoor/standard-premium/how-to-configure-https-custom-domain
-- Azure Front Door Premium can connect to origins through Private Link, removing the need for origins to be publicly accessible: https://learn.microsoft.com/en-us/azure/frontdoor/private-link
 - Azure Container Apps ingress with `external` is accessible through its FQDN: https://learn.microsoft.com/en-us/azure/container-apps/ingress-overview
-- Azure Container Apps can be exposed through Azure Front Door Premium with public network access disabled: https://learn.microsoft.com/en-us/azure/container-apps/front-door-custom-virtual-network-private-link
 - Azure Front Door supports `X-Forwarded-For`, `X-Forwarded-Host`, and `X-Forwarded-Proto` headers: https://learn.microsoft.com/en-us/azure/frontdoor/front-door-faq

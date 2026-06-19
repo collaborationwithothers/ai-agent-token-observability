@@ -47,7 +47,7 @@ output "application_insights_name" {
 
 output "application_insights_app_id" {
   description = "Application Insights App ID for non-secret application telemetry configuration references."
-  value       = module.application_insights.app_id
+  value       = nonsensitive(module.application_insights.app_id)
 }
 
 output "application_insights_configuration_reference" {
@@ -55,7 +55,7 @@ output "application_insights_configuration_reference" {
   value = {
     resource_id           = module.application_insights.resource_id
     name                  = module.application_insights.name
-    app_id                = module.application_insights.app_id
+    app_id                = nonsensitive(module.application_insights.app_id)
     workspace_resource_id = module.log_analytics_workspace.resource_id
   }
 }

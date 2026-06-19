@@ -1,20 +1,16 @@
 locals {
-  stage_name                         = "data_platform"
-  expected_workspace_name            = "${var.environment}_${var.azure_region}_${var.customer_organization_slug}"
-  configured_workspace_name          = coalesce(var.terraform_workspace_name, terraform.workspace)
-  workspace_name_matches_context     = terraform.workspace == local.expected_workspace_name && local.configured_workspace_name == terraform.workspace && terraform.workspace != "default"
-  workspace_parts                    = split("_", terraform.workspace)
-  name_prefix                        = "to-${var.environment}-${var.resource_instance}"
-  data_resource_group_name           = coalesce(var.data_resource_group_name, "rg-to-${var.environment}-${var.azure_region}-${var.customer_organization_slug}-data")
-  postgresql_server_name             = coalesce(var.postgresql_server_name, "psql-${local.name_prefix}-${var.azure_region}-${var.customer_organization_slug}")
-  region_code                        = lookup(local.storage_region_codes, var.azure_region, substr(replace(var.azure_region, "-", ""), 0, 6))
-  storage_account_name               = coalesce(var.storage_account_name, substr("stto${var.environment}${local.region_code}${replace(var.resource_instance, "-", "")}${replace(var.customer_organization_slug, "-", "")}", 0, 24))
-  postgresql_delegated_subnet_id     = try(var.network_subnet_ids["postgresql_delegated"], null)
-  storage_private_endpoint_subnet_id = try(var.network_subnet_ids["private_endpoints"], null)
-  postgresql_private_dns_zone_id     = try(var.private_dns_zone_ids["postgresql_private_access"], null)
-  blob_private_dns_zone_id           = try(var.private_dns_zone_ids["blob"], null)
-  diagnostic_workspace_resource_id   = try(var.diagnostic_destinations["data_platform"].log_analytics_workspace_resource_id, null)
-  diagnostic_destination_type        = try(var.diagnostic_destinations["data_platform"].destination_type, "Dedicated")
+  stage_name                       = "data_platform"
+  expected_workspace_name          = "${var.environment}_${var.azure_region}_${var.customer_organization_slug}"
+  configured_workspace_name        = coalesce(var.terraform_workspace_name, terraform.workspace)
+  workspace_name_matches_context   = terraform.workspace == local.expected_workspace_name && local.configured_workspace_name == terraform.workspace && terraform.workspace != "default"
+  workspace_parts                  = split("_", terraform.workspace)
+  name_prefix                      = "to-${var.environment}-${var.resource_instance}"
+  data_resource_group_name         = coalesce(var.data_resource_group_name, "rg-to-${var.environment}-${var.azure_region}-${var.customer_organization_slug}-data")
+  postgresql_server_name           = coalesce(var.postgresql_server_name, "psql-${local.name_prefix}-${var.azure_region}-${var.customer_organization_slug}")
+  region_code                      = lookup(local.storage_region_codes, var.azure_region, substr(replace(var.azure_region, "-", ""), 0, 6))
+  storage_account_name             = coalesce(var.storage_account_name, substr("stto${var.environment}${local.region_code}${replace(var.resource_instance, "-", "")}${replace(var.customer_organization_slug, "-", "")}", 0, 24))
+  diagnostic_workspace_resource_id = try(var.diagnostic_destinations["data_platform"].log_analytics_workspace_resource_id, null)
+  diagnostic_destination_type      = try(var.diagnostic_destinations["data_platform"].destination_type, "Dedicated")
 
   storage_region_codes = {
     eastus     = "eus"
@@ -28,6 +24,17 @@ locals {
     customer_organization_slug = var.customer_organization_slug
     terraform_stage            = local.stage_name
   })
+
+  default_postgresql_ad_administrators = {
+    sql_admins = {
+      tenant_id      = data.azurerm_client_config.current.tenant_id
+      object_id      = "ed0a42c6-80ec-45d4-b1fd-3ecd108d0a9f"
+      principal_name = "sql-admins"
+      principal_type = "Group"
+    }
+  }
+
+  postgresql_ad_administrators = merge(local.default_postgresql_ad_administrators, var.postgresql_ad_administrators)
 
   runtime_storage_role_assignments = {
     for key, principal_id in var.runtime_managed_identity_principal_ids : key => {
@@ -70,17 +77,6 @@ locals {
       role_assignments = local.runtime_storage_role_assignments
     }
   }
-
-  storage_private_endpoints = var.enable_private_endpoints ? {
-    blob = {
-      name                          = "pe-${local.name_prefix}-blob"
-      subnet_resource_id            = local.storage_private_endpoint_subnet_id
-      subresource_name              = "blob"
-      private_dns_zone_group_name   = "default"
-      private_dns_zone_resource_ids = toset([local.blob_private_dns_zone_id])
-      tags                          = local.common_tags
-    }
-  } : {}
 
   postgresql_diagnostic_settings = local.diagnostic_workspace_resource_id == null ? {} : {
     log_analytics = {

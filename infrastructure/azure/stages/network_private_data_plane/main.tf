@@ -54,24 +54,3 @@ module "virtual_network" {
 
   depends_on = [terraform_data.workspace_guard]
 }
-
-module "private_dns_zones" {
-  source   = "../../modules/private_dns_zone"
-  for_each = local.private_dns_zones
-
-  domain_name = each.value.domain_name
-  parent_id   = module.network_resource_group.id
-  tags        = local.common_tags
-
-  virtual_network_links = {
-    primary = {
-      name                 = "link-${local.name_prefix}-${each.key}"
-      virtual_network_id   = module.virtual_network.id
-      registration_enabled = false
-      resolution_policy    = "Default"
-      tags                 = local.common_tags
-    }
-  }
-
-  depends_on = [terraform_data.workspace_guard]
-}

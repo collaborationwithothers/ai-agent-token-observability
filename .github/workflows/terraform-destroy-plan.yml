@@ -187,10 +187,7 @@ jobs:
               edge)
                 init_stage app_runtime
                 EDGE_CONTAINER_APP_FQDNS="$(terraform -chdir="infrastructure/azure/stages/app_runtime" output -json container_app_fqdns | jq -c '.')"
-                EDGE_CONTAINER_APP_ENVIRONMENT_ID="$(terraform -chdir="infrastructure/azure/stages/app_runtime" output -raw container_app_environment_id)"
                 EXTRA_VAR_ARGS+=("-var=container_app_fqdns=${EDGE_CONTAINER_APP_FQDNS}")
-                EXTRA_VAR_ARGS+=("-var=container_app_environment_id=${EDGE_CONTAINER_APP_ENVIRONMENT_ID}")
-                EXTRA_VAR_ARGS+=("-var=enable_front_door_private_link_origins=true")
                 ;;
             esac
             terraform -chdir="${STAGE_DIR}" plan -destroy -input=false -out="${DESTROY_PLAN_FILE}" \

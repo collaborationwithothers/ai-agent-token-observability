@@ -78,12 +78,6 @@ variable "allowed_customer_organization_slugs" {
   default     = ["internal"]
 }
 
-variable "enable_private_endpoints" {
-  description = "Whether this stage should prefer private endpoints when resources are added."
-  type        = bool
-  default     = true
-}
-
 variable "enable_zone_redundancy" {
   description = "Whether this stage should enable zone redundancy for resources that support it."
   type        = bool
@@ -105,18 +99,6 @@ variable "data_resource_group_name" {
     condition     = var.data_resource_group_name == null || can(regex("^[A-Za-z0-9._() -]{1,90}$", var.data_resource_group_name))
     error_message = "data_resource_group_name must be a valid Azure resource group name when supplied."
   }
-}
-
-variable "network_subnet_ids" {
-  description = "Subnet resource IDs from network_private_data_plane outputs by stable key."
-  type        = map(string)
-  default     = {}
-}
-
-variable "private_dns_zone_ids" {
-  description = "Private DNS zone resource IDs from network_private_data_plane outputs by stable key."
-  type        = map(string)
-  default     = {}
 }
 
 variable "diagnostic_destinations" {
@@ -200,7 +182,7 @@ variable "postgresql_auto_grow_enabled" {
 }
 
 variable "postgresql_ad_administrators" {
-  description = "Microsoft Entra PostgreSQL administrators. Runtime managed identity administrators are supplied by downstream runtime issues."
+  description = "Additional Microsoft Entra PostgreSQL administrators. The sql-admins group is always included by this stage; external user-assigned identities can be supplied here when their principal metadata is known."
   type = map(object({
     tenant_id      = string
     object_id      = string
@@ -208,6 +190,22 @@ variable "postgresql_ad_administrators" {
     principal_type = string
   }))
   default = {}
+}
+
+variable "postgresql_firewall_rules" {
+  description = "PostgreSQL public firewall rules. The default allows only the managed VNet runner NAT gateway public IP."
+  type = map(object({
+    name             = string
+    start_ip_address = string
+    end_ip_address   = string
+  }))
+  default = {
+    github_actions_runner_nat = {
+      name             = "allow-github-actions-runner-nat"
+      start_ip_address = "74.234.84.247"
+      end_ip_address   = "74.234.84.247"
+    }
+  }
 }
 
 variable "postgresql_role_assignments" {
@@ -369,7 +367,7 @@ variable "storage_user_assigned_identity_resource_ids" {
 }
 
 variable "storage_network_rules" {
-  description = "Network rules for the product Storage Account. Default denies public network access except Azure service bypass needed for platform operations."
+  description = "Network rules for the product Storage Account. Default denies public network access except Azure services, the managed VNet runner NAT gateway public IP, and the managed runner subnet."
   type = object({
     bypass                     = optional(set(string), ["AzureServices"])
     default_action             = optional(string, "Deny")
@@ -386,5 +384,10 @@ variable "storage_network_rules" {
       update = optional(string)
     }))
   })
-  default = {}
+  default = {
+    bypass                     = ["AzureServices"]
+    default_action             = "Deny"
+    ip_rules                   = ["74.234.84.247"]
+    virtual_network_subnet_ids = ["/subscriptions/c7a1d85d-159f-4cfc-bd13-51295c9acb96/resourceGroups/rg-dv-gh-actions-neu/providers/Microsoft.Network/virtualNetworks/vnet-dv-gh-actions-neu/subnets/snet-github-actions-private-runner-neu"]
+  }
 }

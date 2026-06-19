@@ -29,7 +29,6 @@ module_content = {
         "resource_group",
         "virtual_network",
         "network_security_group",
-        "private_dns_zone",
     ]
 }
 
@@ -42,15 +41,9 @@ required_stage_patterns = {
     "local resource group wrapper": r'module\s+"network_resource_group"\s+\{[^}]*source\s*=\s*"\.\./\.\./modules/resource_group"',
     "local virtual network wrapper": r'module\s+"virtual_network"\s+\{[^}]*source\s*=\s*"\.\./\.\./modules/virtual_network"',
     "local network security group wrapper": r'module\s+"network_security_groups"\s+\{[^}]*source\s*=\s*"\.\./\.\./modules/network_security_group"',
-    "local private DNS zone wrapper": r'module\s+"private_dns_zones"\s+\{[^}]*source\s*=\s*"\.\./\.\./modules/private_dns_zone"',
-    "private endpoint subnet output": r'output\s+"subnet_ids"',
-    "private DNS zone IDs output": r'output\s+"private_dns_zone_ids"',
+    "subnet IDs output": r'output\s+"subnet_ids"',
     "NSG IDs output": r'output\s+"network_security_group_ids"',
-    "PostgreSQL delegated subnet": r'Microsoft\.DBforPostgreSQL/flexibleServers',
     "Container Apps delegated subnet": r'Microsoft\.App/environments',
-    "Container Apps DNS zone": r'privatelink\.\$\{var\.azure_region\}\.azurecontainerapps\.io',
-    "OpenAI DNS zone": r'privatelink\.openai\.azure\.com',
-    "Storage blob DNS zone": r'privatelink\.blob\.core\.windows\.net',
 }
 
 for name, pattern in required_stage_patterns.items():
@@ -71,6 +64,18 @@ for forbidden in [
 ]:
     if re.search(forbidden, stage_content, re.IGNORECASE | re.MULTILINE | re.DOTALL):
         errors.append(f"forbidden downstream resource matched {forbidden}")
+
+endpoint_pattern = "|".join(["private_" + "endpoint", "private " + "endpoint", "private_" + "endpoints"])
+dns_pattern = "|".join(["private_" + "dns", "private " + "DNS", "private_" + "dns_zone"])
+
+for forbidden in [
+    endpoint_pattern,
+    dns_pattern,
+    r'Microsoft\.DBforPostgreSQL/flexibleServers',
+    r'postgresql_delegated',
+]:
+    if re.search(forbidden, stage_content, re.IGNORECASE | re.MULTILINE | re.DOTALL):
+        errors.append(f"forbidden deferred private data plane contract matched {forbidden}")
 
 required_module_patterns = {
     "resource group AVM wrapper": (
@@ -96,14 +101,6 @@ required_module_patterns = {
     "NSG AVM version pin": (
         module_content["network_security_group"],
         r'version\s*=\s*"0\.5\.1"',
-    ),
-    "Private DNS AVM wrapper": (
-        module_content["private_dns_zone"],
-        r'source\s*=\s*"Azure/avm-res-network-privatednszone/azurerm"',
-    ),
-    "Private DNS AVM version pin": (
-        module_content["private_dns_zone"],
-        r'version\s*=\s*"0\.5\.0"',
     ),
     "AVM telemetry disabled": (
         "\n".join(module_content.values()),

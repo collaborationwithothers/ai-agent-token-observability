@@ -53,8 +53,7 @@ Origin bypass guardrail:
 
 - `container_app_environment_public_network_access` defaults to `Enabled` for early non-production proof work.
 - `pp` and `pd` plans fail unless `container_app_environment_public_network_access` is `Disabled`.
-- Use the `container_app_environment_id` output as the Front Door Private Link target in the edge stage.
-- Use the `direct_origin_validation_targets` output as the sanitized stable Container App ingress FQDN input to the edge-origin validation runbook.
+- Use the `direct_origin_validation_targets` output as the sanitized stable Container App ingress FQDN input to the edge stage and edge-origin validation runbook.
 - Direct requests to generated ACA FQDNs must not return application responses in `pp` or `pd`.
 
 Do not use `terraform apply -auto-approve`. Production applies must use the guarded manual workflow path defined by the Terraform production infrastructure architecture.

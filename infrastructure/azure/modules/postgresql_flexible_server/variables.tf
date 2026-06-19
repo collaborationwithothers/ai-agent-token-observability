@@ -42,8 +42,9 @@ variable "databases" {
 }
 
 variable "delegated_subnet_id" {
-  description = "Delegated subnet resource ID for PostgreSQL private access."
+  description = "Optional delegated subnet resource ID for PostgreSQL VNet integration. Defaults null because the current deployable path uses public access with firewall allowlists."
   type        = string
+  default     = null
 }
 
 variable "diagnostic_settings" {
@@ -69,6 +70,16 @@ variable "geo_redundant_backup_enabled" {
   default     = false
 }
 
+variable "firewall_rules" {
+  description = "PostgreSQL Flexible Server firewall rules for public access allowlists."
+  type = map(object({
+    name             = string
+    start_ip_address = string
+    end_ip_address   = string
+  }))
+  default = {}
+}
+
 variable "location" {
   description = "Azure region for PostgreSQL Flexible Server."
   type        = string
@@ -76,11 +87,6 @@ variable "location" {
 
 variable "name" {
   description = "PostgreSQL Flexible Server name."
-  type        = string
-}
-
-variable "private_dns_zone_id" {
-  description = "Private DNS zone resource ID for PostgreSQL private access."
   type        = string
 }
 

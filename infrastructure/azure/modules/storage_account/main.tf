@@ -25,8 +25,7 @@ module "storage_account" {
   managed_identities                  = var.managed_identities
   min_tls_version                     = "TLS1_2"
   network_rules                       = var.network_rules
-  private_endpoints                   = var.private_endpoints
-  public_network_access_enabled       = false
+  public_network_access_enabled       = true
   role_assignments                    = var.role_assignments
   shared_access_key_enabled           = false
   storage_management_policy_rule      = var.storage_management_policy_rule

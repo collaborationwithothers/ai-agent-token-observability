@@ -64,18 +64,3 @@ output "network_security_group_names" {
   description = "Network Security Group names by subnet boundary key."
   value       = { for key, nsg in module.network_security_groups : key => nsg.name }
 }
-
-output "private_dns_zone_ids" {
-  description = "Private DNS zone resource IDs by stable downstream contract key."
-  value       = { for key, zone in module.private_dns_zones : key => zone.id }
-}
-
-output "private_dns_zone_names" {
-  description = "Private DNS zone names by stable downstream contract key."
-  value       = { for key, zone in module.private_dns_zones : key => zone.name }
-}
-
-output "private_dns_zone_purposes" {
-  description = "Non-secret private DNS zone purpose descriptions by stable downstream contract key."
-  value       = { for key, zone in local.private_dns_zones : key => zone.purpose }
-}

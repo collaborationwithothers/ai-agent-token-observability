@@ -139,13 +139,13 @@ Required stages:
 | Order | Stage | Path | Responsibility |
 | --- | --- | --- | --- |
 | 0 | Foundation | `stages/foundation` | Resource groups, shared tags, deployment identities, Key Vault, role assignment foundations |
-| 1 | Network private data plane | `stages/network_private_data_plane` | VNet, subnets, private DNS zones, private endpoints, network security boundaries |
+| 1 | Network private data plane | `stages/network_private_data_plane` | VNet, subnets, and network security boundaries |
 | 2 | Observability foundation | `stages/observability_foundation` | Log Analytics, Application Insights, Azure Monitor workspace or managed Prometheus foundation |
 | 3 | Data platform | `stages/data_platform` | PostgreSQL Flexible Server, product Blob Storage, backup and lifecycle settings |
-| 4 | AI services | `stages/ai_services` | Azure AI Language, Azure AI Content Safety, Azure OpenAI or Foundry resources, deployment aliases, private access where feasible |
+| 4 | AI services | `stages/ai_services` | Azure AI Language, Azure AI Content Safety, Azure OpenAI or Foundry resources, deployment aliases, and diagnostics |
 | 5 | App runtime | `stages/app_runtime` | Container Apps environment, Product API, Product Ingestion Endpoint, Product Dashboard, Container Apps Jobs, managed identities, app configuration |
 | 6 | Managed Grafana | `stages/managed_grafana` | Azure Managed Grafana workspace, data source wiring, repo-versioned dashboard JSON deployment, Grafana folders, Grafana role integration |
-| 7 | Edge | `stages/edge` | Azure Front Door Premium, WAF policy, routes, Private Link origins, managed certificates, custom domains, rate-limit rules where supported |
+| 7 | Edge | `stages/edge` | Azure Front Door Premium, WAF policy, routes, managed certificates, custom domains, rate-limit rules where supported |
 
 Stage dependency flow:
 
@@ -176,7 +176,7 @@ Use naming conventions in code, but keep these logical boundaries:
 | --- | --- | --- |
 | State | `rg-state` | Terraform state storage only |
 | Foundation | `rg-foundation` | Key Vault, deployment identities, shared role infrastructure |
-| Network | `rg-network` | VNet, subnets, private DNS, private endpoints |
+| Network | `rg-network` | VNet, subnets, and network security groups |
 | Observability | `rg-observability` | Log Analytics, Application Insights, Azure Monitor workspace, Managed Grafana if not split |
 | Data | `rg-data` | PostgreSQL, product Blob Storage |
 | AI services | `rg-ai` | Azure AI Language, Content Safety, Azure OpenAI or Foundry |
@@ -232,7 +232,7 @@ Module rules:
 | Key Vault | AVM wrapper | AzureRM |
 | Storage accounts and containers | AVM wrapper | AzureRM |
 | Virtual network and subnets | AVM wrapper | AzureRM |
-| Private endpoints and private DNS | AVM wrapper | AzureRM |
+| Deferred network hardening | AVM wrapper when reintroduced | AzureRM |
 | Log Analytics workspace | AVM wrapper | AzureRM |
 | Application Insights | AVM wrapper | AzureRM |
 | Azure Monitor workspace or managed Prometheus | AVM wrapper if available | AzureRM or AzAPI |
@@ -260,7 +260,6 @@ Every stage must accept:
 | `tags` | Yes | Must include environment, region, product, owner, data classification, and managed-by |
 | `allowed_regions` | Yes | Validation list for workflow input and Terraform variable validation |
 | `allowed_customer_organization_slugs` | Yes | Validation list for deployment scope |
-| `enable_private_endpoints` | Yes | Defaults true for customer-data resources |
 | `enable_zone_redundancy` | Environment-specific | Required decision for `pp` and `pd` where supported |
 | `public_ingress_hostnames` | Stage-specific | Used by edge and app runtime |
 
@@ -268,8 +267,7 @@ Edge and origin isolation variables:
 
 | Variable | Required | Notes |
 | --- | --- | --- |
-| `front_door_sku` | Yes | Must be `Premium_AzureFrontDoor` for production because Private Link origins are required |
-| `enable_front_door_private_link_origins` | Yes | Must be true for `pp` and `pd` |
+| `front_door_sku` | Yes | Must be `Premium_AzureFrontDoor` for production edge capabilities |
 | `disable_container_apps_public_network_access` | Yes | Must be true for `pp` and `pd` |
 | `front_door_custom_domains` | Yes | Explicit first-release hostnames: `app`, `api`, and `ingest` under `tokenobs.consultwithcloud.com` |
 | `use_front_door_managed_certificates` | Yes | Must be true for first release unless the certificate decision is reopened |
@@ -278,7 +276,6 @@ Edge and origin isolation variables:
 Edge and origin isolation validation:
 
 - `front_door_sku` must be `Premium_AzureFrontDoor` in `pp` and `pd`.
-- `enable_front_door_private_link_origins` must be true in `pp` and `pd`.
 - `disable_container_apps_public_network_access` must be true in `pp` and `pd`.
 - `use_front_door_managed_certificates` must be true for first-release hostnames unless a later ADR reopens the certificate decision.
 - App runtime and edge stages must expose a non-production proof command or test showing direct generated ACA FQDN access is blocked while Front Door access succeeds.
@@ -342,4 +339,3 @@ Rules:
 - Every remote state data source must state the stage it reads from.
 - Every remote state data source must use the same workspace unless a documented shared-platform exception applies.
 - Cross-region remote state reads are forbidden unless the stage documents a target-state multi-region dependency.
-

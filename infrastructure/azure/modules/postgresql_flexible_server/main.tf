@@ -17,23 +17,20 @@ module "postgresql_flexible_server" {
     tenant_id                     = var.tenant_id
   }
 
-  ad_administrator                        = var.ad_administrators
-  auto_grow_enabled                       = var.auto_grow_enabled
-  backup_retention_days                   = var.backup_retention_days
-  databases                               = var.databases
-  delegated_subnet_id                     = var.delegated_subnet_id
-  diagnostic_settings                     = var.diagnostic_settings
-  firewall_rules                          = {}
-  geo_redundant_backup_enabled            = var.geo_redundant_backup_enabled
-  private_dns_zone_id                     = var.private_dns_zone_id
-  public_network_access_enabled           = false
-  role_assignments                        = var.role_assignments
-  server_version                          = var.server_version
-  sku_name                                = var.sku_name
-  storage_mb                              = var.storage_mb
-  storage_tier                            = var.storage_tier
-  private_endpoints                       = {}
-  private_endpoints_manage_dns_zone_group = true
+  ad_administrator              = var.ad_administrators
+  auto_grow_enabled             = var.auto_grow_enabled
+  backup_retention_days         = var.backup_retention_days
+  databases                     = var.databases
+  delegated_subnet_id           = var.delegated_subnet_id
+  diagnostic_settings           = var.diagnostic_settings
+  firewall_rules                = var.firewall_rules
+  geo_redundant_backup_enabled  = var.geo_redundant_backup_enabled
+  public_network_access_enabled = true
+  role_assignments              = var.role_assignments
+  server_version                = var.server_version
+  sku_name                      = var.sku_name
+  storage_mb                    = var.storage_mb
+  storage_tier                  = var.storage_tier
 
   high_availability = var.zone_redundant_high_availability_enabled ? {
     mode = "ZoneRedundant"
