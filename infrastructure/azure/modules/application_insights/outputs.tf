@@ -1,6 +1,8 @@
 output "app_id" {
   description = "Application Insights App ID."
-  value       = module.application_insights.app_id
+  # The upstream AVM module marks app_id sensitive, but this wrapper exposes it
+  # only as a non-secret telemetry configuration reference.
+  value = nonsensitive(module.application_insights.app_id)
 }
 
 output "name" {
