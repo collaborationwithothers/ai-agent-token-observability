@@ -107,7 +107,7 @@ terraform_output_json() {
   local terraform_workspace="$2"
   local output_name="$3"
 
-  init_stage "${terraform_stage}" "${terraform_workspace}" false
+  init_stage "${terraform_stage}" "${terraform_workspace}" false >&2
   terraform -chdir="${ROOT_DIR}/infrastructure/azure/stages/${terraform_stage}" output -json "${output_name}"
 }
 
@@ -116,7 +116,7 @@ terraform_output_raw() {
   local terraform_workspace="$2"
   local output_name="$3"
 
-  init_stage "${terraform_stage}" "${terraform_workspace}" false
+  init_stage "${terraform_stage}" "${terraform_workspace}" false >&2
   terraform -chdir="${ROOT_DIR}/infrastructure/azure/stages/${terraform_stage}" output -raw "${output_name}"
 }
 

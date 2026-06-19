@@ -38,9 +38,10 @@ if [[ "$#" -eq 0 ]]; then
   set -- "$ROOT_DIR/.github/workflows"
 fi
 
-python3 - "$@" <<'PY'
+VALIDATOR_ROOT_DIR="$ROOT_DIR" python3 - "$@" <<'PY'
 from __future__ import annotations
 
+import os
 import pathlib
 import re
 import sys
@@ -142,6 +143,30 @@ def workflow_files(paths: list[str]) -> list[pathlib.Path]:
         elif path.suffix in {".yml", ".yaml"}:
             files.append(path)
     return sorted(dict.fromkeys(files))
+
+
+def terraform_stage_deploy_helper_errors() -> list[str]:
+    helper_path = pathlib.Path(os.environ["VALIDATOR_ROOT_DIR"]) / "scripts/terraform-stage-deploy.sh"
+    if not helper_path.exists():
+        return [f"missing Terraform stage deploy helper: {helper_path}"]
+
+    content = helper_path.read_text(encoding="utf-8")
+    errors: list[str] = []
+    for function_name in ["terraform_output_json", "terraform_output_raw"]:
+        match = re.search(
+            rf"{function_name}\(\) \{{(?P<body>.*?)(?=^}})",
+            content,
+            re.MULTILINE | re.DOTALL,
+        )
+        if match is None:
+            errors.append(f"missing {function_name} helper")
+            continue
+        if re.search(
+            r'init_stage\s+"\$\{terraform_stage\}"\s+"\$\{terraform_workspace\}"\s+false\s+>&2',
+            match.group("body"),
+        ) is None:
+            errors.append(f"{function_name} must redirect init_stage output to stderr")
+    return errors
 
 
 def is_deployment_capable(content: str) -> bool:
@@ -459,6 +484,11 @@ if not files:
     sys.exit(0)
 
 all_errors: list[str] = []
+helper_errors = terraform_stage_deploy_helper_errors()
+if helper_errors:
+    all_errors.append(str(pathlib.Path(os.environ["VALIDATOR_ROOT_DIR"]) / "scripts/terraform-stage-deploy.sh"))
+    all_errors.extend(f"  - {error}" for error in helper_errors)
+
 for path in files:
     errors = validate_file(path)
     if errors:
