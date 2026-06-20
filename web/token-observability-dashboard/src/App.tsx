@@ -82,6 +82,49 @@ type OverviewFilters = {
   rejectionReason: string;
 };
 
+type OverviewCostMixItem = {
+  providerName: string;
+  modelName: string;
+  billingRoute: string;
+  tokenType: string;
+  costStatus: string;
+  currency: string;
+  estimatedCost: number | null;
+  estimateCount: number;
+  metricStatus: string;
+};
+
+type OverviewResponse = {
+  costMix: OverviewCostMixItem[];
+};
+
+type PricingBasisItem = {
+  pricingBasisId: string;
+  harness: string;
+  providerName: string;
+  modelName: string;
+  tokenType: string;
+  billingRoute: string;
+  currency: string;
+  pricePerMillionTokens: number;
+  pricingVersion: string;
+  sourceKind: string;
+  reviewState: string;
+  effectiveFromUtc: string;
+  effectiveToUtc: string | null;
+  auditEventId: string;
+  sourceMetadata: Record<string, string>;
+};
+
+type PricingBasisResponse = {
+  items: PricingBasisItem[];
+};
+
+type DataState<T> =
+  | { kind: "loading" }
+  | { kind: "ready"; data: T }
+  | { kind: "error"; message: string; problem?: ProblemDetails };
+
 const dashboardRoutes: DashboardRoute[] = [
   {
     path: "/overview",
@@ -402,7 +445,13 @@ export function App() {
             route={activeRoute}
           />
         ) : activeRoute.path === "/overview" ? (
-          <OverviewShell currentPath={currentPath} setCurrentPath={setCurrentPath} />
+          <OverviewShell
+            currentPath={currentPath}
+            productApiBaseUrl={productApiBaseUrl}
+            setCurrentPath={setCurrentPath}
+          />
+        ) : activeRoute.path === "/admin/pricing" ? (
+          <PricingShell productApiBaseUrl={productApiBaseUrl} />
         ) : (
           <RouteState title={activeRoute.label} detail={activeRoute.purpose} route={activeRoute} />
         )}
@@ -413,16 +462,62 @@ export function App() {
 
 function OverviewShell({
   currentPath,
+  productApiBaseUrl,
   setCurrentPath
 }: {
   currentPath: string;
+  productApiBaseUrl: string;
   setCurrentPath: (path: string, options?: { replace?: boolean }) => void;
 }) {
   const [filters, setFilters] = useState<OverviewFilters>(() => readOverviewFilters());
+  const [overviewState, setOverviewState] = useState<DataState<OverviewResponse>>({ kind: "loading" });
 
   useEffect(() => {
     setFilters(readOverviewFilters());
   }, [currentPath]);
+
+  useEffect(() => {
+    let isActive = true;
+
+    async function loadOverview() {
+      setOverviewState({ kind: "loading" });
+      try {
+        const response = await fetch(`${productApiBaseUrl}/overview${window.location.search}`, {
+          credentials: "include",
+          headers: { Accept: "application/json" }
+        });
+        const problem = response.ok ? undefined : await readProblemDetails(response);
+
+        if (!isActive) {
+          return;
+        }
+
+        if (!response.ok) {
+          setOverviewState({
+            kind: "error",
+            message: problem?.title ?? "Overview data request failed.",
+            problem
+          });
+          return;
+        }
+
+        setOverviewState({ kind: "ready", data: (await response.json()) as OverviewResponse });
+      } catch (error) {
+        if (isActive) {
+          setOverviewState({
+            kind: "error",
+            message: error instanceof Error ? error.message : "Overview data request failed."
+          });
+        }
+      }
+    }
+
+    loadOverview();
+
+    return () => {
+      isActive = false;
+    };
+  }, [currentPath, productApiBaseUrl]);
 
   return (
     <section className="route-surface" aria-labelledby="overview-title">
@@ -431,7 +526,7 @@ function OverviewShell({
           <p className="eyebrow">Overview</p>
           <h3 id="overview-title">Tenant-aware query state</h3>
         </div>
-        <span className="state-chip">No Product API data loaded</span>
+        <span className="state-chip">{overviewState.kind === "ready" ? "Product API data loaded" : "Loading"}</span>
       </div>
       <form
         className="filter-grid"
@@ -508,14 +603,224 @@ function OverviewShell({
         </label>
         <button type="submit">Apply filters</button>
       </form>
-      <div className="empty-state">
-        <h4>Overview data will load from Product API</h4>
-        <p>
-          The shell preserves filter state and waits for the authorized aggregate overview route to provide summaries.
-        </p>
-      </div>
+      {overviewState.kind === "loading" ? (
+        <div className="empty-state">
+          <h4>Loading aggregate cost mix</h4>
+          <p>The dashboard is requesting authorized aggregate cost data.</p>
+        </div>
+      ) : overviewState.kind === "error" ? (
+        <InlineProblem title="Overview unavailable" message={overviewState.message} problem={overviewState.problem} />
+      ) : overviewState.data.costMix.length === 0 ? (
+        <div className="empty-state">
+          <h4>No aggregate cost mix yet</h4>
+          <p>Cost buckets appear after pricing basis and cost estimates are available.</p>
+        </div>
+      ) : (
+        <CostMixTable items={overviewState.data.costMix} />
+      )}
     </section>
   );
+}
+
+function CostMixTable({ items }: { items: OverviewCostMixItem[] }) {
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Provider</th>
+            <th>Model</th>
+            <th>Token type</th>
+            <th>Billing route</th>
+            <th>Cost status</th>
+            <th>Estimated cost</th>
+            <th>Metric state</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((item) => (
+            <tr key={`${item.providerName}:${item.modelName}:${item.tokenType}:${item.billingRoute}:${item.costStatus}`}>
+              <td>{item.providerName}</td>
+              <td>{item.modelName}</td>
+              <td>{formatMachineText(item.tokenType)}</td>
+              <td>{formatMachineText(item.billingRoute)}</td>
+              <td>{formatMachineText(item.costStatus)}</td>
+              <td>{formatMoney(item.estimatedCost, item.currency)}</td>
+              <td>{formatMachineText(item.metricStatus)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function PricingShell({ productApiBaseUrl }: { productApiBaseUrl: string }) {
+  const [pricingState, setPricingState] = useState<DataState<PricingBasisResponse>>({ kind: "loading" });
+
+  const loadPricing = useCallback(async () => {
+    setPricingState({ kind: "loading" });
+    try {
+      const response = await fetch(`${productApiBaseUrl}/pricing/basis`, {
+        credentials: "include",
+        headers: { Accept: "application/json" }
+      });
+      const problem = response.ok ? undefined : await readProblemDetails(response);
+
+      if (!response.ok) {
+        setPricingState({
+          kind: "error",
+          message: problem?.title ?? "Pricing basis request failed.",
+          problem
+        });
+        return;
+      }
+
+      setPricingState({ kind: "ready", data: (await response.json()) as PricingBasisResponse });
+    } catch (error) {
+      setPricingState({
+        kind: "error",
+        message: error instanceof Error ? error.message : "Pricing basis request failed."
+      });
+    }
+  }, [productApiBaseUrl]);
+
+  useEffect(() => {
+    loadPricing();
+  }, [loadPricing]);
+
+  async function reviewPricing(pricingBasisId: string, decision: "approve" | "reject") {
+    const response = await fetch(`${productApiBaseUrl}/pricing/basis/${pricingBasisId}/${decision}`, {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Idempotency-Key": `${decision}-${pricingBasisId}-${Date.now()}`
+      },
+      body: JSON.stringify({ decisionReason: "dashboard_review" })
+    });
+
+    if (!response.ok) {
+      const problem = await readProblemDetails(response);
+      setPricingState({
+        kind: "error",
+        message: problem?.title ?? "Pricing review request failed.",
+        problem
+      });
+      return;
+    }
+
+    await loadPricing();
+  }
+
+  return (
+    <section className="route-surface" aria-labelledby="pricing-title">
+      <div className="route-heading">
+        <div>
+          <p className="eyebrow">Admin</p>
+          <h3 id="pricing-title">Harness Pricing Basis</h3>
+        </div>
+        <span className="state-chip">{pricingState.kind === "ready" ? "Review queue loaded" : "Loading"}</span>
+      </div>
+      {pricingState.kind === "loading" ? (
+        <div className="empty-state">
+          <h4>Loading pricing basis</h4>
+          <p>Provider seed candidates and customer overrides are loading from Product API.</p>
+        </div>
+      ) : pricingState.kind === "error" ? (
+        <InlineProblem title="Pricing unavailable" message={pricingState.message} problem={pricingState.problem} />
+      ) : pricingState.data.items.length === 0 ? (
+        <div className="empty-state">
+          <h4>No pricing basis records</h4>
+          <p>Provider refresh jobs create candidate records for review.</p>
+        </div>
+      ) : (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Provider</th>
+                <th>Model</th>
+                <th>Token type</th>
+                <th>Route</th>
+                <th>Rate</th>
+                <th>Source</th>
+                <th>State</th>
+                <th>Audit</th>
+                <th>Review</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pricingState.data.items.map((item) => (
+                <tr key={item.pricingBasisId}>
+                  <td>{item.providerName}</td>
+                  <td>{item.modelName}</td>
+                  <td>{formatMachineText(item.tokenType)}</td>
+                  <td>{formatMachineText(item.billingRoute)}</td>
+                  <td>{formatMoney(item.pricePerMillionTokens, item.currency)} / 1M</td>
+                  <td>
+                    {formatMachineText(item.sourceKind)}
+                    <small>{item.sourceMetadata.source_url ?? item.sourceMetadata.provider_sku_name ?? "metadata recorded"}</small>
+                  </td>
+                  <td>{formatMachineText(item.reviewState)}</td>
+                  <td>{item.auditEventId}</td>
+                  <td>
+                    {item.reviewState === "candidate" ? (
+                      <div className="button-row">
+                        <button type="button" onClick={() => reviewPricing(item.pricingBasisId, "approve")}>
+                          Approve
+                        </button>
+                        <button type="button" className="secondary-button" onClick={() => reviewPricing(item.pricingBasisId, "reject")}>
+                          Reject
+                        </button>
+                      </div>
+                    ) : (
+                      <span className="muted-text">Closed</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function InlineProblem({
+  title,
+  message,
+  problem
+}: {
+  title: string;
+  message: string;
+  problem?: ProblemDetails;
+}) {
+  return (
+    <div className="empty-state" role="alert">
+      <h4>{title}</h4>
+      <p>{message}</p>
+      {problem?.correlationId ? <p>Correlation ID: {problem.correlationId}</p> : null}
+    </div>
+  );
+}
+
+function formatMachineText(value: string) {
+  return value.replaceAll("_", " ");
+}
+
+function formatMoney(value: number | null, currency: string) {
+  if (value === null) {
+    return "Unavailable";
+  }
+
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency,
+    maximumFractionDigits: 6
+  }).format(value);
 }
 
 function RouteState({ title, detail, route }: { title: string; detail: string; route?: DashboardRoute }) {

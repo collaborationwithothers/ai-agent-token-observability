@@ -327,6 +327,123 @@ CREATE TABLE IF NOT EXISTS token_observation (
     )
 );
 
+CREATE TABLE IF NOT EXISTS pricing_basis (
+    pricing_basis_id text PRIMARY KEY,
+    customer_organization_id uuid NOT NULL,
+    harness text NOT NULL,
+    provider_name text NOT NULL,
+    model_name text NOT NULL,
+    token_type text NOT NULL,
+    billing_route text NOT NULL,
+    currency text NOT NULL,
+    price_per_million_tokens numeric(18, 8) NOT NULL,
+    pricing_version text NOT NULL,
+    source_kind text NOT NULL,
+    review_state text NOT NULL,
+    effective_from_utc timestamptz NOT NULL,
+    effective_to_utc timestamptz NULL,
+    audit_event_id text NOT NULL,
+    source_metadata_json jsonb NOT NULL,
+    created_at_utc timestamptz NOT NULL,
+    updated_at_utc timestamptz NOT NULL,
+    CONSTRAINT fk_pricing_basis_customer_organization FOREIGN KEY (customer_organization_id) REFERENCES customer_organization (customer_organization_id),
+    CONSTRAINT fk_pricing_basis_audit_event FOREIGN KEY (customer_organization_id, audit_event_id) REFERENCES governance_audit_event (customer_organization_id, audit_event_id),
+    CONSTRAINT uq_pricing_basis_customer_basis_id UNIQUE (customer_organization_id, pricing_basis_id),
+    CONSTRAINT ck_pricing_basis_harness CHECK (harness IN ('codex-cli')),
+    CONSTRAINT ck_pricing_basis_token_type CHECK (token_type IN ('input', 'output', 'cached_input', 'reasoning_output')),
+    CONSTRAINT ck_pricing_basis_currency CHECK (currency ~ '^[A-Z]{3}$'),
+    CONSTRAINT ck_pricing_basis_non_negative_price CHECK (price_per_million_tokens >= 0),
+    CONSTRAINT ck_pricing_basis_source_kind CHECK (source_kind IN ('automated_seed', 'admin_override', 'provider_docs', 'enterprise_contract')),
+    CONSTRAINT ck_pricing_basis_review_state CHECK (review_state IN ('candidate', 'approved', 'rejected', 'superseded')),
+    CONSTRAINT ck_pricing_basis_source_metadata_json CHECK (jsonb_typeof(source_metadata_json) = 'object'),
+    CONSTRAINT ck_pricing_basis_effective_window CHECK (effective_to_utc IS NULL OR effective_to_utc > effective_from_utc),
+    CONSTRAINT ck_pricing_basis_timestamps CHECK (updated_at_utc >= created_at_utc)
+);
+
+CREATE TABLE IF NOT EXISTS cost_estimate (
+    cost_estimate_id text PRIMARY KEY,
+    customer_organization_id uuid NOT NULL,
+    agent_session_id text NOT NULL,
+    model_invocation_id text NULL,
+    pricing_basis_id text NULL,
+    pricing_version text NULL,
+    currency text NOT NULL,
+    estimated_cost numeric(18, 12) NULL,
+    cost_status text NOT NULL,
+    source_kind text NOT NULL,
+    token_metric_status text NOT NULL,
+    token_metric_confidence text NOT NULL,
+    provider_name text NOT NULL,
+    model_name text NOT NULL,
+    billing_route text NOT NULL,
+    token_type text NOT NULL,
+    created_at_utc timestamptz NOT NULL,
+    CONSTRAINT fk_cost_estimate_agent_session FOREIGN KEY (customer_organization_id, agent_session_id) REFERENCES agent_session (customer_organization_id, agent_session_id),
+    CONSTRAINT fk_cost_estimate_pricing_basis FOREIGN KEY (customer_organization_id, pricing_basis_id) REFERENCES pricing_basis (customer_organization_id, pricing_basis_id),
+    CONSTRAINT ck_cost_estimate_currency CHECK (currency ~ '^[A-Z]{3}$'),
+    CONSTRAINT ck_cost_estimate_non_negative CHECK (estimated_cost IS NULL OR estimated_cost >= 0),
+    CONSTRAINT ck_cost_estimate_status CHECK (cost_status IN ('estimated', 'unavailable', 'not_applicable', 'mixed')),
+    CONSTRAINT ck_cost_estimate_source_kind CHECK (source_kind IN ('derived_from_observed_tokens', 'derived_from_estimated_tokens', 'manual_override', 'unavailable')),
+    CONSTRAINT ck_cost_estimate_token_metric_status CHECK (token_metric_status IN ('observed', 'derived', 'estimated', 'unavailable', 'not_applicable', 'mixed')),
+    CONSTRAINT ck_cost_estimate_token_metric_confidence CHECK (token_metric_confidence IN ('observed', 'deterministic', 'estimated', 'llm_inferred', 'unavailable')),
+    CONSTRAINT ck_cost_estimate_token_type CHECK (token_type IN ('input', 'output', 'cached_input', 'reasoning_output')),
+    CONSTRAINT ck_cost_estimate_unavailable_null_semantics CHECK (
+        (
+            cost_status IN ('unavailable', 'not_applicable')
+            AND estimated_cost IS NULL
+            AND pricing_basis_id IS NULL
+            AND pricing_version IS NULL
+            AND source_kind = 'unavailable'
+        )
+        OR (
+            cost_status IN ('estimated', 'mixed')
+            AND estimated_cost IS NOT NULL
+            AND pricing_basis_id IS NOT NULL
+            AND pricing_version IS NOT NULL
+        )
+    )
+);
+
+CREATE TABLE IF NOT EXISTS product_api_idempotency (
+    customer_organization_id uuid NOT NULL,
+    product_user_id uuid NOT NULL,
+    route text NOT NULL,
+    idempotency_key text NOT NULL,
+    request_hash text NOT NULL,
+    operation_id text NULL,
+    response_status_code integer NULL,
+    response_location text NULL,
+    response_json jsonb NULL,
+    created_at_utc timestamptz NOT NULL,
+    expires_at_utc timestamptz NOT NULL,
+    completed_at_utc timestamptz NULL,
+    PRIMARY KEY (customer_organization_id, product_user_id, route, idempotency_key),
+    CONSTRAINT fk_product_api_idempotency_customer_organization FOREIGN KEY (customer_organization_id) REFERENCES customer_organization (customer_organization_id),
+    CONSTRAINT fk_product_api_idempotency_product_user FOREIGN KEY (customer_organization_id, product_user_id) REFERENCES product_user (customer_organization_id, product_user_id),
+    CONSTRAINT ck_product_api_idempotency_route CHECK (route ~ '^/api/v1/'),
+    CONSTRAINT ck_product_api_idempotency_key CHECK (length(idempotency_key) BETWEEN 1 AND 200),
+    CONSTRAINT ck_product_api_idempotency_request_hash CHECK (request_hash ~ '^[A-F0-9]{64}$'),
+    CONSTRAINT ck_product_api_idempotency_success_status CHECK (response_status_code IS NULL OR response_status_code BETWEEN 200 AND 299),
+    CONSTRAINT ck_product_api_idempotency_response_json CHECK (response_json IS NULL OR jsonb_typeof(response_json) = 'object'),
+    CONSTRAINT ck_product_api_idempotency_expiry CHECK (expires_at_utc > created_at_utc),
+    CONSTRAINT ck_product_api_idempotency_completion CHECK (
+        (
+            completed_at_utc IS NULL
+            AND operation_id IS NULL
+            AND response_status_code IS NULL
+            AND response_json IS NULL
+        )
+        OR
+        (
+            completed_at_utc IS NOT NULL
+            AND completed_at_utc >= created_at_utc
+            AND operation_id IS NOT NULL
+            AND response_status_code IS NOT NULL
+            AND response_json IS NOT NULL
+        )
+    )
+);
+
 CREATE TABLE IF NOT EXISTS aggregate_metric_point (
     aggregate_metric_point_id uuid PRIMARY KEY,
     customer_organization_id uuid NOT NULL,
@@ -406,6 +523,15 @@ CREATE INDEX IF NOT EXISTS ix_agent_session_customer_updated
 
 CREATE INDEX IF NOT EXISTS ix_token_observation_session_metric
     ON token_observation (customer_organization_id, agent_session_id, metric_name, created_at_utc);
+
+CREATE INDEX IF NOT EXISTS ix_pricing_basis_customer_review_model
+    ON pricing_basis (customer_organization_id, review_state, provider_name, model_name, token_type, billing_route, effective_from_utc DESC);
+
+CREATE INDEX IF NOT EXISTS ix_cost_estimate_customer_mix
+    ON cost_estimate (customer_organization_id, provider_name, model_name, token_type, billing_route, cost_status);
+
+CREATE INDEX IF NOT EXISTS ix_product_api_idempotency_expiry
+    ON product_api_idempotency (expires_at_utc);
 
 CREATE INDEX IF NOT EXISTS ix_aggregate_metric_point_customer_exported
     ON aggregate_metric_point (customer_organization_id, exported_at_utc DESC);

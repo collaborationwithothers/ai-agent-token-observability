@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Primitives;
+using Npgsql;
 using TokenObservability.Domain.Authorization;
 using TokenObservability.Domain.Tenancy;
 using TokenObservability.Infrastructure.Persistence;
@@ -15,6 +16,22 @@ internal static class TokenObservabilityAuthorizationContextServiceCollectionExt
     {
         services.TryAddSingleton<ITenantMetadataClock, SystemTenantMetadataClock>();
         services.TryAddSingleton<InMemoryTenantMetadataStore>();
+        services.TryAddSingleton<IProductApiIdempotencyStore>(serviceProvider =>
+        {
+            var configuration = serviceProvider.GetRequiredService<IConfiguration>();
+            var connectionString =
+                configuration.GetConnectionString("ProductMetadataStore") ??
+                configuration["ProductMetadataStore:ConnectionString"];
+            if (!string.IsNullOrWhiteSpace(connectionString))
+            {
+                var dataSource = NpgsqlDataSource.Create(connectionString);
+                return new PostgreSqlProductApiIdempotencyStore(
+                    dataSource,
+                    serviceProvider.GetRequiredService<ITenantMetadataClock>());
+            }
+
+            return serviceProvider.GetRequiredService<InMemoryTenantMetadataStore>();
+        });
         services.TryAddScoped<TokenObservabilityAuthorizationContextAccessor>();
         services.TryAddScoped<TokenObservabilityAuthorizationContextResolver>();
     }

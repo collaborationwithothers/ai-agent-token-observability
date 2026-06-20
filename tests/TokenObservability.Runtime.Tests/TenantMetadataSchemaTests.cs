@@ -225,6 +225,74 @@ public sealed class TenantMetadataSchemaTests
     }
 
     [Fact]
+    public void PostgreSqlTenantMetadataMigrationPersistsPricingBasisAndCostEstimateSemantics()
+    {
+        var root = FindRepositoryRoot();
+        var migrationPath = Path.Combine(
+            root,
+            "src",
+            "TokenObservability.Infrastructure",
+            "Persistence",
+            "PostgreSql",
+            "Migrations",
+            "0001_tenant_metadata.sql");
+
+        var migration = File.ReadAllText(migrationPath);
+
+        Assert.Contains("CREATE TABLE IF NOT EXISTS pricing_basis", migration);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS cost_estimate", migration);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS product_api_idempotency", migration);
+        Assert.Contains("pricing_basis_id text PRIMARY KEY", migration);
+        Assert.Contains("cost_estimate_id text PRIMARY KEY", migration);
+        Assert.Contains("request_hash text NOT NULL", migration);
+        Assert.Contains("operation_id text NULL", migration);
+        Assert.Contains("response_json jsonb NULL", migration);
+        Assert.Contains("expires_at_utc timestamptz NOT NULL", migration);
+        Assert.Contains("completed_at_utc timestamptz NULL", migration);
+        Assert.Contains("provider_name text NOT NULL", migration);
+        Assert.Contains("model_name text NOT NULL", migration);
+        Assert.Contains("token_type text NOT NULL", migration);
+        Assert.Contains("billing_route text NOT NULL", migration);
+        Assert.Contains("price_per_million_tokens numeric(18, 8) NOT NULL", migration);
+        Assert.Contains("source_metadata_json jsonb NOT NULL", migration);
+        Assert.Contains("estimated_cost numeric(18, 12) NULL", migration);
+        Assert.Contains("pricing_basis_id text NULL", migration);
+        Assert.Contains("ck_pricing_basis_token_type CHECK (token_type IN ('input', 'output', 'cached_input', 'reasoning_output'))", migration);
+        Assert.Contains("ck_pricing_basis_source_kind CHECK (source_kind IN ('automated_seed', 'admin_override', 'provider_docs', 'enterprise_contract'))", migration);
+        Assert.Contains("ck_pricing_basis_review_state CHECK (review_state IN ('candidate', 'approved', 'rejected', 'superseded'))", migration);
+        Assert.Contains("ck_cost_estimate_status CHECK (cost_status IN ('estimated', 'unavailable', 'not_applicable', 'mixed'))", migration);
+        Assert.Contains("ck_cost_estimate_unavailable_null_semantics", migration);
+        Assert.Contains("fk_pricing_basis_audit_event", migration);
+        Assert.Contains("fk_cost_estimate_pricing_basis", migration);
+        Assert.Contains("fk_product_api_idempotency_product_user", migration);
+        Assert.Contains("ck_product_api_idempotency_request_hash CHECK (request_hash ~ '^[A-F0-9]{64}$')", migration);
+        Assert.Contains("ck_product_api_idempotency_expiry CHECK (expires_at_utc > created_at_utc)", migration);
+        Assert.Contains("ck_product_api_idempotency_completion CHECK", migration);
+        Assert.Contains("ix_pricing_basis_customer_review_model", migration);
+        Assert.Contains("ix_cost_estimate_customer_mix", migration);
+        Assert.Contains("ix_product_api_idempotency_expiry", migration);
+    }
+
+    [Fact]
+    public void PostgreSqlIdempotencyStoreReclaimsExpiredKeysBeforeReservation()
+    {
+        var root = FindRepositoryRoot();
+        var storePath = Path.Combine(
+            root,
+            "src",
+            "TokenObservability.Infrastructure",
+            "Persistence",
+            "PostgreSqlProductApiIdempotencyStore.cs");
+
+        var storeSource = File.ReadAllText(storePath);
+
+        Assert.Contains("DELETE FROM product_api_idempotency", storeSource);
+        Assert.Contains("expires_at_utc <= @now", storeSource);
+        Assert.Contains("BeginTransactionAsync", storeSource);
+        Assert.Contains("Product API idempotency reservation was not acquired.", storeSource);
+    }
+
+    [Fact]
     public void PostgreSqlTenantMetadataMigrationPersistsAggregateMetricExportShape()
     {
         var root = FindRepositoryRoot();

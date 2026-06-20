@@ -1,11 +1,12 @@
 using System.Collections.ObjectModel;
 using TokenObservability.Domain.Authorization;
 using TokenObservability.Domain.Ingestion;
+using TokenObservability.Domain.Pricing;
 using TokenObservability.Domain.Tenancy;
 
 namespace TokenObservability.Infrastructure.Persistence;
 
-public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
+public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IProductApiIdempotencyStore
 {
     private static readonly string[] SensitiveEvidenceKeyFragments =
     [
@@ -55,7 +56,15 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         "scope_kind",
         "policy_kind",
         "policy_version_id",
-        "change_kind"
+        "change_kind",
+        "pricing_basis_id",
+        "pricing_version",
+        "provider_name",
+        "model_name",
+        "token_type",
+        "billing_route",
+        "source_kind",
+        "review_state"
     };
 
     private readonly Dictionary<CustomerOrganizationId, CustomerOrganization> customerOrganizations = [];
@@ -74,6 +83,9 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
     private readonly Dictionary<string, AgentSessionRecord> agentSessions = [];
     private readonly Dictionary<AgentSessionLookupKey, string> agentSessionLookupIndex = [];
     private readonly Dictionary<TokenObservationId, TokenObservationRecord> tokenObservations = [];
+    private readonly Dictionary<string, PricingBasisRecord> pricingBasisRecords = [];
+    private readonly Dictionary<string, CostEstimateRecord> costEstimates = [];
+    private readonly Dictionary<ProductApiIdempotencyKey, ProductApiIdempotencyRecord> productApiIdempotencyRecords = [];
     private readonly Dictionary<AggregateMetricPointId, AggregateMetricPointRecord> aggregateMetricPoints = [];
     private readonly List<AggregateTokenTimelineBucket> aggregateTokenTimelineBuckets = [];
     private readonly Dictionary<AggregateMetricExportFailureId, AggregateMetricExportFailureRecord> aggregateMetricExportFailures = [];
@@ -108,6 +120,47 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
             customerOrganizations.Add(organization.CustomerOrganizationId, organization);
             organizationSlugIndex.Add(slug, organization.CustomerOrganizationId);
 
+            return Task.FromResult(organization);
+        }
+    }
+
+    public Task<CustomerOrganization> EnsureCustomerOrganizationLoadedAsync(EnsureCustomerOrganizationLoadedRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        if (request.CustomerOrganizationId == CustomerOrganizationId.Empty)
+        {
+            throw new ArgumentException("Customer organization id is required.", nameof(request));
+        }
+
+        var slug = NormalizeRequiredText(request.Slug, nameof(request.Slug)).ToLowerInvariant();
+        var displayName = NormalizeRequiredText(request.DisplayName, nameof(request.DisplayName));
+        var dataResidencyRegion = NormalizeRequiredText(request.DataResidencyRegion, nameof(request.DataResidencyRegion)).ToLowerInvariant();
+        var now = clock.UtcNow.ToUniversalTime();
+
+        lock (gate)
+        {
+            if (customerOrganizations.TryGetValue(request.CustomerOrganizationId, out var existing))
+            {
+                return Task.FromResult(existing);
+            }
+
+            if (organizationSlugIndex.ContainsKey(slug))
+            {
+                throw new InvalidOperationException($"Customer organization slug already exists: {slug}");
+            }
+
+            var organization = new CustomerOrganization(
+                request.CustomerOrganizationId,
+                slug,
+                displayName,
+                dataResidencyRegion,
+                request.IsolationTier,
+                CustomerOrganizationStatus.Active,
+                now,
+                now);
+            customerOrganizations.Add(organization.CustomerOrganizationId, organization);
+            organizationSlugIndex.Add(slug, organization.CustomerOrganizationId);
             return Task.FromResult(organization);
         }
     }
@@ -1175,6 +1228,378 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
                     .ThenBy(observation => observation.TokenObservationId.ToString(), StringComparer.Ordinal)
                     .ToArray());
         }
+    }
+
+    public Task<PricingBasisRecord> CreatePricingBasisRecordAsync(
+        CreatePricingBasisRecordRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var normalized = NormalizePricingBasisRequest(request);
+        var now = clock.UtcNow.ToUniversalTime();
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+            RequireGovernanceAuditEvent(request.CustomerOrganizationId, normalized.AuditEventId);
+
+            var pricingBasisId = $"pricing-basis-{Guid.NewGuid():N}";
+            var record = new PricingBasisRecord(
+                pricingBasisId,
+                request.CustomerOrganizationId,
+                normalized.Harness,
+                normalized.ProviderName,
+                normalized.ModelName,
+                request.TokenType,
+                normalized.BillingRoute,
+                normalized.Currency,
+                request.PricePerMillionTokens,
+                normalized.PricingVersion,
+                request.SourceKind,
+                request.ReviewState,
+                request.EffectiveFromUtc.ToUniversalTime(),
+                request.EffectiveToUtc?.ToUniversalTime(),
+                normalized.AuditEventId,
+                normalized.SourceMetadata,
+                now,
+                now);
+
+            pricingBasisRecords.Add(record.PricingBasisId, record);
+            return Task.FromResult(record);
+        }
+    }
+
+    public Task<PricingBasisRecord> CreateCustomerPricingOverrideAsync(
+        CreatePricingBasisRecordRequest request,
+        ProductUserId actorProductUserId,
+        ProductRole actorEffectiveRole,
+        string correlationId)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        if (request.SourceKind != PricingSourceKind.AdminOverride)
+        {
+            throw new ArgumentException("Customer pricing overrides must use admin override source kind.", nameof(request));
+        }
+
+        var normalized = NormalizePricingBasisRequest(request);
+        var now = clock.UtcNow.ToUniversalTime();
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+            RequireProductUserForCustomerOrganization(request.CustomerOrganizationId, actorProductUserId);
+
+            var pricingBasisId = $"pricing-basis-{Guid.NewGuid():N}";
+            var auditEvent = CreateGovernanceAuditEventUnderLock(
+                normalized.AuditEventId,
+                request.CustomerOrganizationId,
+                actorProductUserId,
+                actorEffectiveRole,
+                ProductAuthorizationAction.PricingManage,
+                ProductScopeKind.Pricing.ToString(),
+                pricingBasisId,
+                "created",
+                denialReason: null,
+                correlationId,
+                CreatePricingAuditMetadata(
+                    operation: "pricing_override_create",
+                    result: "created",
+                    pricingBasisId,
+                    normalized,
+                    request.TokenType,
+                    request.SourceKind,
+                    request.ReviewState),
+                now);
+
+            var record = new PricingBasisRecord(
+                pricingBasisId,
+                request.CustomerOrganizationId,
+                normalized.Harness,
+                normalized.ProviderName,
+                normalized.ModelName,
+                request.TokenType,
+                normalized.BillingRoute,
+                normalized.Currency,
+                request.PricePerMillionTokens,
+                normalized.PricingVersion,
+                request.SourceKind,
+                request.ReviewState,
+                request.EffectiveFromUtc.ToUniversalTime(),
+                request.EffectiveToUtc?.ToUniversalTime(),
+                auditEvent.AuditEventId,
+                normalized.SourceMetadata,
+                now,
+                now);
+
+            pricingBasisRecords.Add(record.PricingBasisId, record);
+            return Task.FromResult(record);
+        }
+    }
+
+    public Task<IReadOnlyList<PricingBasisRecord>> ListPricingBasisRecordsAsync(
+        CustomerOrganizationId customerOrganizationId)
+    {
+        lock (gate)
+        {
+            return Task.FromResult<IReadOnlyList<PricingBasisRecord>>(
+                pricingBasisRecords.Values
+                    .Where(record => record.CustomerOrganizationId == customerOrganizationId)
+                    .OrderBy(record => record.ProviderName, StringComparer.Ordinal)
+                    .ThenBy(record => record.ModelName, StringComparer.Ordinal)
+                    .ThenBy(record => record.TokenType)
+                    .ThenBy(record => record.BillingRoute, StringComparer.Ordinal)
+                    .ThenByDescending(record => record.EffectiveFromUtc)
+                    .ThenBy(record => record.PricingBasisId, StringComparer.Ordinal)
+                    .ToArray());
+        }
+    }
+
+    public Task<PricingBasisRecord> ApprovePricingBasisAsync(
+        PricingBasisReviewRequest request,
+        ProductUserId actorProductUserId,
+        ProductRole actorEffectiveRole)
+    {
+        return ReviewPricingBasisAsync(request, actorProductUserId, actorEffectiveRole, PricingReviewState.Approved, "approved");
+    }
+
+    public Task<PricingBasisRecord> RejectPricingBasisAsync(
+        PricingBasisReviewRequest request,
+        ProductUserId actorProductUserId,
+        ProductRole actorEffectiveRole)
+    {
+        return ReviewPricingBasisAsync(request, actorProductUserId, actorEffectiveRole, PricingReviewState.Rejected, "rejected");
+    }
+
+    public Task<CostEstimateRecord> RecordCostEstimateAsync(
+        CreateCostEstimateRecordRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var normalized = NormalizeCostEstimateRequest(request);
+        var now = clock.UtcNow.ToUniversalTime();
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+
+            if (!agentSessions.TryGetValue(normalized.AgentSessionId, out var session) ||
+                session.CustomerOrganizationId != request.CustomerOrganizationId)
+            {
+                throw new InvalidOperationException("Cost estimate session does not belong to the customer organization.");
+            }
+
+            if (normalized.PricingBasisId is not null)
+            {
+                if (!pricingBasisRecords.TryGetValue(normalized.PricingBasisId, out var basis) ||
+                    basis.CustomerOrganizationId != request.CustomerOrganizationId)
+                {
+                    throw new InvalidOperationException("Cost estimate pricing basis does not belong to the customer organization.");
+                }
+            }
+
+            var estimate = new CostEstimateRecord(
+                $"cost-estimate-{Guid.NewGuid():N}",
+                request.CustomerOrganizationId,
+                normalized.AgentSessionId,
+                normalized.ModelInvocationId,
+                normalized.PricingBasisId,
+                normalized.PricingVersion,
+                normalized.Currency,
+                request.EstimatedCost,
+                request.CostStatus,
+                request.SourceKind,
+                request.TokenMetricStatus,
+                request.TokenMetricConfidence,
+                normalized.ProviderName,
+                normalized.ModelName,
+                normalized.BillingRoute,
+                request.TokenType,
+                now);
+
+            costEstimates.Add(estimate.CostEstimateId, estimate);
+            return Task.FromResult(estimate);
+        }
+    }
+
+    public Task<ProductApiIdempotencyReservation> ReserveProductApiIdempotencyRecordAsync(
+        ReserveProductApiIdempotencyRecordRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var normalizedRoute = NormalizeRequiredText(request.Route, nameof(request.Route));
+        var normalizedIdempotencyKey = NormalizeRequiredText(request.IdempotencyKey, nameof(request.IdempotencyKey));
+        var normalizedRequestHash = NormalizeRequiredText(request.RequestHash, nameof(request.RequestHash));
+        var now = clock.UtcNow.ToUniversalTime();
+
+        if (request.ExpiresAtUtc.ToUniversalTime() <= now)
+        {
+            throw new ArgumentException("Idempotency expiry must be in the future.", nameof(request));
+        }
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+            RequireProductUserForCustomerOrganization(request.CustomerOrganizationId, request.ProductUserId);
+
+            var key = new ProductApiIdempotencyKey(
+                request.CustomerOrganizationId,
+                request.ProductUserId,
+                normalizedRoute,
+                normalizedIdempotencyKey);
+            if (productApiIdempotencyRecords.TryGetValue(key, out var existing))
+            {
+                if (existing.ExpiresAtUtc <= now)
+                {
+                    productApiIdempotencyRecords.Remove(key);
+                }
+                else if (!StringComparer.Ordinal.Equals(existing.RequestHash, normalizedRequestHash))
+                {
+                    return Task.FromResult(new ProductApiIdempotencyReservation(ProductApiIdempotencyReservationState.Conflict, existing));
+                }
+                else if (existing.IsCompleted)
+                {
+                    return Task.FromResult(new ProductApiIdempotencyReservation(ProductApiIdempotencyReservationState.Replay, existing));
+                }
+                else
+                {
+                    return Task.FromResult(new ProductApiIdempotencyReservation(ProductApiIdempotencyReservationState.InProgress, existing));
+                }
+            }
+
+            var reserved = new ProductApiIdempotencyRecord(
+                request.CustomerOrganizationId,
+                request.ProductUserId,
+                normalizedRoute,
+                normalizedIdempotencyKey,
+                normalizedRequestHash,
+                OperationId: null,
+                ResponseStatusCode: null,
+                ResponseLocation: null,
+                ResponseJson: null,
+                CreatedAtUtc: now,
+                ExpiresAtUtc: request.ExpiresAtUtc.ToUniversalTime(),
+                CompletedAtUtc: null);
+            productApiIdempotencyRecords[key] = reserved;
+            return Task.FromResult(new ProductApiIdempotencyReservation(ProductApiIdempotencyReservationState.Reserved, reserved));
+        }
+    }
+
+    public Task<ProductApiIdempotencyRecord> CompleteProductApiIdempotencyRecordAsync(
+        CompleteProductApiIdempotencyRecordRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var normalizedRoute = NormalizeRequiredText(request.Route, nameof(request.Route));
+        var normalizedIdempotencyKey = NormalizeRequiredText(request.IdempotencyKey, nameof(request.IdempotencyKey));
+        var normalizedRequestHash = NormalizeRequiredText(request.RequestHash, nameof(request.RequestHash));
+        var normalizedOperationId = NormalizeRequiredText(request.OperationId, nameof(request.OperationId));
+        var normalizedResponseJson = NormalizeRequiredText(request.ResponseJson, nameof(request.ResponseJson));
+        var normalizedLocation = string.IsNullOrWhiteSpace(request.ResponseLocation)
+            ? null
+            : NormalizeRequiredText(request.ResponseLocation, nameof(request.ResponseLocation));
+        var now = clock.UtcNow.ToUniversalTime();
+
+        if (request.ResponseStatusCode < 200 || request.ResponseStatusCode > 299)
+        {
+            throw new ArgumentException("Idempotency response status code must be a successful status code.", nameof(request));
+        }
+
+        lock (gate)
+        {
+            var key = new ProductApiIdempotencyKey(
+                request.CustomerOrganizationId,
+                request.ProductUserId,
+                normalizedRoute,
+                normalizedIdempotencyKey);
+            if (!productApiIdempotencyRecords.TryGetValue(key, out var existing) ||
+                !StringComparer.Ordinal.Equals(existing.RequestHash, normalizedRequestHash))
+            {
+                throw new InvalidOperationException("Product API idempotency reservation was not found.");
+            }
+
+            var completed = existing with
+            {
+                OperationId = normalizedOperationId,
+                ResponseStatusCode = request.ResponseStatusCode,
+                ResponseLocation = normalizedLocation,
+                ResponseJson = normalizedResponseJson,
+                CompletedAtUtc = now
+            };
+            productApiIdempotencyRecords[key] = completed;
+            return Task.FromResult(completed);
+        }
+    }
+    public Task<IReadOnlyList<CostEstimateRecord>> ListCostEstimatesAsync(
+        CustomerOrganizationId customerOrganizationId)
+    {
+        lock (gate)
+        {
+            return Task.FromResult<IReadOnlyList<CostEstimateRecord>>(
+                costEstimates.Values
+                    .Where(estimate => estimate.CustomerOrganizationId == customerOrganizationId)
+                    .OrderBy(estimate => estimate.CreatedAtUtc)
+                    .ThenBy(estimate => estimate.CostEstimateId, StringComparer.Ordinal)
+                    .ToArray());
+        }
+    }
+
+    public Task<IReadOnlyList<CostMixBucket>> ListCostMixAsync(
+        CustomerOrganizationId customerOrganizationId)
+    {
+        lock (gate)
+        {
+            var buckets = costEstimates.Values
+                .Where(estimate => estimate.CustomerOrganizationId == customerOrganizationId)
+                .GroupBy(
+                    estimate => new
+                    {
+                        estimate.ProviderName,
+                        estimate.ModelName,
+                        estimate.BillingRoute,
+                        estimate.TokenType,
+                        estimate.CostStatus,
+                        estimate.Currency
+                    })
+                .Select(group => new CostMixBucket(
+                    group.Key.ProviderName,
+                    group.Key.ModelName,
+                    group.Key.BillingRoute,
+                    group.Key.TokenType,
+                    group.Key.CostStatus,
+                    group.Key.Currency,
+                    group.Any(estimate => estimate.EstimatedCost is null)
+                        ? null
+                        : group.Sum(estimate => estimate.EstimatedCost),
+                    group.Count(),
+                    AggregateCostMixMetricStatus(group.Select(estimate => estimate.TokenMetricStatus).ToArray())))
+                .OrderBy(bucket => bucket.ProviderName, StringComparer.Ordinal)
+                .ThenBy(bucket => bucket.ModelName, StringComparer.Ordinal)
+                .ThenBy(bucket => bucket.TokenType)
+                .ThenBy(bucket => bucket.BillingRoute, StringComparer.Ordinal)
+                .ThenBy(bucket => bucket.CostStatus)
+                .ToArray();
+
+            return Task.FromResult<IReadOnlyList<CostMixBucket>>(buckets);
+        }
+    }
+
+    public async Task<CostEstimateRecord> EstimateAndRecordTokenObservationCostAsync(
+        EstimateTokenObservationCostRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        IReadOnlyList<PricingBasisRecord> basisRecords;
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+            basisRecords = pricingBasisRecords.Values
+                .Where(record => record.CustomerOrganizationId == request.CustomerOrganizationId)
+                .ToArray();
+        }
+
+        var estimateRequest = PricingCostCalculator.EstimateTokenObservationCost(request, basisRecords);
+        return await RecordCostEstimateAsync(estimateRequest);
     }
 
     public Task<AggregateMetricPointRecord> RecordAggregateMetricPointAsync(
@@ -2511,6 +2936,288 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         return (agentSessionId, name, unit, labels);
     }
 
+    private PricingBasisRecord ReviewPricingBasisUnderLock(
+        PricingBasisReviewRequest request,
+        ProductUserId actorProductUserId,
+        ProductRole actorEffectiveRole,
+        PricingReviewState reviewState,
+        string auditResult)
+    {
+        var pricingBasisId = NormalizeRequiredText(request.PricingBasisId, nameof(request.PricingBasisId));
+        var auditEventId = NormalizeRequiredText(request.AuditEventId, nameof(request.AuditEventId));
+        var correlationId = NormalizeRequiredText(request.CorrelationId, nameof(request.CorrelationId));
+
+        RequireCustomerOrganization(request.CustomerOrganizationId);
+        RequireProductUserForCustomerOrganization(request.CustomerOrganizationId, actorProductUserId);
+
+        if (!pricingBasisRecords.TryGetValue(pricingBasisId, out var existing) ||
+            existing.CustomerOrganizationId != request.CustomerOrganizationId)
+        {
+            throw new InvalidOperationException("Pricing basis does not belong to the customer organization.");
+        }
+
+        if (existing.ReviewState != PricingReviewState.Candidate)
+        {
+            throw new InvalidOperationException("Only candidate pricing basis records can be reviewed.");
+        }
+
+        CreateGovernanceAuditEventUnderLock(
+            auditEventId,
+            request.CustomerOrganizationId,
+            actorProductUserId,
+            actorEffectiveRole,
+            ProductAuthorizationAction.PricingManage,
+            ProductScopeKind.Pricing.ToString(),
+            pricingBasisId,
+            "updated",
+            denialReason: null,
+            correlationId,
+            CreatePricingAuditMetadata(
+                operation: $"pricing_basis_{auditResult}",
+                result: auditResult,
+                pricingBasisId,
+                existing,
+                reviewState),
+            clock.UtcNow.ToUniversalTime());
+
+        if (reviewState == PricingReviewState.Approved)
+        {
+            foreach (var approved in pricingBasisRecords.Values
+                .Where(record =>
+                    record.CustomerOrganizationId == existing.CustomerOrganizationId &&
+                    record.ReviewState == PricingReviewState.Approved &&
+                    StringComparer.Ordinal.Equals(record.Harness, existing.Harness) &&
+                    StringComparer.Ordinal.Equals(record.ProviderName, existing.ProviderName) &&
+                    StringComparer.Ordinal.Equals(record.ModelName, existing.ModelName) &&
+                    StringComparer.Ordinal.Equals(record.BillingRoute, existing.BillingRoute) &&
+                    record.TokenType == existing.TokenType &&
+                    record.SourceKind == existing.SourceKind)
+                .ToArray())
+            {
+                pricingBasisRecords[approved.PricingBasisId] = approved with
+                {
+                    ReviewState = PricingReviewState.Superseded,
+                    EffectiveToUtc = existing.EffectiveFromUtc,
+                    UpdatedAtUtc = clock.UtcNow.ToUniversalTime()
+                };
+            }
+        }
+
+        var updated = existing with
+        {
+            ReviewState = reviewState,
+            AuditEventId = auditEventId,
+            UpdatedAtUtc = clock.UtcNow.ToUniversalTime()
+        };
+
+        pricingBasisRecords[pricingBasisId] = updated;
+        return updated;
+    }
+
+    private Task<PricingBasisRecord> ReviewPricingBasisAsync(
+        PricingBasisReviewRequest request,
+        ProductUserId actorProductUserId,
+        ProductRole actorEffectiveRole,
+        PricingReviewState reviewState,
+        string auditResult)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        lock (gate)
+        {
+            return Task.FromResult(ReviewPricingBasisUnderLock(
+                request,
+                actorProductUserId,
+                actorEffectiveRole,
+                reviewState,
+                auditResult));
+        }
+    }
+
+    private static NormalizedPricingBasisRequest NormalizePricingBasisRequest(
+        CreatePricingBasisRecordRequest request)
+    {
+        var harness = NormalizePricingHarness(request.Harness, nameof(request.Harness));
+        var providerName = NormalizePricingLabel(request.ProviderName, nameof(request.ProviderName));
+        var modelName = NormalizePricingLabel(request.ModelName, nameof(request.ModelName));
+        var billingRoute = NormalizePricingLabel(request.BillingRoute, nameof(request.BillingRoute));
+        var currency = NormalizeCurrency(request.Currency, nameof(request.Currency));
+        var pricingVersion = NormalizePricingVersion(request.PricingVersion, nameof(request.PricingVersion));
+        var auditEventId = NormalizeRequiredText(request.AuditEventId, nameof(request.AuditEventId));
+        var sourceMetadata = NormalizePricingSourceMetadata(request.SourceMetadata);
+
+        if (request.PricePerMillionTokens < 0)
+        {
+            throw new ArgumentException("Pricing rates must be non-negative.", nameof(request.PricePerMillionTokens));
+        }
+
+        if (request.EffectiveToUtc is not null &&
+            request.EffectiveToUtc.Value.ToUniversalTime() <= request.EffectiveFromUtc.ToUniversalTime())
+        {
+            throw new ArgumentException("Pricing effective end must be after start.", nameof(request.EffectiveToUtc));
+        }
+
+        return new NormalizedPricingBasisRequest(
+            harness,
+            providerName,
+            modelName,
+            billingRoute,
+            currency,
+            pricingVersion,
+            auditEventId,
+            sourceMetadata);
+    }
+
+    private static NormalizedCostEstimateRequest NormalizeCostEstimateRequest(
+        CreateCostEstimateRecordRequest request)
+    {
+        var agentSessionId = NormalizeRequiredText(request.AgentSessionId, nameof(request.AgentSessionId));
+        var modelInvocationId = NormalizeOptionalMachineToken(request.ModelInvocationId, nameof(request.ModelInvocationId));
+        var pricingBasisId = string.IsNullOrWhiteSpace(request.PricingBasisId)
+            ? null
+            : NormalizeRequiredText(request.PricingBasisId, nameof(request.PricingBasisId));
+        var pricingVersion = string.IsNullOrWhiteSpace(request.PricingVersion)
+            ? null
+            : NormalizePricingVersion(request.PricingVersion, nameof(request.PricingVersion));
+        var currency = NormalizeCurrency(request.Currency, nameof(request.Currency));
+        var providerName = NormalizePricingLabel(request.ProviderName, nameof(request.ProviderName));
+        var modelName = NormalizePricingLabel(request.ModelName, nameof(request.ModelName));
+        var billingRoute = NormalizePricingLabel(request.BillingRoute, nameof(request.BillingRoute));
+
+        ValidateMetricQuality(request.TokenMetricStatus, request.TokenMetricConfidence);
+
+        if (request.EstimatedCost < 0)
+        {
+            throw new ArgumentException("Estimated cost must not be negative.", nameof(request.EstimatedCost));
+        }
+
+        if (request.CostStatus is CostEstimateStatus.Unavailable or CostEstimateStatus.NotApplicable &&
+            (request.EstimatedCost is not null || pricingBasisId is not null || pricingVersion is not null))
+        {
+            throw new ArgumentException("Unavailable and not applicable cost estimates must not include cost or pricing basis.", nameof(request));
+        }
+
+        if (request.CostStatus is CostEstimateStatus.Estimated or CostEstimateStatus.Mixed &&
+            (request.EstimatedCost is null || pricingBasisId is null || pricingVersion is null))
+        {
+            throw new ArgumentException("Available cost estimates require cost and pricing basis.", nameof(request));
+        }
+
+        return new NormalizedCostEstimateRequest(
+            agentSessionId,
+            modelInvocationId,
+            pricingBasisId,
+            pricingVersion,
+            currency,
+            providerName,
+            modelName,
+            billingRoute);
+    }
+
+    private static IReadOnlyDictionary<string, string> NormalizePricingSourceMetadata(
+        IReadOnlyDictionary<string, string> sourceMetadata)
+    {
+        ArgumentNullException.ThrowIfNull(sourceMetadata);
+
+        if (sourceMetadata.Count == 0)
+        {
+            throw new ArgumentException("Pricing source metadata is required.", nameof(sourceMetadata));
+        }
+
+        var normalized = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (key, value) in sourceMetadata.OrderBy(static entry => entry.Key, StringComparer.Ordinal))
+        {
+            var normalizedKey = NormalizeRequiredText(key, nameof(sourceMetadata));
+            var normalizedValue = NormalizeRequiredText(value, nameof(sourceMetadata));
+
+            if (normalizedKey.Length > 128 ||
+                normalizedValue.Length > 512 ||
+                ContainsSensitiveFragment(normalizedKey) ||
+                ContainsSensitiveFragment(normalizedValue))
+            {
+                throw new ArgumentException("Pricing source metadata must not contain sensitive values.", nameof(sourceMetadata));
+            }
+
+            var isAllowed = normalizedKey switch
+            {
+                "source_url" => Uri.TryCreate(normalizedValue, UriKind.Absolute, out var uri) &&
+                    uri.Scheme == Uri.UriSchemeHttps,
+                "source_retrieved_at_utc" => DateTimeOffset.TryParse(normalizedValue, out _),
+                "provider_sku_name" or
+                "meter_id" or
+                "region" or
+                "billing_route" or
+                "provider_document_version" => normalizedValue.All(static character =>
+                    char.IsAsciiLetterOrDigit(character) ||
+                    character is '-' or '_' or ':' or '.' or '/' or ' '),
+                _ => false
+            };
+
+            if (!isAllowed)
+            {
+                throw new ArgumentException("Pricing source metadata key or value is not supported.", nameof(sourceMetadata));
+            }
+
+            normalized.Add(normalizedKey, normalizedValue);
+        }
+
+        return new ReadOnlyDictionary<string, string>(normalized);
+    }
+
+    private static IReadOnlyDictionary<string, string> CreatePricingAuditMetadata(
+        string operation,
+        string result,
+        string pricingBasisId,
+        NormalizedPricingBasisRequest request,
+        PricingTokenType tokenType,
+        PricingSourceKind sourceKind,
+        PricingReviewState reviewState)
+    {
+        return new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["evidence_kind"] = "admin_operation",
+            ["operation"] = operation,
+            ["result"] = result,
+            ["pricing_basis_id"] = pricingBasisId,
+            ["pricing_version"] = request.PricingVersion,
+            ["provider_name"] = request.ProviderName,
+            ["model_name"] = request.ModelName,
+            ["token_type"] = ToWirePricingTokenType(tokenType),
+            ["billing_route"] = request.BillingRoute,
+            ["source_kind"] = ToWirePricingSourceKind(sourceKind),
+            ["review_state"] = ToWirePricingReviewState(reviewState)
+        };
+    }
+
+    private static IReadOnlyDictionary<string, string> CreatePricingAuditMetadata(
+        string operation,
+        string result,
+        string pricingBasisId,
+        PricingBasisRecord record,
+        PricingReviewState reviewState)
+    {
+        return new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["evidence_kind"] = "admin_operation",
+            ["operation"] = operation,
+            ["result"] = result,
+            ["pricing_basis_id"] = pricingBasisId,
+            ["pricing_version"] = record.PricingVersion,
+            ["provider_name"] = record.ProviderName,
+            ["model_name"] = record.ModelName,
+            ["token_type"] = ToWirePricingTokenType(record.TokenType),
+            ["billing_route"] = record.BillingRoute,
+            ["source_kind"] = ToWirePricingSourceKind(record.SourceKind),
+            ["review_state"] = ToWirePricingReviewState(reviewState)
+        };
+    }
+
+    private static TokenMetricStatus AggregateCostMixMetricStatus(IReadOnlyList<TokenMetricStatus> statuses)
+    {
+        var distinct = statuses.Distinct().ToArray();
+        return distinct.Length == 1 ? distinct[0] : TokenMetricStatus.Mixed;
+    }
+
     private static IReadOnlyDictionary<string, string> NormalizeAggregateMetricLabels(
         string metricName,
         IReadOnlyDictionary<string, string> labels)
@@ -2595,6 +3302,89 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
             TokenMetricName.ReasoningOutputTokens => 3,
             TokenMetricName.TotalTokens => 4,
             _ => throw new ArgumentOutOfRangeException(nameof(metricName), metricName, null)
+        };
+    }
+
+    private static string NormalizePricingHarness(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName).ToLowerInvariant();
+        return normalized is "codex-cli"
+            ? normalized
+            : throw new ArgumentException("Pricing harness is not supported.", parameterName);
+    }
+
+    private static string NormalizePricingLabel(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+        return normalized.Length <= 128 &&
+            normalized.All(static character =>
+                char.IsAsciiLetterOrDigit(character) ||
+                character is '-' or '_' or ':' or '.' or '/')
+            ? normalized
+            : throw new ArgumentException("Pricing label is not allowed.", parameterName);
+    }
+
+    private static string NormalizeCurrency(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName).ToUpperInvariant();
+        return normalized.Length == 3 && normalized.All(static chararacter => char.IsAsciiLetterUpper(chararacter))
+            ? normalized
+            : throw new ArgumentException("Currency must use a three-letter code.", parameterName);
+    }
+
+    private static string NormalizePricingVersion(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+        return normalized.Length <= 128 && IsSafeResourceId(normalized)
+            ? normalized
+            : throw new ArgumentException("Pricing version is not allowed.", parameterName);
+    }
+
+    public static string ToWirePricingTokenType(PricingTokenType tokenType)
+    {
+        return tokenType switch
+        {
+            PricingTokenType.Input => "input",
+            PricingTokenType.Output => "output",
+            PricingTokenType.CachedInput => "cached_input",
+            PricingTokenType.ReasoningOutput => "reasoning_output",
+            _ => throw new ArgumentOutOfRangeException(nameof(tokenType), tokenType, null)
+        };
+    }
+
+    public static string ToWirePricingSourceKind(PricingSourceKind sourceKind)
+    {
+        return sourceKind switch
+        {
+            PricingSourceKind.AutomatedSeed => "automated_seed",
+            PricingSourceKind.AdminOverride => "admin_override",
+            PricingSourceKind.ProviderDocs => "provider_docs",
+            PricingSourceKind.EnterpriseContract => "enterprise_contract",
+            _ => throw new ArgumentOutOfRangeException(nameof(sourceKind), sourceKind, null)
+        };
+    }
+
+    public static string ToWirePricingReviewState(PricingReviewState reviewState)
+    {
+        return reviewState switch
+        {
+            PricingReviewState.Candidate => "candidate",
+            PricingReviewState.Approved => "approved",
+            PricingReviewState.Rejected => "rejected",
+            PricingReviewState.Superseded => "superseded",
+            _ => throw new ArgumentOutOfRangeException(nameof(reviewState), reviewState, null)
+        };
+    }
+
+    public static string ToWireCostStatus(CostEstimateStatus costStatus)
+    {
+        return costStatus switch
+        {
+            CostEstimateStatus.Estimated => "estimated",
+            CostEstimateStatus.Unavailable => "unavailable",
+            CostEstimateStatus.NotApplicable => "not_applicable",
+            CostEstimateStatus.Mixed => "mixed",
+            _ => throw new ArgumentOutOfRangeException(nameof(costStatus), costStatus, null)
         };
     }
 
@@ -2854,6 +3644,12 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
             "policy_kind" => value is "content_capture",
             "policy_version_id" => IsSafeResourceId(value),
             "change_kind" => value is "created" or "activated" or "updated" or "disabled",
+            "pricing_basis_id" => IsSafeResourceId(value),
+            "pricing_version" => IsSafeResourceId(value),
+            "provider_name" or "model_name" or "billing_route" => IsSafeResourceId(value),
+            "token_type" => value is "input" or "output" or "cached_input" or "reasoning_output",
+            "source_kind" => value is "automated_seed" or "admin_override" or "provider_docs" or "enterprise_contract",
+            "review_state" => value is "candidate" or "approved" or "rejected" or "superseded",
             _ => false
         };
 
@@ -3094,6 +3890,15 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
             !customerOrganizations.ContainsKey(customerOrganizationId))
         {
             throw new InvalidOperationException("Customer organization does not exist.");
+        }
+    }
+
+    private void RequireGovernanceAuditEvent(CustomerOrganizationId customerOrganizationId, string auditEventId)
+    {
+        var normalizedAuditEventId = NormalizeRequiredText(auditEventId, nameof(auditEventId));
+        if (!governanceAuditEvents.ContainsKey(new GovernanceAuditEventKey(customerOrganizationId, normalizedAuditEventId)))
+        {
+            throw new InvalidOperationException("Governance audit event does not belong to the customer organization.");
         }
     }
 
@@ -3344,6 +4149,32 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         string HarnessSetupProfileId,
         ProductUserId ProductUserId,
         string ProviderSessionKey);
+
+    private readonly record struct ProductApiIdempotencyKey(
+        CustomerOrganizationId CustomerOrganizationId,
+        ProductUserId ProductUserId,
+        string Route,
+        string IdempotencyKey);
+
+    private sealed record NormalizedPricingBasisRequest(
+        string Harness,
+        string ProviderName,
+        string ModelName,
+        string BillingRoute,
+        string Currency,
+        string PricingVersion,
+        string AuditEventId,
+        IReadOnlyDictionary<string, string> SourceMetadata);
+
+    private sealed record NormalizedCostEstimateRequest(
+        string AgentSessionId,
+        string? ModelInvocationId,
+        string? PricingBasisId,
+        string? PricingVersion,
+        string Currency,
+        string ProviderName,
+        string ModelName,
+        string BillingRoute);
 }
 
 internal sealed record SeedProductRoleMappingRequest(
@@ -3370,3 +4201,62 @@ public sealed record CreateGovernanceAuditEventRequest(
     ProductAuthorizationDenialReason? DenialReason,
     string CorrelationId,
     IReadOnlyDictionary<string, string> EvidenceMetadata);
+
+public sealed record EnsureCustomerOrganizationLoadedRequest(
+    CustomerOrganizationId CustomerOrganizationId,
+    string Slug,
+    string DisplayName,
+    string DataResidencyRegion,
+    CustomerOrganizationIsolationTier IsolationTier);
+
+public sealed record ProductApiIdempotencyRecord(
+    CustomerOrganizationId CustomerOrganizationId,
+    ProductUserId ProductUserId,
+    string Route,
+    string IdempotencyKey,
+    string RequestHash,
+    string? OperationId,
+    int? ResponseStatusCode,
+    string? ResponseLocation,
+    string? ResponseJson,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset ExpiresAtUtc,
+    DateTimeOffset? CompletedAtUtc)
+{
+    public bool IsCompleted => CompletedAtUtc is not null &&
+        OperationId is not null &&
+        ResponseStatusCode is not null &&
+        ResponseJson is not null;
+}
+
+public sealed record ProductApiIdempotencyReservation(
+    ProductApiIdempotencyReservationState State,
+    ProductApiIdempotencyRecord? Record);
+
+public enum ProductApiIdempotencyReservationState
+{
+    Reserved,
+    Replay,
+    Conflict,
+    InProgress
+}
+
+public sealed record ReserveProductApiIdempotencyRecordRequest(
+    CustomerOrganizationId CustomerOrganizationId,
+    ProductUserId ProductUserId,
+    string Route,
+    string IdempotencyKey,
+    string RequestHash,
+    DateTimeOffset ExpiresAtUtc);
+
+public sealed record CompleteProductApiIdempotencyRecordRequest(
+    CustomerOrganizationId CustomerOrganizationId,
+    ProductUserId ProductUserId,
+    string Route,
+    string IdempotencyKey,
+    string RequestHash,
+    string OperationId,
+    int ResponseStatusCode,
+    string? ResponseLocation,
+    string ResponseJson,
+    DateTimeOffset ExpiresAtUtc);
