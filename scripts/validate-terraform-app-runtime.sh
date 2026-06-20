@@ -45,7 +45,6 @@ required_stage_patterns = {
     "job secret references use user-assigned identity": r"identity\s*=\s*azurerm_user_assigned_identity\.jobs\[job_key\]\.id",
     "job identity output principal ID": r"container_app_job_identities[\s\S]*principal_id\s*=\s*identity\.principal_id",
     "explicit ACA infrastructure subnet opt-in": r"container_app_environment_subnet_id\s*=\s*var\.container_app_environment_infrastructure_subnet_id",
-    "stable ACA infrastructure resource group": r'infrastructure_resource_group_name\s*=\s*"rg-\$\{local\.name_prefix\}-aca-infra"',
     "environment diagnostic target local": r"container_app_environment_diagnostic_targets\s*=\s*\{[^}]*environment\s*=\s*azurerm_container_app_environment\.this\.id",
     "service diagnostic target local": r"container_app_service_diagnostic_targets\s*=\s*\{",
     "job diagnostic target local": r"container_app_job_diagnostic_targets\s*=\s*\{",
@@ -75,11 +74,11 @@ if re.search(
     errors.append("app_runtime must not implicitly attach the ACA environment to network_subnet_ids.container_apps_infrastructure")
 
 if re.search(
-    r"infrastructure_resource_group_name\s*=.*container_app_environment_subnet_id\s*==\s*null\s*\?\s*null",
+    r"^\s*infrastructure_resource_group_name\s*=",
     stage_content,
-    re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    re.IGNORECASE | re.MULTILINE,
 ):
-    errors.append("app_runtime must preserve the stable ACA infrastructure_resource_group_name in the default public-origin path")
+    errors.append("app_runtime default path must not manage infrastructure_resource_group_name because it forces ACA environment replacement")
 
 for resource_name in ["container_app_services", "container_app_jobs"]:
     workload_diagnostics = re.search(
@@ -105,6 +104,7 @@ required_readme_terms = [
     "container_registry_id",
     "user-assigned managed identities",
     "does not automatically attach the Container Apps environment",
+    "does not manage the platform-managed infrastructure resource group name",
     "Set `container_app_environment_infrastructure_subnet_id` only in a deliberate origin isolation hardening slice",
     "environment-level diagnostic setting collects `allLogs` and `AllMetrics`",
     "Container App and Container Apps Job resource diagnostic settings collect `AllMetrics` only",

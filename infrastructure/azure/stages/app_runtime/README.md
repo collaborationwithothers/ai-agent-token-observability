@@ -49,7 +49,7 @@ The guarded deploy helper supplies the stage from upstream non-secret outputs be
 
 The stage intentionally uses Container App user-assigned managed identities and secret references rather than hardcoded secret values. Upstream outputs must not carry credentials, raw content, prompts, command output, tool results, logs, or private endpoint implementation details.
 
-The current deployable path does not automatically attach the Container Apps environment to `network_private_data_plane.subnet_ids.container_apps_infrastructure`. It preserves the deterministic platform-managed infrastructure resource group name while leaving `infrastructure_subnet_id` unset by default. Set `container_app_environment_infrastructure_subnet_id` only in a deliberate origin isolation hardening slice that accepts the required Container Apps environment replacement.
+The current deployable path does not automatically attach the Container Apps environment to `network_private_data_plane.subnet_ids.container_apps_infrastructure`. It does not manage the platform-managed infrastructure resource group name in the default path because Azure treats that field as a create-time environment choice, and it leaves `infrastructure_subnet_id` unset by default. Set `container_app_environment_infrastructure_subnet_id` only in a deliberate origin isolation hardening slice that accepts the required Container Apps environment replacement.
 
 Diagnostics use the Azure Container Apps supported split: the environment-level diagnostic setting collects `allLogs` and `AllMetrics`, while Container App and Container Apps Job resource diagnostic settings collect `AllMetrics` only. Do not add `category_group = "allLogs"` to Container App or Container Apps Job diagnostic settings.
 
