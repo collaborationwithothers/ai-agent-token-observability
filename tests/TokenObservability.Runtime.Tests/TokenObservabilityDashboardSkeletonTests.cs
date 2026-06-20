@@ -50,8 +50,13 @@ public sealed class TokenObservabilityDashboardSkeletonTests
 
         Assert.Contains("defaultProductApiBaseUrl = \"/api/v1\"", appSource);
         Assert.Contains("fetch(`${productApiBaseUrl}/me`", appSource);
+        Assert.Contains("fetch(`${productApiBaseUrl}/overview", appSource);
+        Assert.Contains("fetch(`${productApiBaseUrl}/pricing/basis", appSource);
         Assert.Contains("requiredScopeKinds", appSource);
         Assert.Contains("scopeMatchesRoute", appSource);
+        Assert.Contains("costMix", appSource);
+        Assert.Contains("sourceMetadata", appSource);
+        Assert.Contains("Idempotency-Key", appSource);
         Assert.DoesNotContain("currentUser.scopes.length > 0", appSource);
         Assert.Contains("sanitizeGrafanaNavigation", appSource);
         Assert.Contains("allowedGrafanaRoutes", grafanaNavigationSource);
@@ -96,7 +101,8 @@ public sealed class TokenObservabilityDashboardSkeletonTests
             "Unauthorized",
             "Not authorized",
             "No routes available",
-            "No Product API data loaded"
+            "No aggregate cost mix yet",
+            "No pricing basis records"
         })
         {
             Assert.Contains(stateText, appSource);

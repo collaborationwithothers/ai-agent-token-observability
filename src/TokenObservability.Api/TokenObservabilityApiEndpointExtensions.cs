@@ -1,7 +1,11 @@
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Options;
 using TokenObservability.Domain.Authorization;
 using TokenObservability.Domain.Ingestion;
+using TokenObservability.Domain.Pricing;
 using TokenObservability.Domain.Tenancy;
 using TokenObservability.Infrastructure.Ingestion;
 using TokenObservability.Infrastructure.Persistence;
@@ -10,6 +14,9 @@ namespace TokenObservability.Api;
 
 internal static class TokenObservabilityApiEndpointExtensions
 {
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly TimeSpan PricingMutationIdempotencyTtl = TimeSpan.FromHours(24);
+
     public static void AddTokenObservabilityApiServices(this WebApplicationBuilder builder)
     {
         builder.Services.Configure<TokenObservabilityApiReadinessOptions>(
@@ -36,7 +43,12 @@ internal static class TokenObservabilityApiEndpointExtensions
         api.MapGet("/me", GetCurrentUser);
         api.MapGet("/audit-events", GetAuditEvents);
         api.MapGet("/ingestion-rejections", GetIngestionRejections);
+        api.MapGet("/overview", GetOverview);
         api.MapGet("/overview/token-timeline", GetOverviewTokenTimeline);
+        api.MapGet("/pricing/basis", GetPricingBasis);
+        api.MapPost("/pricing/basis", CreatePricingBasisOverride);
+        api.MapPost("/pricing/basis/{pricingBasisId}/approve", ApprovePricingBasis);
+        api.MapPost("/pricing/basis/{pricingBasisId}/reject", RejectPricingBasis);
         api.MapGet("/grafana/drilldown", GetGrafanaDrilldown);
         api.MapGet("/sessions", GetSessions);
     }
@@ -139,7 +151,8 @@ internal static class TokenObservabilityApiEndpointExtensions
     private static async Task<IResult> GetAuditEvents(
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore)
+        InMemoryTenantMetadataStore tenantMetadataStore,
+        IProductApiIdempotencyStore idempotencyStore)
     {
         var resolution = await authorizationContextResolver.ResolveAsync(
             httpContext,
@@ -180,7 +193,8 @@ internal static class TokenObservabilityApiEndpointExtensions
     private static async Task<IResult> GetIngestionRejections(
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore)
+        InMemoryTenantMetadataStore tenantMetadataStore,
+        IProductApiIdempotencyStore idempotencyStore)
     {
         var resolution = await authorizationContextResolver.ResolveAsync(
             httpContext,
@@ -305,6 +319,255 @@ internal static class TokenObservabilityApiEndpointExtensions
             nextCursor = (string?)null,
             totalEstimate = visibleSessions.Length
         });
+    }
+
+    private static async Task<IResult> GetOverview(
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        InMemoryTenantMetadataStore tenantMetadataStore)
+    {
+        var resolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            ProductAuthorizationAction.OverviewRead,
+            new ProductScope(ProductScopeKind.Organization, ScopeId: null));
+
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
+        }
+
+        var costMix = await tenantMetadataStore.ListCostMixAsync(
+            resolution.Context.CustomerOrganization.CustomerOrganizationId);
+
+        return Results.Ok(new
+        {
+            costMix = costMix.Select(static bucket => new
+            {
+                providerName = bucket.ProviderName,
+                modelName = bucket.ModelName,
+                billingRoute = bucket.BillingRoute,
+                tokenType = InMemoryTenantMetadataStore.ToWirePricingTokenType(bucket.TokenType),
+                costStatus = InMemoryTenantMetadataStore.ToWireCostStatus(bucket.CostStatus),
+                currency = bucket.Currency,
+                estimatedCost = bucket.EstimatedCost,
+                estimateCount = bucket.EstimateCount,
+                metricStatus = ToWireMetricStatus(bucket.TokenMetricStatus)
+            }).ToArray(),
+            nextCursor = (string?)null,
+            totalEstimate = costMix.Count
+        });
+    }
+
+    private static async Task<IResult> GetPricingBasis(
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        InMemoryTenantMetadataStore tenantMetadataStore)
+    {
+        var resolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            ProductAuthorizationAction.PricingManage,
+            new ProductScope(ProductScopeKind.Pricing, ScopeId: "pricing"));
+
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
+        }
+
+        var records = await tenantMetadataStore.ListPricingBasisRecordsAsync(
+            resolution.Context.CustomerOrganization.CustomerOrganizationId);
+
+        return Results.Ok(new
+        {
+            items = records.Select(ToPricingBasisResponse).ToArray(),
+            nextCursor = (string?)null,
+            totalEstimate = records.Count
+        });
+    }
+
+    private static async Task<IResult> CreatePricingBasisOverride(
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        InMemoryTenantMetadataStore tenantMetadataStore,
+        IProductApiIdempotencyStore idempotencyStore)
+    {
+        if (!HasIdempotencyKey(httpContext))
+        {
+            return CreateProblem(httpContext, "Idempotency key required.", StatusCodes.Status400BadRequest, "idempotency_key_required");
+        }
+
+        var resolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            ProductAuthorizationAction.PricingManage,
+            new ProductScope(ProductScopeKind.Pricing, ScopeId: "pricing"));
+
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
+        }
+
+        var rawBody = await ReadRequestBodyAsync(httpContext);
+        var idempotency = await ResolvePricingMutationIdempotencyAsync(
+            httpContext,
+            resolution.Context,
+            idempotencyStore,
+            rawBody);
+        if (idempotency.Result is not null)
+        {
+            return idempotency.Result;
+        }
+
+        var body = DeserializePricingMutationBody<PricingBasisOverrideRequest>(rawBody);
+        if (body is null)
+        {
+            return CreateProblem(httpContext, "Pricing override request body required.", StatusCodes.Status400BadRequest, "pricing_body_required");
+        }
+
+        try
+        {
+            var record = await tenantMetadataStore.CreateCustomerPricingOverrideAsync(
+                new CreatePricingBasisRecordRequest(
+                    resolution.Context.CustomerOrganization.CustomerOrganizationId,
+                    body.Harness,
+                    body.ProviderName,
+                    body.ModelName,
+                    ParsePricingTokenType(body.TokenType),
+                    body.BillingRoute,
+                    body.Currency,
+                    body.PricePerMillionTokens,
+                    body.PricingVersion,
+                    PricingSourceKind.AdminOverride,
+                    PricingReviewState.Approved,
+                    body.EffectiveFromUtc,
+                    body.EffectiveToUtc,
+                    $"audit-pricing-override-{Guid.NewGuid():N}",
+                    body.SourceMetadata ?? new Dictionary<string, string>(StringComparer.Ordinal)),
+                resolution.Context.ProductUser.ProductUserId,
+                resolution.Context.EffectiveRoles.First(),
+                resolution.Context.CorrelationId);
+
+            var location = $"/api/v1/pricing/basis/{record.PricingBasisId}";
+            return await StorePricingMutationIdempotencyResultAsync(
+                idempotencyStore,
+                resolution.Context,
+                idempotency,
+                operationId: record.PricingBasisId,
+                StatusCodes.Status201Created,
+                location,
+                ToPricingBasisResponse(record));
+        }
+        catch (ArgumentException ex)
+        {
+            return CreateProblem(httpContext, ex.Message, StatusCodes.Status400BadRequest, "invalid_pricing_basis");
+        }
+        catch (InvalidOperationException ex)
+        {
+            return CreateProblem(httpContext, ex.Message, StatusCodes.Status409Conflict, "pricing_basis_conflict");
+        }
+    }
+
+    private static async Task<IResult> ApprovePricingBasis(
+        string pricingBasisId,
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        InMemoryTenantMetadataStore tenantMetadataStore,
+        IProductApiIdempotencyStore idempotencyStore)
+    {
+        return await ReviewPricingBasis(
+            pricingBasisId,
+            httpContext,
+            authorizationContextResolver,
+            tenantMetadataStore,
+            idempotencyStore,
+            approve: true);
+    }
+
+    private static async Task<IResult> RejectPricingBasis(
+        string pricingBasisId,
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        InMemoryTenantMetadataStore tenantMetadataStore,
+        IProductApiIdempotencyStore idempotencyStore)
+    {
+        return await ReviewPricingBasis(
+            pricingBasisId,
+            httpContext,
+            authorizationContextResolver,
+            tenantMetadataStore,
+            idempotencyStore,
+            approve: false);
+    }
+
+    private static async Task<IResult> ReviewPricingBasis(
+        string pricingBasisId,
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        InMemoryTenantMetadataStore tenantMetadataStore,
+        IProductApiIdempotencyStore idempotencyStore,
+        bool approve)
+    {
+        if (!HasIdempotencyKey(httpContext))
+        {
+            return CreateProblem(httpContext, "Idempotency key required.", StatusCodes.Status400BadRequest, "idempotency_key_required");
+        }
+
+        var resolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            ProductAuthorizationAction.PricingManage,
+            new ProductScope(ProductScopeKind.Pricing, ScopeId: "pricing"));
+
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
+        }
+
+        var rawBody = await ReadRequestBodyAsync(httpContext);
+        var idempotency = await ResolvePricingMutationIdempotencyAsync(
+            httpContext,
+            resolution.Context,
+            idempotencyStore,
+            rawBody);
+        if (idempotency.Result is not null)
+        {
+            return idempotency.Result;
+        }
+
+        var body = DeserializePricingMutationBody<PricingBasisReviewBody>(rawBody);
+        var request = new PricingBasisReviewRequest(
+            resolution.Context.CustomerOrganization.CustomerOrganizationId,
+            pricingBasisId,
+            $"audit-pricing-review-{Guid.NewGuid():N}",
+            resolution.Context.CorrelationId,
+            body?.DecisionReason ?? "not_provided");
+
+        try
+        {
+            var record = approve
+                ? await tenantMetadataStore.ApprovePricingBasisAsync(
+                    request,
+                    resolution.Context.ProductUser.ProductUserId,
+                    resolution.Context.EffectiveRoles.First())
+                : await tenantMetadataStore.RejectPricingBasisAsync(
+                    request,
+                    resolution.Context.ProductUser.ProductUserId,
+                    resolution.Context.EffectiveRoles.First());
+
+            return await StorePricingMutationIdempotencyResultAsync(
+                idempotencyStore,
+                resolution.Context,
+                idempotency,
+                operationId: request.AuditEventId,
+                StatusCodes.Status200OK,
+                Location: null,
+                ToPricingBasisResponse(record));
+        }
+        catch (ArgumentException ex)
+        {
+            return CreateProblem(httpContext, ex.Message, StatusCodes.Status400BadRequest, "invalid_pricing_review");
+        }
+        catch (InvalidOperationException ex)
+        {
+            return CreateProblem(httpContext, ex.Message, StatusCodes.Status409Conflict, "pricing_review_conflict");
+        }
     }
 
     private static async Task<IResult> GetOverviewTokenTimeline(
@@ -665,6 +928,139 @@ internal static class TokenObservabilityApiEndpointExtensions
                 value.StartsWith("//", StringComparison.Ordinal));
     }
 
+    private static bool HasIdempotencyKey(HttpContext httpContext)
+    {
+        return httpContext.Request.Headers.TryGetValue("Idempotency-Key", out var value) &&
+            value.Count == 1 &&
+            !string.IsNullOrWhiteSpace(value.ToString());
+    }
+
+    private static async Task<string> ReadRequestBodyAsync(HttpContext httpContext)
+    {
+        using var reader = new StreamReader(
+            httpContext.Request.Body,
+            Encoding.UTF8,
+            detectEncodingFromByteOrderMarks: false,
+            leaveOpen: false);
+        return await reader.ReadToEndAsync(httpContext.RequestAborted);
+    }
+
+    private static T? DeserializePricingMutationBody<T>(string rawBody)
+    {
+        return string.IsNullOrWhiteSpace(rawBody)
+            ? default
+            : JsonSerializer.Deserialize<T>(rawBody, JsonOptions);
+    }
+
+    private static async Task<PricingMutationIdempotencyResolution> ResolvePricingMutationIdempotencyAsync(
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContext authorizationContext,
+        IProductApiIdempotencyStore idempotencyStore,
+        string rawBody)
+    {
+        var idempotencyKey = httpContext.Request.Headers["Idempotency-Key"].ToString().Trim();
+        var route = httpContext.Request.Path.Value ?? string.Empty;
+        var requestHash = ComputeRequestHash(rawBody);
+        var reservation = await idempotencyStore.ReserveProductApiIdempotencyRecordAsync(
+            new ReserveProductApiIdempotencyRecordRequest(
+                authorizationContext.CustomerOrganization.CustomerOrganizationId,
+                authorizationContext.ProductUser.ProductUserId,
+                route,
+                idempotencyKey,
+                requestHash,
+                DateTimeOffset.UtcNow.Add(PricingMutationIdempotencyTtl)));
+
+        return reservation.State switch
+        {
+            ProductApiIdempotencyReservationState.Reserved => new PricingMutationIdempotencyResolution(route, idempotencyKey, requestHash, Result: null),
+            ProductApiIdempotencyReservationState.Replay => new PricingMutationIdempotencyResolution(route, idempotencyKey, requestHash, ToStoredPricingMutationResult(reservation.Record!)),
+            ProductApiIdempotencyReservationState.Conflict => new PricingMutationIdempotencyResolution(route, idempotencyKey, requestHash, CreateProblem(httpContext, "Idempotency key was already used with a different request body.", StatusCodes.Status409Conflict, "idempotency_key_conflict")),
+            ProductApiIdempotencyReservationState.InProgress => new PricingMutationIdempotencyResolution(route, idempotencyKey, requestHash, CreateProblem(httpContext, "Idempotency key is already processing.", StatusCodes.Status409Conflict, "idempotency_key_in_progress")),
+            _ => throw new InvalidOperationException("Unknown idempotency reservation state.")
+        };
+    }
+
+    private static async Task<IResult> StorePricingMutationIdempotencyResultAsync(
+        IProductApiIdempotencyStore idempotencyStore,
+        TokenObservabilityAuthorizationContext authorizationContext,
+        PricingMutationIdempotencyResolution idempotency,
+        string operationId,
+        int statusCode,
+        string? Location,
+        object response)
+    {
+        var responseJson = JsonSerializer.Serialize(response, JsonOptions);
+        var stored = await idempotencyStore.CompleteProductApiIdempotencyRecordAsync(
+            new CompleteProductApiIdempotencyRecordRequest(
+                authorizationContext.CustomerOrganization.CustomerOrganizationId,
+                authorizationContext.ProductUser.ProductUserId,
+                idempotency.Route,
+                idempotency.IdempotencyKey,
+                idempotency.RequestHash,
+                operationId,
+                statusCode,
+                Location,
+                responseJson,
+                DateTimeOffset.UtcNow.Add(PricingMutationIdempotencyTtl)));
+        return ToStoredPricingMutationResult(stored);
+    }
+
+    private static IResult ToStoredPricingMutationResult(ProductApiIdempotencyRecord record)
+    {
+        if (!record.IsCompleted)
+        {
+            throw new InvalidOperationException("Product API idempotency record is not complete.");
+        }
+
+        return new StoredPricingMutationResult(
+            record.ResponseJson!,
+            record.ResponseStatusCode!.Value,
+            record.ResponseLocation);
+    }
+
+    private static string ComputeRequestHash(string rawBody)
+    {
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(rawBody));
+        return Convert.ToHexString(hash);
+    }
+
+    private static object ToPricingBasisResponse(PricingBasisRecord record)
+    {
+        return new
+        {
+            pricingBasisId = record.PricingBasisId,
+            customerOrganizationId = record.CustomerOrganizationId.ToString(),
+            harness = record.Harness,
+            providerName = record.ProviderName,
+            modelName = record.ModelName,
+            tokenType = InMemoryTenantMetadataStore.ToWirePricingTokenType(record.TokenType),
+            billingRoute = record.BillingRoute,
+            currency = record.Currency,
+            pricePerMillionTokens = record.PricePerMillionTokens,
+            pricingVersion = record.PricingVersion,
+            sourceKind = InMemoryTenantMetadataStore.ToWirePricingSourceKind(record.SourceKind),
+            reviewState = InMemoryTenantMetadataStore.ToWirePricingReviewState(record.ReviewState),
+            effectiveFromUtc = record.EffectiveFromUtc,
+            effectiveToUtc = record.EffectiveToUtc,
+            auditEventId = record.AuditEventId,
+            sourceMetadata = record.SourceMetadata,
+            createdAtUtc = record.CreatedAtUtc,
+            updatedAtUtc = record.UpdatedAtUtc
+        };
+    }
+
+    private static PricingTokenType ParsePricingTokenType(string tokenType)
+    {
+        return tokenType.Trim().ToLowerInvariant() switch
+        {
+            "input" => PricingTokenType.Input,
+            "output" => PricingTokenType.Output,
+            "cached_input" => PricingTokenType.CachedInput,
+            "reasoning_output" => PricingTokenType.ReasoningOutput,
+            _ => throw new ArgumentException("Pricing token type is not supported.", nameof(tokenType))
+        };
+    }
+
     private static string ToContractAction(ProductAuthorizationAction action)
     {
         return action.ToString();
@@ -724,4 +1120,43 @@ internal static class TokenObservabilityApiEndpointExtensions
     }
 
     private sealed record ReadinessDependency(string Name, string Status);
+
+    private sealed record PricingBasisOverrideRequest(
+        string Harness,
+        string ProviderName,
+        string ModelName,
+        string TokenType,
+        string BillingRoute,
+        string Currency,
+        decimal PricePerMillionTokens,
+        string PricingVersion,
+        DateTimeOffset EffectiveFromUtc,
+        DateTimeOffset? EffectiveToUtc,
+        IReadOnlyDictionary<string, string> SourceMetadata);
+
+    private sealed record PricingBasisReviewBody(string? DecisionReason);
+
+    private sealed record PricingMutationIdempotencyResolution(
+        string Route,
+        string IdempotencyKey,
+        string RequestHash,
+        IResult? Result);
+
+    private sealed class StoredPricingMutationResult(
+        string responseJson,
+        int statusCode,
+        string? location) : IResult
+    {
+        public async Task ExecuteAsync(HttpContext httpContext)
+        {
+            httpContext.Response.StatusCode = statusCode;
+            httpContext.Response.ContentType = "application/json; charset=utf-8";
+            if (!string.IsNullOrWhiteSpace(location))
+            {
+                httpContext.Response.Headers.Location = location;
+            }
+
+            await httpContext.Response.WriteAsync(responseJson);
+        }
+    }
 }

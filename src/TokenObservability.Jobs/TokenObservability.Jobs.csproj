@@ -7,4 +7,9 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\TokenObservability.Domain\TokenObservability.Domain.csproj" />
+    <ProjectReference Include="..\TokenObservability.Infrastructure\TokenObservability.Infrastructure.csproj" />
+  </ItemGroup>
+
 </Project>

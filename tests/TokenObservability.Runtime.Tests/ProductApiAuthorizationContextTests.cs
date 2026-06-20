@@ -10,6 +10,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using TokenObservability.Api;
 using TokenObservability.Domain.Authorization;
 using TokenObservability.Domain.Ingestion;
+using TokenObservability.Domain.Pricing;
 using TokenObservability.Domain.Tenancy;
 using TokenObservability.Infrastructure.Ingestion;
 using TokenObservability.Infrastructure.Persistence;
@@ -823,6 +824,272 @@ public sealed class ProductApiAuthorizationContextTests
     }
 
     [Fact]
+    public async Task OverviewRouteReturnsAggregateCostMixWithoutPersonOrSessionFields()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var viewerClaims = CreateClaims(subject: "viewer-subject", groupObjectIds: ["viewer-group"]);
+        var viewer = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            viewerClaims);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            viewer.ProductUserId,
+            "viewer-group",
+            ProductRole.ReadOnlyViewer);
+        var credential = await IssueCredentialAsync(store, seed, "profile-contoso-codex", viewer.ProductUserId);
+        await SeedTokenSessionAsync(
+            store,
+            credential.Credential,
+            "contoso-cost-mix-001",
+            Now,
+            [
+                (TokenMetricName.InputTokens, 1_000_000, TokenMetricStatus.Observed, TokenMetricConfidence.Observed, "invocation-001")
+            ]);
+        var session = Assert.Single(await store.ListAgentSessionsAsync(seed.Organization.CustomerOrganizationId));
+        await store.RecordCostEstimateAsync(
+            new CreateCostEstimateRecordRequest(
+                seed.Organization.CustomerOrganizationId,
+                session.AgentSessionId,
+                ModelInvocationId: null,
+                PricingBasisId: null,
+                PricingVersion: null,
+                "USD",
+                EstimatedCost: null,
+                CostEstimateStatus.Unavailable,
+                CostEstimateSourceKind.Unavailable,
+                TokenMetricStatus.Unavailable,
+                TokenMetricConfidence.Unavailable,
+                "openai",
+                "gpt-5",
+                "standard",
+                PricingTokenType.Input));
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+        using var request = CreateAuthorizedRequest(HttpMethod.Get, "/api/v1/overview", "contoso", viewerClaims);
+
+        using var response = await client.SendAsync(request);
+
+        response.EnsureSuccessStatusCode();
+        using var body = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
+        var bucket = Assert.Single(body.RootElement.GetProperty("costMix").EnumerateArray());
+        Assert.Equal("openai", bucket.GetProperty("providerName").GetString());
+        Assert.Equal("gpt-5", bucket.GetProperty("modelName").GetString());
+        Assert.Equal("input", bucket.GetProperty("tokenType").GetString());
+        Assert.Equal("unavailable", bucket.GetProperty("costStatus").GetString());
+        Assert.Equal(JsonValueKind.Null, bucket.GetProperty("estimatedCost").ValueKind);
+        var json = body.RootElement.ToString();
+        Assert.DoesNotContain("sessionId", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("productUserId", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("credential", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("providerSessionId", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("prompt", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("command", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("tool", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task PricingBasisRoutesRequireIdempotencyKeyAndAuditCustomerOverrides()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var adminClaims = CreateClaims(subject: "admin-subject", groupObjectIds: ["admin-group"]);
+        var admin = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            adminClaims);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            admin.ProductUserId,
+            "admin-group",
+            ProductRole.PlatformAdmin);
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+        using var missingIdempotencyRequest = CreateAuthorizedRequest(
+            HttpMethod.Post,
+            "/api/v1/pricing/basis",
+            "contoso",
+            adminClaims);
+        missingIdempotencyRequest.Content = new StringContent(CreatePricingOverrideJson(), Encoding.UTF8, "application/json");
+
+        using var missingIdempotencyResponse = await client.SendAsync(missingIdempotencyRequest);
+
+        Assert.Equal(HttpStatusCode.BadRequest, missingIdempotencyResponse.StatusCode);
+        await AssertProblemCodeAsync(missingIdempotencyResponse, "idempotency_key_required");
+
+        using var createRequest = CreateAuthorizedRequest(HttpMethod.Post, "/api/v1/pricing/basis", "contoso", adminClaims);
+        createRequest.Headers.Add("Idempotency-Key", "pricing-override-001");
+        createRequest.Content = new StringContent(CreatePricingOverrideJson(), Encoding.UTF8, "application/json");
+
+        using var createResponse = await client.SendAsync(createRequest);
+
+        Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
+        using var createBody = await JsonDocument.ParseAsync(await createResponse.Content.ReadAsStreamAsync());
+        Assert.Equal("admin_override", createBody.RootElement.GetProperty("sourceKind").GetString());
+        Assert.Equal("approved", createBody.RootElement.GetProperty("reviewState").GetString());
+        var createdPricingBasisId = createBody.RootElement.GetProperty("pricingBasisId").GetString();
+
+        using var replayRequest = CreateAuthorizedRequest(HttpMethod.Post, "/api/v1/pricing/basis", "contoso", adminClaims);
+        replayRequest.Headers.Add("Idempotency-Key", "pricing-override-001");
+        replayRequest.Content = new StringContent(CreatePricingOverrideJson(), Encoding.UTF8, "application/json");
+
+        using var replayResponse = await client.SendAsync(replayRequest);
+
+        Assert.Equal(HttpStatusCode.Created, replayResponse.StatusCode);
+        using var replayBody = await JsonDocument.ParseAsync(await replayResponse.Content.ReadAsStreamAsync());
+        Assert.Equal(createdPricingBasisId, replayBody.RootElement.GetProperty("pricingBasisId").GetString());
+
+        using var conflictingReplayRequest = CreateAuthorizedRequest(HttpMethod.Post, "/api/v1/pricing/basis", "contoso", adminClaims);
+        conflictingReplayRequest.Headers.Add("Idempotency-Key", "pricing-override-001");
+        conflictingReplayRequest.Content = new StringContent(CreatePricingOverrideJson(pricePerMillionTokens: 0.80m), Encoding.UTF8, "application/json");
+
+        using var conflictingReplayResponse = await client.SendAsync(conflictingReplayRequest);
+
+        Assert.Equal(HttpStatusCode.Conflict, conflictingReplayResponse.StatusCode);
+        await AssertProblemCodeAsync(conflictingReplayResponse, "idempotency_key_conflict");
+
+        using var listRequest = CreateAuthorizedRequest(HttpMethod.Get, "/api/v1/pricing/basis", "contoso", adminClaims);
+        using var listResponse = await client.SendAsync(listRequest);
+
+        listResponse.EnsureSuccessStatusCode();
+        using var listBody = await JsonDocument.ParseAsync(await listResponse.Content.ReadAsStreamAsync());
+        var item = Assert.Single(listBody.RootElement.GetProperty("items").EnumerateArray());
+        Assert.Equal("gpt-5", item.GetProperty("modelName").GetString());
+        Assert.Equal("input", item.GetProperty("tokenType").GetString());
+        Assert.Equal("enterprise_contract", item.GetProperty("billingRoute").GetString());
+
+        var auditEvent = Assert.Single(
+            await store.ListGovernanceAuditEventsAsync(seed.Organization.CustomerOrganizationId),
+            audit => audit.Action == ProductAuthorizationAction.PricingManage);
+        Assert.Equal("pricing_override_create", auditEvent.EvidenceMetadata["operation"]);
+        Assert.Equal("admin_override", auditEvent.EvidenceMetadata["source_kind"]);
+    }
+
+    [Fact]
+    public async Task PricingBasisOverrideConcurrentSameKeyRequestsCreateSingleRecord()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var adminClaims = CreateClaims(subject: "admin-subject", groupObjectIds: ["admin-group"]);
+        var admin = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            adminClaims);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            admin.ProductUserId,
+            "admin-group",
+            ProductRole.PlatformAdmin);
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+
+        async Task<HttpResponseMessage> SendRequestAsync()
+        {
+            var request = CreateAuthorizedRequest(HttpMethod.Post, "/api/v1/pricing/basis", "contoso", adminClaims);
+            request.Headers.Add("Idempotency-Key", "pricing-override-concurrent");
+            request.Content = new StringContent(CreatePricingOverrideJson(), Encoding.UTF8, "application/json");
+            return await client.SendAsync(request);
+        }
+
+        var responses = await Task.WhenAll(SendRequestAsync(), SendRequestAsync());
+        using var first = responses[0];
+        using var second = responses[1];
+
+        Assert.True(first.StatusCode is HttpStatusCode.Created or HttpStatusCode.Conflict);
+        Assert.True(second.StatusCode is HttpStatusCode.Created or HttpStatusCode.Conflict);
+        var records = await store.ListPricingBasisRecordsAsync(seed.Organization.CustomerOrganizationId);
+        Assert.Single(records);
+        var pricingAuditEvents = await store.ListGovernanceAuditEventsAsync(seed.Organization.CustomerOrganizationId);
+        Assert.Single(pricingAuditEvents, audit => audit.EvidenceMetadata.GetValueOrDefault("operation") == "pricing_override_create");
+    }
+
+    [Fact]
+    public async Task PricingReviewRoutesReplayIdempotentApproveAndRejectMutations()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var adminClaims = CreateClaims(subject: "admin-subject", groupObjectIds: ["admin-group"]);
+        var admin = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            adminClaims);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            admin.ProductUserId,
+            "admin-group",
+            ProductRole.PlatformAdmin);
+        var approveCandidate = await SeedPricingCandidateAsync(store, seed, "gpt-5", "audit-pricing-seed-approve");
+        var rejectCandidate = await SeedPricingCandidateAsync(store, seed, "gpt-5-mini", "audit-pricing-seed-reject");
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+
+        using var approveRequest = CreateAuthorizedRequest(
+            HttpMethod.Post,
+            $"/api/v1/pricing/basis/{approveCandidate.PricingBasisId}/approve",
+            "contoso",
+            adminClaims);
+        approveRequest.Headers.Add("Idempotency-Key", "pricing-approve-001");
+        approveRequest.Content = new StringContent("""{"decisionReason":"looks_current"}""", Encoding.UTF8, "application/json");
+
+        using var approveResponse = await client.SendAsync(approveRequest);
+
+        approveResponse.EnsureSuccessStatusCode();
+        using var approveBody = await JsonDocument.ParseAsync(await approveResponse.Content.ReadAsStreamAsync());
+        Assert.Equal("approved", approveBody.RootElement.GetProperty("reviewState").GetString());
+
+        using var approveReplayRequest = CreateAuthorizedRequest(
+            HttpMethod.Post,
+            $"/api/v1/pricing/basis/{approveCandidate.PricingBasisId}/approve",
+            "contoso",
+            adminClaims);
+        approveReplayRequest.Headers.Add("Idempotency-Key", "pricing-approve-001");
+        approveReplayRequest.Content = new StringContent("""{"decisionReason":"looks_current"}""", Encoding.UTF8, "application/json");
+
+        using var approveReplayResponse = await client.SendAsync(approveReplayRequest);
+
+        approveReplayResponse.EnsureSuccessStatusCode();
+        using var approveReplayBody = await JsonDocument.ParseAsync(await approveReplayResponse.Content.ReadAsStreamAsync());
+        Assert.Equal(approveCandidate.PricingBasisId, approveReplayBody.RootElement.GetProperty("pricingBasisId").GetString());
+
+        using var rejectRequest = CreateAuthorizedRequest(
+            HttpMethod.Post,
+            $"/api/v1/pricing/basis/{rejectCandidate.PricingBasisId}/reject",
+            "contoso",
+            adminClaims);
+        rejectRequest.Headers.Add("Idempotency-Key", "pricing-reject-001");
+        rejectRequest.Content = new StringContent("""{"decisionReason":"stale"}""", Encoding.UTF8, "application/json");
+
+        using var rejectResponse = await client.SendAsync(rejectRequest);
+
+        rejectResponse.EnsureSuccessStatusCode();
+        using var rejectBody = await JsonDocument.ParseAsync(await rejectResponse.Content.ReadAsStreamAsync());
+        Assert.Equal("rejected", rejectBody.RootElement.GetProperty("reviewState").GetString());
+
+        using var rejectReplayRequest = CreateAuthorizedRequest(
+            HttpMethod.Post,
+            $"/api/v1/pricing/basis/{rejectCandidate.PricingBasisId}/reject",
+            "contoso",
+            adminClaims);
+        rejectReplayRequest.Headers.Add("Idempotency-Key", "pricing-reject-001");
+        rejectReplayRequest.Content = new StringContent("""{"decisionReason":"stale"}""", Encoding.UTF8, "application/json");
+
+        using var rejectReplayResponse = await client.SendAsync(rejectReplayRequest);
+
+        rejectReplayResponse.EnsureSuccessStatusCode();
+        using var rejectReplayBody = await JsonDocument.ParseAsync(await rejectReplayResponse.Content.ReadAsStreamAsync());
+        Assert.Equal(rejectCandidate.PricingBasisId, rejectReplayBody.RootElement.GetProperty("pricingBasisId").GetString());
+
+        var pricingAuditEvents = await store.ListGovernanceAuditEventsAsync(seed.Organization.CustomerOrganizationId);
+        Assert.Single(pricingAuditEvents, audit => audit.EvidenceMetadata.GetValueOrDefault("operation") == "pricing_basis_approved");
+        Assert.Single(pricingAuditEvents, audit => audit.EvidenceMetadata.GetValueOrDefault("operation") == "pricing_basis_rejected");
+    }
+
+    [Fact]
     public async Task OverviewTokenTimelineRouteRejectsInvalidRangeAndUnauthorizedCaller()
     {
         var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
@@ -1280,6 +1547,64 @@ public sealed class ProductApiAuthorizationContextTests
                 AuditEventId: $"audit-seed-{Guid.NewGuid():N}"));
     }
 
+    private static async Task<PricingBasisRecord> SeedPricingCandidateAsync(
+        InMemoryTenantMetadataStore store,
+        TenantSeed seed,
+        string modelName,
+        string auditEventId)
+    {
+        await store.RecordGovernanceAuditEventAsync(
+            seed.Organization.CustomerOrganizationId,
+            new CreateGovernanceAuditEventRequest(
+                auditEventId,
+                ActorProductUserId: null,
+                EffectiveRole: null,
+                ProductAuthorizationAction.PricingManage,
+                new ProductScope(ProductScopeKind.Pricing, ScopeId: "pricing-refresh"),
+                Decision: "created",
+                DenialReason: null,
+                CorrelationId: "pricing-refresh-test",
+                EvidenceMetadata: new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["evidence_kind"] = "admin_operation",
+                    ["operation"] = "pricing_seed_refresh",
+                    ["result"] = "candidate",
+                    ["pricing_basis_id"] = "pending",
+                    ["pricing_version"] = "openai-20260615",
+                    ["provider_name"] = "openai",
+                    ["model_name"] = modelName,
+                    ["token_type"] = "input",
+                    ["billing_route"] = "standard",
+                    ["source_kind"] = "automated_seed",
+                    ["review_state"] = "candidate"
+                }));
+
+        return await store.CreatePricingBasisRecordAsync(
+            new CreatePricingBasisRecordRequest(
+                seed.Organization.CustomerOrganizationId,
+                "codex-cli",
+                "openai",
+                modelName,
+                PricingTokenType.Input,
+                "standard",
+                "USD",
+                1.25m,
+                "openai-20260615",
+                PricingSourceKind.AutomatedSeed,
+                PricingReviewState.Candidate,
+                Now,
+                EffectiveToUtc: null,
+                auditEventId,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["source_url"] = "https://developers.openai.com/api/docs/pricing",
+                    ["source_retrieved_at_utc"] = Now.ToString("O"),
+                    ["provider_document_version"] = "openai-api-pricing",
+                    ["provider_sku_name"] = modelName,
+                    ["billing_route"] = "standard"
+                }));
+    }
+
     private static async Task<IssuedScopedIngestionCredential> IssueCredentialAsync(
         InMemoryTenantMetadataStore store,
         TenantSeed seed,
@@ -1482,6 +1807,31 @@ public sealed class ProductApiAuthorizationContextTests
                 observation.Value.HasValue ? TokenObservationSourceKind.CodexEvent : TokenObservationSourceKind.Missing,
                 envelope.TelemetryEnvelopeId));
         }
+    }
+
+    private static string CreatePricingOverrideJson(decimal pricePerMillionTokens = 0.75m)
+    {
+        return $$"""
+            {
+              "harness": "codex-cli",
+              "providerName": "openai",
+              "modelName": "gpt-5",
+              "tokenType": "input",
+              "billingRoute": "enterprise_contract",
+              "currency": "USD",
+              "pricePerMillionTokens": {{pricePerMillionTokens}},
+              "pricingVersion": "contoso-contract-2026",
+              "effectiveFromUtc": "2026-06-15T12:00:00Z",
+              "effectiveToUtc": null,
+              "sourceMetadata": {
+                "source_url": "https://contoso.example/pricing-contract",
+                "source_retrieved_at_utc": "2026-06-15T12:00:00Z",
+                "provider_document_version": "contoso-contract",
+                "provider_sku_name": "gpt-5",
+                "billing_route": "enterprise_contract"
+              }
+            }
+            """;
     }
 
     private static Task<GovernanceAuditEvent> RecordRejectionAuditEventAsync(
