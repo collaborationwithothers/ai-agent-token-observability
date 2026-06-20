@@ -174,6 +174,26 @@ case "${mode}" in
         var_args+=("-var=container_registry_id=${container_registry_id}")
         var_args+=("-var-file=${APP_RUNTIME_IMAGES_TFVARS_PATH}")
         ;;
+      managed_grafana)
+        observability_resource_group_name="$(terraform_output_raw observability_foundation "${TF_WORKSPACE}" observability_resource_group_name)"
+        observability_resource_group_ids="$(terraform_output_json observability_foundation "${TF_WORKSPACE}" resource_group_ids)"
+        metrics_data_source_identifiers="$(terraform_output_json observability_foundation "${TF_WORKSPACE}" metrics_data_source_identifiers)"
+        observability_resource_group_id="$(
+          jq -er '.observability' <<<"${observability_resource_group_ids}"
+        )"
+        if ! jq -e '
+          .aggregate_metrics.type == "azure_monitor_workspace" and
+          .aggregate_metrics.boundary == "aggregate_metrics_only" and
+          (.aggregate_metrics.resource_id | type == "string" and length > 0) and
+          (.aggregate_metrics.consumer_stages | index("managed_grafana") != null)
+        ' <<<"${metrics_data_source_identifiers}" >/dev/null; then
+          echo "observability_foundation.metrics_data_source_identifiers must expose aggregate_metrics as an aggregate-only Azure Monitor workspace for managed_grafana." >&2
+          exit 1
+        fi
+        var_args+=("-var=observability_resource_group_name=${observability_resource_group_name}")
+        var_args+=("-var=observability_resource_group_id=${observability_resource_group_id}")
+        var_args+=("-var=metrics_data_source_identifiers=${metrics_data_source_identifiers}")
+        ;;
       edge)
         app_runtime_container_app_fqdns="$(terraform_output_json app_runtime "${TF_WORKSPACE}" container_app_fqdns)"
         public_dns_zone="$(terraform_output_json public_dns pd_eastus2_internal product_dns_zone)"

@@ -17,11 +17,8 @@ Terraform implementation issues must verify:
 - Direct-origin blocking is deferred to a later origin isolation hardening slice.
 - Container Apps host product services and Container Apps Jobs host bounded background work.
 - Managed Grafana is wired to Azure Monitor workspace or managed Prometheus aggregate metrics as the first-release data source.
-- Managed Grafana dashboard JSON is versioned in the repo and deployed through Terraform; production dashboards are not manual UI-only state.
-- Managed Grafana production role assignments default human users to Grafana Viewer; Grafana Editor is rejected in production unless an explicit exception is approved.
-- Managed Grafana role assignment variables use environment-scoped Entra group object IDs and reject display-name based authorization.
-- `pp` and `pd` Grafana Editor assignments fail validation unless `allow_production_grafana_editors` is true.
-- Managed Grafana provider authentication uses Entra OIDC by default, with service account token fallback disabled unless a non-production proof records provider incompatibility.
+- The #62 Terraform slice provisions only the Azure Managed Grafana workspace, Azure Monitor workspace integration, and workspace-scoped `Monitoring Data Reader` assignment for the Grafana managed identity.
+- Managed Grafana dashboard JSON, folders, production role assignments, provider authentication proof gates, service account fallback, and Product Dashboard links are follow-up surfaces and must not be introduced by the #62 workspace/data-source implementation.
 - Terraform state does not output or store application secrets.
 - Production workflows are manual, guarded, and OIDC based.
 - Runtime image build and publish workflows are manual, guarded, ACR-only, and separate from Terraform plan and apply.
