@@ -146,6 +146,9 @@ infer_changed_profiles() {
       .github/workflows/terraform-*.yml|.github/workflows/terraform-*.yaml|.github/workflows/edge-origin-validation.yml|infrastructure/azure/*|scripts/terraform-*|scripts/validate-terraform-*|scripts/validate-edge-origin-workflow.sh|tests/workflow-guardrails/*)
         terraform=true
         ;;
+      scripts/prove-grafana-provider-auth.sh|scripts/validate-grafana-provider-auth-proof.sh)
+        terraform=true
+        ;;
       web/token-observability-dashboard/*)
         dashboard=true
         ;;
@@ -212,6 +215,7 @@ run_full_gate() {
   run_step "terraform AI services validation" scripts/validate-terraform-ai-services.sh
   run_step "terraform app runtime validation" scripts/validate-terraform-app-runtime.sh
   run_step "terraform managed Grafana validation" scripts/validate-terraform-managed-grafana.sh
+  run_step "Grafana provider auth proof validation" scripts/validate-grafana-provider-auth-proof.sh
   run_step "terraform app runtime stage check" scripts/terraform-stage-check.sh app_runtime
   run_step "terraform AI services stage check" scripts/terraform-stage-check.sh ai_services
   run_step "terraform edge stage check" scripts/terraform-stage-check.sh edge

@@ -39,6 +39,14 @@ If Log Analytics or Application Insights is added later, it must be limited to a
 
 The #62 Terraform implementation provisions only the Azure Managed Grafana workspace and Azure Monitor workspace integration. It grants the Grafana managed identity `Monitoring Data Reader` on the Azure Monitor workspace resource ID exported by `observability_foundation.metrics_data_source_identifiers.aggregate_metrics`. Dashboard JSON, Grafana folders, Grafana user RBAC, Grafana provider authentication proof gates, service account fallback, Product Dashboard links, private endpoints, and custom DNS are follow-up work.
 
+## Provider Authentication Contract
+
+Issue #63 owns the Terraform provider authentication proof for dashboard and folder deployment. The default contract for issue #64 is Microsoft Entra bearer-token authentication to the Azure Managed Grafana data plane, passed to the `grafana/grafana` provider through process-local HTTP headers.
+
+The reproducible proof fixture lives under `infrastructure/azure/proofs/grafana_provider_auth` and uses only a read-only folder data source. It must not create dashboards, folders, service accounts, tokens, API keys, or data sources.
+
+Service account token fallback is permitted only if the Entra proof fails for Terraform provider use. Any fallback token must be Key Vault backed, manually approved, least privilege, rotated explicitly, and disabled by default in production workflows. Follow [Grafana Provider Authentication Proof](../operations/grafana-provider-auth-proof.md) before issue #64 adds dashboard JSON deployment.
+
 ## Dashboard Boundary
 
 Managed Grafana may show:
