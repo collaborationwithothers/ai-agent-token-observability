@@ -6,7 +6,7 @@ It turns the agreed Terraform principles into implementation-ready stage boundar
 
 The repository now contains the Terraform stage tree and the first deployment-adjacent workflow set. Current workflow coverage is split as follows:
 
-- `.github/workflows/terraform-plan.yml` selects a normal Terraform deploy scope, plans each selected stage, waits for `terraform-apply` environment approval, and applies the exact reviewed saved plan artifact for that stage before planning the next dependent stage.
+- `.github/workflows/terraform-plan.yml` selects a normal Terraform deploy scope, plans each selected stage, and applies the exact same-run saved plan artifact for that stage before planning the next dependent stage. Its default `apply_mode` is `auto`; `reviewed` mode inserts a `terraform-apply` environment approval gate before each stage apply.
 - `.github/workflows/terraform-destroy-plan.yml` creates guarded destroy plans and applies approved same-run destroy plan artifacts for disposable stages.
 - `.github/workflows/edge-origin-validation.yml` validates Front Door hostnames and direct Azure Container Apps origin isolation.
 - `.github/workflows/acr-image-publish.yml` builds and publishes the Product Dashboard, Product API, Product Ingestion Endpoint, and Product Jobs images to ACR and emits digest-pinned Terraform inputs.
@@ -35,7 +35,7 @@ Image build and publish is a separate production path from Terraform plan and ap
 - AzAPI is used only for Azure provider gaps that AzureRM cannot model.
 - Deployment-capable workflows are manual only.
 - Production applies are guarded and must not use `terraform apply -auto-approve`.
-- Normal Terraform apply must apply an exact reviewed saved plan artifact, not a fresh unreviewed plan.
+- Normal Terraform apply must apply an exact same-run saved plan artifact, not a fresh unreviewed plan.
 - Runtime image publish workflows are manual, guarded, and ACR-scoped; they are separate from Terraform plan and apply workflows.
 - No Customer Managed Keys are offered.
 - Platform-managed encryption is the only encryption mode.
@@ -319,8 +319,8 @@ Environment-specific defaults:
 | --- | --- | --- |
 | `dv` | Development integration | Manual workflow, repository and actor validation |
 | `qa` | Quality validation | Manual workflow, repository and actor validation |
-| `pp` | Pre-production | GitHub environment protection and apply approval |
-| `pd` | Production | GitHub environment protection, apply approval, branch restriction, and stricter role assignment |
+| `pp` | Pre-production | GitHub environment protection for reviewed apply mode |
+| `pd` | Production | GitHub environment protection for reviewed apply mode, branch restriction, and stricter role assignment |
 
 ## Remote State References
 
