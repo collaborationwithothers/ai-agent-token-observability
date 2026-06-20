@@ -215,7 +215,7 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
         Assert.Equal(envelope.TelemetryEnvelopeId, diagnosticEvent.TelemetryEnvelopeId);
         Assert.Equal(session.AgentSessionId, diagnosticEvent.AgentSessionId);
         Assert.Equal("succeeded", diagnosticEvent.AggregateMetricExportOutcome);
-        Assert.Equal(6, diagnosticEvent.AggregateMetricPointCount);
+        Assert.Equal(8, diagnosticEvent.AggregateMetricPointCount);
         Assert.Null(diagnosticEvent.AggregateMetricExportFailureReason);
         Assert.Equal("metadata_only", diagnosticEvent.Properties["content_capture"]);
         Assert.Equal("application_insights", diagnosticEvent.Properties["diagnostic_store"]);
@@ -594,7 +594,7 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
             "aggregate-export-correlation-001");
 
         Assert.True(result.Succeeded);
-        Assert.Equal(9, result.ExportedPointCount);
+        Assert.Equal(10, result.ExportedPointCount);
         Assert.Empty(await store.ListAggregateMetricExportFailuresAsync(seed.Organization.CustomerOrganizationId));
         var persistedPoints = await store.ListAggregateMetricPointsAsync(seed.Organization.CustomerOrganizationId);
         Assert.Equal(persistedPoints.Count, sink.Points.Count);
@@ -606,6 +606,12 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
         Assert.Equal("dv", sessionPoint.Labels["environment"]);
         Assert.Equal("eastus2", sessionPoint.Labels["region"]);
         Assert.Equal("codex", sessionPoint.Labels["harness"]);
+        var modelInvocationPoint = Assert.Single(persistedPoints, point => point.Name == "tokenobs_model_invocations_total");
+        Assert.Equal(1, modelInvocationPoint.Value);
+        Assert.Equal("invocations", modelInvocationPoint.Unit);
+        Assert.Equal("accepted", modelInvocationPoint.Labels["result"]);
+        Assert.Equal("openai", modelInvocationPoint.Labels["model_provider"]);
+        Assert.Equal("gpt-5-codex", modelInvocationPoint.Labels["model"]);
 
         var tokenPoints = persistedPoints
             .Where(point => point.Name == "tokenobs_tokens_total")
@@ -680,6 +686,231 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
             Assert.Equal("openai", point.Labels.GetValueOrDefault("model_provider", "openai"));
             Assert.DoesNotContain("event-aggregate-001", point.ToString(), StringComparison.Ordinal);
             Assert.DoesNotContain("codex-conversation-001", point.ToString(), StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task AggregateMetricsExporterBuildsDenseTenantDailyTokenTimelineWithMetricStates()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store);
+        var issued = await IssueCredentialAsync(store, seed);
+        var firstDayEnvelope = await RecordAcceptedEnvelopeAsync(
+            store,
+            issued.Credential,
+            new string('e', 64),
+            "timeline-correlation-001",
+            modelName: "gpt-5-codex",
+            sourceEventTimestampUtc: new DateTimeOffset(2026, 6, 10, 9, 0, 0, TimeSpan.Zero),
+            conversationIdHash: new string('4', 64));
+        var secondDayEnvelope = await RecordAcceptedEnvelopeAsync(
+            store,
+            issued.Credential,
+            new string('f', 64),
+            "timeline-correlation-002",
+            modelName: "gpt-5-codex",
+            sourceEventTimestampUtc: new DateTimeOffset(2026, 6, 12, 9, 0, 0, TimeSpan.Zero),
+            conversationIdHash: new string('5', 64));
+        var fourthDayEnvelope = await RecordAcceptedEnvelopeAsync(
+            store,
+            issued.Credential,
+            new string('1', 64),
+            "timeline-correlation-004",
+            modelName: "gpt-5-codex",
+            sourceEventTimestampUtc: new DateTimeOffset(2026, 6, 13, 9, 0, 0, TimeSpan.Zero),
+            conversationIdHash: new string('6', 64));
+        var sessions = (await store.ListAgentSessionsAsync(seed.Organization.CustomerOrganizationId))
+            .OrderBy(session => session.StartedAtUtc)
+            .ToArray();
+        var firstDaySession = sessions[0];
+        var secondDaySession = sessions[1];
+        var fourthDaySession = sessions[2];
+
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            firstDaySession.AgentSessionId,
+            ModelInvocationId: "invocation-001",
+            TokenMetricName.TotalTokens,
+            Value: 100,
+            TokenMetricStatus.Mixed,
+            TokenMetricConfidence.Estimated,
+            TokenObservationSourceKind.DerivedSummary,
+            firstDayEnvelope.TelemetryEnvelopeId));
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            firstDaySession.AgentSessionId,
+            ModelInvocationId: "invocation-001",
+            TokenMetricName.InputTokens,
+            Value: 40,
+            TokenMetricStatus.Observed,
+            TokenMetricConfidence.Observed,
+            TokenObservationSourceKind.CodexEvent,
+            firstDayEnvelope.TelemetryEnvelopeId));
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            firstDaySession.AgentSessionId,
+            ModelInvocationId: "invocation-001",
+            TokenMetricName.OutputTokens,
+            Value: 30,
+            TokenMetricStatus.Estimated,
+            TokenMetricConfidence.Estimated,
+            TokenObservationSourceKind.Estimator,
+            firstDayEnvelope.TelemetryEnvelopeId));
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            secondDaySession.AgentSessionId,
+            ModelInvocationId: null,
+            TokenMetricName.InputTokens,
+            Value: null,
+            TokenMetricStatus.Unavailable,
+            TokenMetricConfidence.Unavailable,
+            TokenObservationSourceKind.Missing,
+            secondDayEnvelope.TelemetryEnvelopeId));
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            secondDaySession.AgentSessionId,
+            ModelInvocationId: null,
+            TokenMetricName.OutputTokens,
+            Value: null,
+            TokenMetricStatus.NotApplicable,
+            TokenMetricConfidence.Unavailable,
+            TokenObservationSourceKind.Missing,
+            secondDayEnvelope.TelemetryEnvelopeId));
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            fourthDaySession.AgentSessionId,
+            ModelInvocationId: null,
+            TokenMetricName.InputTokens,
+            Value: 20,
+            TokenMetricStatus.Observed,
+            TokenMetricConfidence.Observed,
+            TokenObservationSourceKind.CodexEvent,
+            fourthDayEnvelope.TelemetryEnvelopeId));
+        var exporter = new AggregateMetricsExporter(
+            store,
+            new RecordingAggregateMetricSink(),
+            new AggregateMetricsExportOptions(Environment: "dv"));
+
+        var buckets = await exporter.BuildDailyTokenTimelineAsync(
+            seed.Organization.CustomerOrganizationId,
+            new AggregateTokenTimelineQuery(
+                StartDateUtc: new DateOnly(2026, 6, 10),
+                EndDateUtc: new DateOnly(2026, 6, 14),
+                MovingAverageWindowDays: 3));
+
+        Assert.Collection(
+            buckets,
+            bucket =>
+            {
+                Assert.Equal(new DateOnly(2026, 6, 10), bucket.BucketDateUtc);
+                Assert.Equal(70, bucket.TokenBurn);
+                Assert.Equal(TokenMetricStatus.Mixed, bucket.MetricStatus);
+                Assert.Equal(TokenMetricConfidence.Estimated, bucket.MetricConfidence);
+                Assert.False(bucket.IsDenseZeroBurn);
+                Assert.Equal(70, bucket.MovingAverageTokenBurn);
+            },
+            bucket =>
+            {
+                Assert.Equal(new DateOnly(2026, 6, 11), bucket.BucketDateUtc);
+                Assert.Equal(0, bucket.TokenBurn);
+                Assert.Equal(TokenMetricStatus.NotApplicable, bucket.MetricStatus);
+                Assert.True(bucket.IsDenseZeroBurn);
+                Assert.Equal(35, bucket.MovingAverageTokenBurn);
+            },
+            bucket =>
+            {
+                Assert.Equal(new DateOnly(2026, 6, 12), bucket.BucketDateUtc);
+                Assert.Null(bucket.TokenBurn);
+                Assert.Equal(TokenMetricStatus.Mixed, bucket.MetricStatus);
+                Assert.Equal(TokenMetricConfidence.Unavailable, bucket.MetricConfidence);
+                Assert.False(bucket.IsDenseZeroBurn);
+                Assert.Equal(35, bucket.MovingAverageTokenBurn);
+            },
+            bucket =>
+            {
+                Assert.Equal(new DateOnly(2026, 6, 13), bucket.BucketDateUtc);
+                Assert.Equal(20, bucket.TokenBurn);
+                Assert.Equal(TokenMetricStatus.Observed, bucket.MetricStatus);
+                Assert.Equal(10, bucket.MovingAverageTokenBurn);
+            },
+            bucket =>
+            {
+                Assert.Equal(new DateOnly(2026, 6, 14), bucket.BucketDateUtc);
+                Assert.Equal(0, bucket.TokenBurn);
+                Assert.True(bucket.IsDenseZeroBurn);
+                Assert.Equal(10, bucket.MovingAverageTokenBurn);
+            });
+
+        var persistedBuckets = await store.ListAggregateTokenTimelineBucketsAsync(
+            seed.Organization.CustomerOrganizationId,
+            new AggregateTokenTimelineQuery(
+                StartDateUtc: new DateOnly(2026, 6, 10),
+                EndDateUtc: new DateOnly(2026, 6, 14),
+                MovingAverageWindowDays: 3));
+        Assert.Equal(buckets, persistedBuckets);
+        Assert.All(persistedBuckets, bucket =>
+        {
+            Assert.Equal("contoso", bucket.CustomerOrganizationSlug);
+            Assert.Equal("dv", bucket.Environment);
+            Assert.Equal("eastus2", bucket.Region);
+        });
+    }
+
+    [Fact]
+    public async Task AggregateMetricsExporterExportsModelOperationMetricsWithAggregateLabelsOnly()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store);
+        var issued = await IssueCredentialAsync(store, seed);
+        var envelope = await RecordAcceptedEnvelopeAsync(
+            store,
+            issued.Credential,
+            new string('2', 64),
+            "model-operation-correlation-001",
+            modelName: "gpt-5-codex",
+            turnIdHash: new string('3', 64));
+        var session = Assert.Single(await store.ListAgentSessionsAsync(seed.Organization.CustomerOrganizationId));
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            ModelInvocationId: "model-invocation-001",
+            TokenMetricName.InputTokens,
+            Value: 11,
+            TokenMetricStatus.Observed,
+            TokenMetricConfidence.Observed,
+            TokenObservationSourceKind.CodexEvent,
+            envelope.TelemetryEnvelopeId));
+        var exporter = new AggregateMetricsExporter(
+            store,
+            new RecordingAggregateMetricSink(),
+            new AggregateMetricsExportOptions(Environment: "dv"));
+
+        var result = await exporter.ExportAcceptedSessionAsync(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            "model-operation-export-correlation-001");
+
+        Assert.True(result.Succeeded);
+        var persistedPoints = await store.ListAggregateMetricPointsAsync(seed.Organization.CustomerOrganizationId);
+        var invocationPoint = Assert.Single(
+            persistedPoints,
+            point => point.Name == "tokenobs_model_invocations_total");
+        Assert.Equal(1, invocationPoint.Value);
+        Assert.Equal("invocations", invocationPoint.Unit);
+        Assert.Equal("openai", invocationPoint.Labels["model_provider"]);
+        Assert.Equal("gpt-5-codex", invocationPoint.Labels["model"]);
+        Assert.Equal("accepted", invocationPoint.Labels["result"]);
+
+        var turnPoint = Assert.Single(persistedPoints, point => point.Name == "tokenobs_turns_total");
+        Assert.Equal(1, turnPoint.Value);
+        Assert.Equal("turns", turnPoint.Unit);
+        Assert.Equal("accepted", turnPoint.Labels["result"]);
+
+        Assert.All(persistedPoints, point =>
+        {
+            AssertForbiddenAggregateLabelsAreAbsent(point.Labels);
+            Assert.DoesNotContain("model-invocation-001", point.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("turn-model-operation-001", point.ToString(), StringComparison.Ordinal);
         });
     }
 
@@ -1953,7 +2184,10 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
         ScopedIngestionCredential credential,
         string dedupeKeyHash,
         string correlationId,
-        string? modelName = null)
+        string? modelName = null,
+        string? turnIdHash = null,
+        DateTimeOffset? sourceEventTimestampUtc = null,
+        string? conversationIdHash = null)
     {
         return store.RecordTelemetryEnvelopeAsync(new CreateTelemetryEnvelopeRecordRequest(
             credential.CustomerOrganizationId,
@@ -1964,9 +2198,9 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
             SchemaVersion,
             "log",
             "codex.api_request",
-            SourceEventTimestampUtc: Now,
-            ConversationIdHash: null,
-            TurnIdHash: null,
+            SourceEventTimestampUtc: sourceEventTimestampUtc ?? Now,
+            ConversationIdHash: conversationIdHash,
+            TurnIdHash: turnIdHash,
             SourceEventId: null,
             TraceIdHash: null,
             SpanIdHash: null,

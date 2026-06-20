@@ -1,7 +1,9 @@
+using System.Globalization;
 using Microsoft.Extensions.Options;
 using TokenObservability.Domain.Authorization;
 using TokenObservability.Domain.Ingestion;
 using TokenObservability.Domain.Tenancy;
+using TokenObservability.Infrastructure.Ingestion;
 using TokenObservability.Infrastructure.Persistence;
 
 namespace TokenObservability.Api;
@@ -34,6 +36,8 @@ internal static class TokenObservabilityApiEndpointExtensions
         api.MapGet("/me", GetCurrentUser);
         api.MapGet("/audit-events", GetAuditEvents);
         api.MapGet("/ingestion-rejections", GetIngestionRejections);
+        api.MapGet("/overview/token-timeline", GetOverviewTokenTimeline);
+        api.MapGet("/grafana/drilldown", GetGrafanaDrilldown);
         api.MapGet("/sessions", GetSessions);
     }
 
@@ -303,6 +307,166 @@ internal static class TokenObservabilityApiEndpointExtensions
         });
     }
 
+    private static async Task<IResult> GetOverviewTokenTimeline(
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        InMemoryTenantMetadataStore tenantMetadataStore)
+    {
+        var resolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            ProductAuthorizationAction.OverviewRead,
+            new ProductScope(ProductScopeKind.Organization, ScopeId: null));
+
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
+        }
+
+        if (!TryReadDateQuery(httpContext, "from", out var from) ||
+            !TryReadDateQuery(httpContext, "to", out var to) ||
+            !TryReadIntQuery(httpContext, "movingAverageWindowDays", out var movingAverageWindowDays, defaultValue: 7) ||
+            to < from ||
+            movingAverageWindowDays is < 1 or > 90)
+        {
+            return CreateProblem(
+                httpContext,
+                "Invalid token timeline query.",
+                StatusCodes.Status400BadRequest,
+                "invalid_token_timeline_query");
+        }
+
+        var environment = TryReadQuery(httpContext, "environment", out var environmentQuery)
+            ? environmentQuery
+            : "dv";
+        var query = new AggregateTokenTimelineQuery(from, to, movingAverageWindowDays);
+        var exporter = new AggregateMetricsExporter(
+            tenantMetadataStore,
+            new NoopAggregateMetricSink(),
+            new AggregateMetricsExportOptions(environment));
+
+        try
+        {
+            var buckets = await exporter.BuildDailyTokenTimelineAsync(
+                resolution.Context.CustomerOrganization.CustomerOrganizationId,
+                query,
+                httpContext.RequestAborted);
+
+            return Results.Ok(new
+            {
+                items = buckets.Select(static bucket => new
+                {
+                    customerOrganizationSlug = bucket.CustomerOrganizationSlug,
+                    environment = bucket.Environment,
+                    region = bucket.Region,
+                    bucketDateUtc = bucket.BucketDateUtc.ToString("yyyy-MM-dd"),
+                    period = bucket.Period,
+                    tokenBurn = bucket.TokenBurn,
+                    metricStatus = ToWireMetricStatus(bucket.MetricStatus),
+                    metricConfidence = ToWireMetricConfidence(bucket.MetricConfidence),
+                    movingAverageTokenBurn = bucket.MovingAverageTokenBurn,
+                    movingAverageWindowDays = bucket.MovingAverageWindowDays,
+                    isDenseZeroBurn = bucket.IsDenseZeroBurn,
+                    calculatedAtUtc = bucket.CalculatedAtUtc
+                }).ToArray(),
+                nextCursor = (string?)null,
+                totalEstimate = buckets.Count
+            });
+        }
+        catch (ArgumentException)
+        {
+            return CreateProblem(
+                httpContext,
+                "Invalid token timeline query.",
+                StatusCodes.Status400BadRequest,
+                "invalid_token_timeline_query");
+        }
+    }
+
+    private static async Task<IResult> GetGrafanaDrilldown(
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver)
+    {
+        if (!TryReadQuery(httpContext, "route", out var route) ||
+            !IsAllowedGrafanaRoute(route) ||
+            ContainsAbsoluteUrl(httpContext.Request.QueryString.Value))
+        {
+            return CreateProblem(
+                httpContext,
+                "Invalid Grafana drilldown filter.",
+                StatusCodes.Status400BadRequest,
+                "invalid_grafana_drilldown_filter");
+        }
+
+        foreach (var queryParameter in httpContext.Request.Query)
+        {
+            if (!IsAllowedGrafanaDrilldownParameter(queryParameter.Key))
+            {
+                return CreateProblem(
+                    httpContext,
+                    "Invalid Grafana drilldown filter.",
+                    StatusCodes.Status400BadRequest,
+                    "invalid_grafana_drilldown_filter");
+            }
+
+            if (queryParameter.Value.Any(static value => ContainsAbsoluteUrl(value)))
+            {
+                return CreateProblem(
+                    httpContext,
+                    "Invalid Grafana drilldown filter.",
+                    StatusCodes.Status400BadRequest,
+                    "invalid_grafana_drilldown_filter");
+            }
+        }
+
+        var resolution = StringComparer.Ordinal.Equals(route, "/overview")
+            ? await authorizationContextResolver.ResolveAsync(
+                httpContext,
+                ProductAuthorizationAction.OverviewRead,
+                new ProductScope(ProductScopeKind.Organization, ScopeId: null))
+            : await ResolveSessionReadForDrilldownAsync(httpContext, authorizationContextResolver);
+
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
+        }
+
+        var filters = httpContext.Request.Query
+            .Where(static parameter => !StringComparer.Ordinal.Equals(parameter.Key, "route"))
+            .OrderBy(static parameter => parameter.Key, StringComparer.Ordinal)
+            .ToDictionary(
+                static parameter => parameter.Key,
+                static parameter => parameter.Value.ToString(),
+                StringComparer.Ordinal);
+
+        return Results.Ok(new
+        {
+            route,
+            filters
+        });
+    }
+
+    private static async Task<TokenObservabilityAuthorizationResolution> ResolveSessionReadForDrilldownAsync(
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver)
+    {
+        var scopedResolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            ProductAuthorizationAction.SessionReadScoped,
+            new ProductScope(ProductScopeKind.Organization, ScopeId: null));
+
+        if (scopedResolution.IsAllowed)
+        {
+            return scopedResolution;
+        }
+
+        var selfResolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            ProductAuthorizationAction.SessionReadOwn,
+            new ProductScope(ProductScopeKind.Self, ScopeId: null));
+
+        return selfResolution.IsAllowed ? selfResolution : scopedResolution;
+    }
+
     private static IResult CreateProblem(HttpContext httpContext, string title, int statusCode, string code)
     {
         return Results.Problem(
@@ -441,6 +605,64 @@ internal static class TokenObservabilityApiEndpointExtensions
     {
         value = httpContext.Request.Query[key].ToString().Trim();
         return !string.IsNullOrWhiteSpace(value);
+    }
+
+    private static bool TryReadDateQuery(HttpContext httpContext, string key, out DateOnly value)
+    {
+        value = default;
+
+        return TryReadQuery(httpContext, key, out var rawValue) &&
+            DateOnly.TryParseExact(
+                rawValue,
+                "yyyy-MM-dd",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out value);
+    }
+
+    private static bool TryReadIntQuery(
+        HttpContext httpContext,
+        string key,
+        out int value,
+        int defaultValue)
+    {
+        if (!TryReadQuery(httpContext, key, out var rawValue))
+        {
+            value = defaultValue;
+            return true;
+        }
+
+        return int.TryParse(rawValue, NumberStyles.None, CultureInfo.InvariantCulture, out value);
+    }
+
+    private static bool IsAllowedGrafanaRoute(string route)
+    {
+        return route is "/overview" or "/sessions";
+    }
+
+    private static bool IsAllowedGrafanaDrilldownParameter(string parameter)
+    {
+        return parameter is "route" or
+            "from" or
+            "to" or
+            "environment" or
+            "region" or
+            "harness" or
+            "model" or
+            "modelProvider" or
+            "hotspotType" or
+            "cacheBustCategory" or
+            "findingState" or
+            "signalType" or
+            "result" or
+            "rejectionReason";
+    }
+
+    private static bool ContainsAbsoluteUrl(string? value)
+    {
+        return !string.IsNullOrWhiteSpace(value) &&
+            (value.Contains("://", StringComparison.Ordinal) ||
+                value.StartsWith("//", StringComparison.Ordinal));
     }
 
     private static string ToContractAction(ProductAuthorizationAction action)

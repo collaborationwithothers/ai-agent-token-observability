@@ -75,6 +75,7 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
     private readonly Dictionary<AgentSessionLookupKey, string> agentSessionLookupIndex = [];
     private readonly Dictionary<TokenObservationId, TokenObservationRecord> tokenObservations = [];
     private readonly Dictionary<AggregateMetricPointId, AggregateMetricPointRecord> aggregateMetricPoints = [];
+    private readonly List<AggregateTokenTimelineBucket> aggregateTokenTimelineBuckets = [];
     private readonly Dictionary<AggregateMetricExportFailureId, AggregateMetricExportFailureRecord> aggregateMetricExportFailures = [];
     private readonly object gate = new();
 
@@ -1221,6 +1222,67 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         }
     }
 
+    public Task RecordAggregateTokenTimelineBucketsAsync(
+        CustomerOrganizationId customerOrganizationId,
+        IReadOnlyList<AggregateTokenTimelineBucket> buckets)
+    {
+        ArgumentNullException.ThrowIfNull(buckets);
+
+        var normalizedBuckets = buckets
+            .Select(bucket => NormalizeAggregateTokenTimelineBucket(customerOrganizationId, bucket))
+            .ToArray();
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(customerOrganizationId);
+            var organization = customerOrganizations[customerOrganizationId];
+
+            foreach (var bucket in normalizedBuckets)
+            {
+                if (!StringComparer.Ordinal.Equals(bucket.CustomerOrganizationSlug, organization.Slug) ||
+                    !StringComparer.Ordinal.Equals(bucket.Region, organization.DataResidencyRegion))
+                {
+                    throw new ArgumentException("Aggregate token timeline bucket tenant labels do not match the organization.", nameof(buckets));
+                }
+            }
+
+            var dates = normalizedBuckets
+                .Select(static bucket => bucket.BucketDateUtc)
+                .ToHashSet();
+            var windows = normalizedBuckets
+                .Select(static bucket => bucket.MovingAverageWindowDays)
+                .ToHashSet();
+
+            aggregateTokenTimelineBuckets.RemoveAll(bucket =>
+                bucket.CustomerOrganizationId == customerOrganizationId &&
+                dates.Contains(bucket.BucketDateUtc) &&
+                windows.Contains(bucket.MovingAverageWindowDays));
+            aggregateTokenTimelineBuckets.AddRange(normalizedBuckets);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<AggregateTokenTimelineBucket>> ListAggregateTokenTimelineBucketsAsync(
+        CustomerOrganizationId customerOrganizationId,
+        AggregateTokenTimelineQuery query)
+    {
+        ValidateAggregateTokenTimelineQuery(query);
+
+        lock (gate)
+        {
+            return Task.FromResult<IReadOnlyList<AggregateTokenTimelineBucket>>(
+                aggregateTokenTimelineBuckets
+                    .Where(bucket =>
+                        bucket.CustomerOrganizationId == customerOrganizationId &&
+                        bucket.BucketDateUtc >= query.StartDateUtc &&
+                        bucket.BucketDateUtc <= query.EndDateUtc &&
+                        bucket.MovingAverageWindowDays == query.MovingAverageWindowDays)
+                    .OrderBy(static bucket => bucket.BucketDateUtc)
+                    .ToArray());
+        }
+    }
+
     public Task<AggregateMetricExportFailureRecord> RecordAggregateMetricExportFailureAsync(
         CreateAggregateMetricExportFailureRecordRequest request)
     {
@@ -2268,11 +2330,94 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         }
     }
 
+    private static AggregateTokenTimelineBucket NormalizeAggregateTokenTimelineBucket(
+        CustomerOrganizationId customerOrganizationId,
+        AggregateTokenTimelineBucket bucket)
+    {
+        ArgumentNullException.ThrowIfNull(bucket);
+        ValidateAggregateTokenTimelineQuery(new AggregateTokenTimelineQuery(
+            bucket.BucketDateUtc,
+            bucket.BucketDateUtc,
+            bucket.MovingAverageWindowDays));
+
+        if (bucket.CustomerOrganizationId != customerOrganizationId)
+        {
+            throw new ArgumentException("Aggregate token timeline bucket tenant does not match the request.", nameof(bucket));
+        }
+
+        var slug = NormalizeRequiredText(bucket.CustomerOrganizationSlug, nameof(bucket.CustomerOrganizationSlug)).ToLowerInvariant();
+        var environment = NormalizeAggregateEnvironment(bucket.Environment, nameof(bucket.Environment));
+        var region = NormalizeRequiredText(bucket.Region, nameof(bucket.Region)).ToLowerInvariant();
+        var period = NormalizeRequiredText(bucket.Period, nameof(bucket.Period)).ToLowerInvariant();
+
+        if (period != "day")
+        {
+            throw new ArgumentException("Aggregate token timeline bucket period is not supported.", nameof(bucket));
+        }
+
+        if (bucket.TokenBurn is < 0)
+        {
+            throw new ArgumentException("Aggregate token timeline bucket token burn must be non-negative.", nameof(bucket));
+        }
+
+        if (bucket.MovingAverageTokenBurn.HasValue &&
+            (double.IsNaN(bucket.MovingAverageTokenBurn.Value) ||
+                double.IsInfinity(bucket.MovingAverageTokenBurn.Value) ||
+                bucket.MovingAverageTokenBurn.Value < 0))
+        {
+            throw new ArgumentException("Aggregate token timeline bucket moving average must be finite and non-negative.", nameof(bucket));
+        }
+
+        if (ContainsSensitiveFragment(slug) ||
+            ContainsSensitiveFragment(environment) ||
+            ContainsSensitiveFragment(region) ||
+            !IsSafeResourceId(slug) ||
+            !IsSafeResourceId(environment) ||
+            !IsSafeResourceId(region))
+        {
+            throw new ArgumentException("Aggregate token timeline bucket labels are not allowed.", nameof(bucket));
+        }
+
+        return bucket with
+        {
+            CustomerOrganizationSlug = slug,
+            Environment = environment,
+            Region = region,
+            Period = period
+        };
+    }
+
+    private static void ValidateAggregateTokenTimelineQuery(AggregateTokenTimelineQuery query)
+    {
+        if (query.EndDateUtc < query.StartDateUtc)
+        {
+            throw new ArgumentException("Aggregate token timeline end date must be on or after start date.", nameof(query));
+        }
+
+        if (query.MovingAverageWindowDays is < 1 or > 90)
+        {
+            throw new ArgumentException("Moving average window must be between 1 and 90 days.", nameof(query));
+        }
+    }
+
+    private static string NormalizeAggregateEnvironment(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName).ToLowerInvariant();
+
+        return normalized is "dv" or "qa" or "pp" or "pd"
+            ? normalized
+            : throw new ArgumentException("Aggregate environment is not supported.", parameterName);
+    }
+
     private static string NormalizeAggregateMetricName(string value, string parameterName)
     {
         var normalized = NormalizeRequiredText(value, parameterName);
 
-        return normalized is "tokenobs_tokens_total" or "tokenobs_sessions_started_total" or "tokenobs_token_metric_states_total"
+        return normalized is "tokenobs_tokens_total" or
+                "tokenobs_sessions_started_total" or
+                "tokenobs_token_metric_states_total" or
+                "tokenobs_model_invocations_total" or
+                "tokenobs_turns_total"
             ? normalized
             : throw new ArgumentException("Aggregate metric name is not supported.", parameterName);
     }
@@ -2281,7 +2426,7 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
     {
         var normalized = NormalizeRequiredText(value, parameterName);
 
-        return normalized is "tokens" or "sessions" or "observations"
+        return normalized is "tokens" or "sessions" or "observations" or "invocations" or "turns"
             ? normalized
             : throw new ArgumentException("Aggregate metric unit is not supported.", parameterName);
     }
@@ -2354,6 +2499,8 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         return metricName switch
         {
             "tokenobs_tokens_total" or "tokenobs_token_metric_states_total" => label is "model_provider" or "model" or "token_type" or "metric_status" or "metric_confidence",
+            "tokenobs_model_invocations_total" => label is "model_provider" or "model" or "result",
+            "tokenobs_turns_total" => label is "result",
             "tokenobs_sessions_started_total" => false,
             _ => false
         };

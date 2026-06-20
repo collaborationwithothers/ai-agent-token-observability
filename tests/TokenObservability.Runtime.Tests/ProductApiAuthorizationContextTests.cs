@@ -708,6 +708,235 @@ public sealed class ProductApiAuthorizationContextTests
     }
 
     [Fact]
+    public async Task OverviewTokenTimelineRouteReturnsAuthorizedDenseTenantBuckets()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var contoso = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var fabrikam = await CreateTenantAsync(store, "fabrikam", "fabrikam-tenant");
+        var viewerClaims = CreateClaims(subject: "viewer-subject", groupObjectIds: ["viewer-group"]);
+        var viewer = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            contoso.Organization.CustomerOrganizationId,
+            contoso.IdentityTenant.IdentityTenantId,
+            viewerClaims);
+        await SeedRoleMappingAsync(
+            store,
+            contoso,
+            viewer.ProductUserId,
+            "viewer-group",
+            ProductRole.ReadOnlyViewer);
+        var contosoCredential = await IssueCredentialAsync(store, contoso, "profile-contoso-codex");
+        var fabrikamCredential = await IssueCredentialAsync(store, fabrikam, "profile-fabrikam-codex");
+        await SeedTokenSessionAsync(
+            store,
+            contosoCredential.Credential,
+            "contoso-timeline-001",
+            new DateTimeOffset(2026, 6, 10, 9, 0, 0, TimeSpan.Zero),
+            [
+                (TokenMetricName.InputTokens, 10, TokenMetricStatus.Observed, TokenMetricConfidence.Observed, "invocation-001"),
+                (TokenMetricName.OutputTokens, 20, TokenMetricStatus.Estimated, TokenMetricConfidence.Estimated, "invocation-001")
+            ]);
+        await SeedTokenSessionAsync(
+            store,
+            contosoCredential.Credential,
+            "contoso-timeline-002",
+            new DateTimeOffset(2026, 6, 12, 9, 0, 0, TimeSpan.Zero),
+            [
+                (TokenMetricName.InputTokens, null, TokenMetricStatus.Unavailable, TokenMetricConfidence.Unavailable, null)
+            ]);
+        await SeedTokenSessionAsync(
+            store,
+            fabrikamCredential.Credential,
+            "fabrikam-timeline-001",
+            new DateTimeOffset(2026, 6, 10, 9, 0, 0, TimeSpan.Zero),
+            [
+                (TokenMetricName.InputTokens, 999, TokenMetricStatus.Observed, TokenMetricConfidence.Observed, null)
+            ]);
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+        using var request = CreateAuthorizedRequest(
+            HttpMethod.Get,
+            "/api/v1/overview/token-timeline?from=2026-06-10&to=2026-06-12&movingAverageWindowDays=2",
+            "contoso",
+            viewerClaims);
+
+        using var response = await client.SendAsync(request);
+
+        response.EnsureSuccessStatusCode();
+        using var body = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
+        var items = body.RootElement.GetProperty("items").EnumerateArray().ToArray();
+        Assert.Collection(
+            items,
+            item =>
+            {
+                Assert.Equal("2026-06-10", item.GetProperty("bucketDateUtc").GetString());
+                Assert.Equal(30, item.GetProperty("tokenBurn").GetInt64());
+                Assert.Equal("mixed", item.GetProperty("metricStatus").GetString());
+                Assert.Equal(30, item.GetProperty("movingAverageTokenBurn").GetDouble());
+                Assert.False(item.GetProperty("isDenseZeroBurn").GetBoolean());
+            },
+            item =>
+            {
+                Assert.Equal("2026-06-11", item.GetProperty("bucketDateUtc").GetString());
+                Assert.Equal(0, item.GetProperty("tokenBurn").GetInt64());
+                Assert.Equal("not_applicable", item.GetProperty("metricStatus").GetString());
+                Assert.Equal(15, item.GetProperty("movingAverageTokenBurn").GetDouble());
+                Assert.True(item.GetProperty("isDenseZeroBurn").GetBoolean());
+            },
+            item =>
+            {
+                Assert.Equal("2026-06-12", item.GetProperty("bucketDateUtc").GetString());
+                Assert.Equal(JsonValueKind.Null, item.GetProperty("tokenBurn").ValueKind);
+                Assert.Equal("unavailable", item.GetProperty("metricStatus").GetString());
+                Assert.Equal(0, item.GetProperty("movingAverageTokenBurn").GetDouble());
+                Assert.False(item.GetProperty("isDenseZeroBurn").GetBoolean());
+            });
+        var json = body.RootElement.ToString();
+        Assert.DoesNotContain("999", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("sessionId", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("productUserId", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("credential", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("traceId", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("prompt", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("commandOutput", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("toolResult", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task OverviewTokenTimelineRouteRejectsInvalidRangeAndUnauthorizedCaller()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var unmappedClaims = CreateClaims(subject: "unmapped-subject", groupObjectIds: ["unmapped-group"]);
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+        using var unauthorizedRequest = CreateAuthorizedRequest(
+            HttpMethod.Get,
+            "/api/v1/overview/token-timeline?from=2026-06-10&to=2026-06-12&movingAverageWindowDays=2",
+            "contoso",
+            unmappedClaims);
+
+        using var unauthorizedResponse = await client.SendAsync(unauthorizedRequest);
+
+        Assert.Equal(HttpStatusCode.Forbidden, unauthorizedResponse.StatusCode);
+        await AssertProblemCodeAsync(unauthorizedResponse, "authorization_denied");
+
+        var adminClaims = CreateClaims(subject: "admin-subject", groupObjectIds: ["admin-group"]);
+        var admin = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            adminClaims);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            admin.ProductUserId,
+            "admin-group",
+            ProductRole.PlatformAdmin);
+        using var invalidRequest = CreateAuthorizedRequest(
+            HttpMethod.Get,
+            "/api/v1/overview/token-timeline?from=2026-06-12&to=2026-06-10&movingAverageWindowDays=2",
+            "contoso",
+            adminClaims);
+
+        using var invalidResponse = await client.SendAsync(invalidRequest);
+
+        Assert.Equal(HttpStatusCode.BadRequest, invalidResponse.StatusCode);
+        await AssertProblemCodeAsync(invalidResponse, "invalid_token_timeline_query");
+    }
+
+    [Fact]
+    public async Task GrafanaDrilldownGateAllowsOnlyAggregateFiltersAfterAuthorization()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var adminClaims = CreateClaims(subject: "admin-subject", groupObjectIds: ["admin-group"]);
+        var viewerClaims = CreateClaims(subject: "viewer-subject", groupObjectIds: ["viewer-group"]);
+        var developerClaims = CreateClaims(subject: "developer-subject", groupObjectIds: ["developer-group"]);
+        var admin = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            adminClaims);
+        var viewer = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            viewerClaims);
+        var developer = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            developerClaims);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            admin.ProductUserId,
+            "admin-group",
+            ProductRole.PlatformAdmin);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            viewer.ProductUserId,
+            "viewer-group",
+            ProductRole.ReadOnlyViewer);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            developer.ProductUserId,
+            "developer-group",
+            ProductRole.Developer,
+            ProductScopeKind.Self);
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+        using var allowedRequest = CreateAuthorizedRequest(
+            HttpMethod.Get,
+            "/api/v1/grafana/drilldown?route=/overview&from=2026-06-10&to=2026-06-12&environment=dv&region=eastus2&harness=codex&model=gpt-5&modelProvider=openai",
+            "contoso",
+            viewerClaims);
+
+        using var allowedResponse = await client.SendAsync(allowedRequest);
+
+        allowedResponse.EnsureSuccessStatusCode();
+        using var allowedBody = await JsonDocument.ParseAsync(await allowedResponse.Content.ReadAsStreamAsync());
+        Assert.Equal("/overview", allowedBody.RootElement.GetProperty("route").GetString());
+        var filters = allowedBody.RootElement.GetProperty("filters");
+        Assert.Equal("dv", filters.GetProperty("environment").GetString());
+        Assert.Equal("openai", filters.GetProperty("modelProvider").GetString());
+        Assert.DoesNotContain("sessionId", allowedBody.RootElement.ToString(), StringComparison.OrdinalIgnoreCase);
+
+        using var forbiddenParameterRequest = CreateAuthorizedRequest(
+            HttpMethod.Get,
+            "/api/v1/grafana/drilldown?route=/overview&from=2026-06-10&sessionId=session-001",
+            "contoso",
+            adminClaims);
+        using var forbiddenParameterResponse = await client.SendAsync(forbiddenParameterRequest);
+        Assert.Equal(HttpStatusCode.BadRequest, forbiddenParameterResponse.StatusCode);
+        await AssertProblemCodeAsync(forbiddenParameterResponse, "invalid_grafana_drilldown_filter");
+
+        using var absoluteRouteRequest = CreateAuthorizedRequest(
+            HttpMethod.Get,
+            "/api/v1/grafana/drilldown?route=https://example.test/overview&from=2026-06-10",
+            "contoso",
+            adminClaims);
+        using var absoluteRouteResponse = await client.SendAsync(absoluteRouteRequest);
+        Assert.Equal(HttpStatusCode.BadRequest, absoluteRouteResponse.StatusCode);
+        await AssertProblemCodeAsync(absoluteRouteResponse, "invalid_grafana_drilldown_filter");
+
+        using var sessionsRouteRequest = CreateAuthorizedRequest(
+            HttpMethod.Get,
+            "/api/v1/grafana/drilldown?route=/sessions&from=2026-06-10",
+            "contoso",
+            viewerClaims);
+        using var sessionsRouteResponse = await client.SendAsync(sessionsRouteRequest);
+        Assert.Equal(HttpStatusCode.Forbidden, sessionsRouteResponse.StatusCode);
+        await AssertProblemCodeAsync(sessionsRouteResponse, "authorization_denied");
+
+        using var selfSessionsRouteRequest = CreateAuthorizedRequest(
+            HttpMethod.Get,
+            "/api/v1/grafana/drilldown?route=/sessions&from=2026-06-10",
+            "contoso",
+            developerClaims);
+        using var selfSessionsRouteResponse = await client.SendAsync(selfSessionsRouteRequest);
+        selfSessionsRouteResponse.EnsureSuccessStatusCode();
+    }
+
+    [Fact]
     public async Task IngestionRejectionsRouteRejectsUnauthorizedCaller()
     {
         var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
@@ -1108,6 +1337,96 @@ public sealed class ProductApiAuthorizationContextTests
             TokenMetricConfidence.Unavailable,
             TokenObservationSourceKind.Missing,
             envelope.TelemetryEnvelopeId));
+    }
+
+    private static async Task SeedTokenSessionAsync(
+        InMemoryTenantMetadataStore store,
+        ScopedIngestionCredential credential,
+        string providerSessionId,
+        DateTimeOffset sourceEventTimestampUtc,
+        IReadOnlyList<(TokenMetricName MetricName, long? Value, TokenMetricStatus Status, TokenMetricConfidence Confidence, string? ModelInvocationId)> observations)
+    {
+        var providerSessionIdHash = ComputeSha256Hex(providerSessionId);
+        var envelope = await store.RecordTelemetryEnvelopeAsync(new CreateTelemetryEnvelopeRecordRequest(
+            CustomerOrganizationId: credential.CustomerOrganizationId,
+            HarnessSetupProfileId: credential.HarnessSetupProfileId,
+            ScopedIngestionCredentialId: credential.ScopedIngestionCredentialId,
+            ProductUserId: credential.ProductUserId,
+            Harness: "codex-cli",
+            SchemaVersion: "2026-06-01",
+            SignalType: "metric",
+            SourceEventName: "codex.api_request",
+            SourceEventTimestampUtc: sourceEventTimestampUtc,
+            ConversationIdHash: providerSessionIdHash,
+            TurnIdHash: ComputeSha256Hex($"{providerSessionId}-turn"),
+            SourceEventId: null,
+            TraceIdHash: null,
+            SpanIdHash: null,
+            ModelName: "gpt-5",
+            HarnessVersion: null,
+            SandboxSetting: null,
+            ApprovalSetting: null,
+            RepositoryEvidenceState: "unavailable",
+            ContentPolicyDecision: "metadata_only",
+            ContentCaptureState: "metadata_only",
+            RedactionState: "not_required",
+            RoutingDecision: new Dictionary<string, string>
+            {
+                ["result"] = "accepted",
+                ["metadata_store"] = "postgresql",
+                ["diagnostic_store"] = "not_applicable",
+                ["metrics_store"] = "azure_monitor_workspace",
+                ["content_capture"] = "metadata_only"
+            },
+            EvidenceState: "observed",
+            MetricState: observations.Any(observation => observation.Value is null) ? "unavailable" : "observed",
+            MetricStatus: observations.Any(observation => observation.Status != TokenMetricStatus.Observed)
+                ? TokenMetricStatus.Mixed
+                : TokenMetricStatus.Observed,
+            MetricConfidence: observations.Any(observation => observation.Confidence != TokenMetricConfidence.Observed)
+                ? TokenMetricConfidence.Estimated
+                : TokenMetricConfidence.Observed,
+            SourceEvidenceKind: "harness_emitted",
+            CorrelationId: $"correlation-{providerSessionId}",
+            DedupeKeyHash: ComputeSha256Hex($"dedupe-{providerSessionId}"),
+            IngestionVersionMetadata: new Dictionary<string, string>
+            {
+                ["schema_version"] = "2026-06-01",
+                ["harness_version"] = "unavailable",
+                ["contract_version"] = "2026-06-01"
+            }));
+        var session = await store.UpsertAgentSessionAsync(new CreateAgentSessionRecordRequest(
+            CustomerOrganizationId: credential.CustomerOrganizationId,
+            ProductUserId: credential.ProductUserId,
+            HarnessSetupProfileId: credential.HarnessSetupProfileId,
+            Harness: credential.AllowedHarness,
+            ProviderSessionIdHash: providerSessionIdHash,
+            StartedAtUtc: sourceEventTimestampUtc,
+            EndedAtUtc: null,
+            SessionStatus: AgentSessionStatus.Active,
+            RepositoryEvidenceState: RepositoryEvidenceState.Unavailable,
+            ContentCaptureSummary: ContentCaptureSummary.MetadataOnly,
+            RecommendationStatus: RecommendationStatus.NotStarted,
+            TokenMetricStatus: observations.Any(observation => observation.Status != TokenMetricStatus.Observed)
+                ? TokenMetricStatus.Mixed
+                : TokenMetricStatus.Observed,
+            TokenMetricConfidence: observations.Any(observation => observation.Confidence != TokenMetricConfidence.Observed)
+                ? TokenMetricConfidence.Estimated
+                : TokenMetricConfidence.Observed));
+
+        foreach (var observation in observations)
+        {
+            await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+                credential.CustomerOrganizationId,
+                session.AgentSessionId,
+                observation.ModelInvocationId,
+                observation.MetricName,
+                observation.Value,
+                observation.Status,
+                observation.Confidence,
+                observation.Value.HasValue ? TokenObservationSourceKind.CodexEvent : TokenObservationSourceKind.Missing,
+                envelope.TelemetryEnvelopeId));
+        }
     }
 
     private static Task<GovernanceAuditEvent> RecordRejectionAuditEventAsync(

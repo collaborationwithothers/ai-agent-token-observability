@@ -42,6 +42,26 @@ public sealed record CreateAggregateMetricPointRecordRequest(
     string Unit,
     IReadOnlyDictionary<string, string> Labels);
 
+public sealed record AggregateTokenTimelineQuery(
+    DateOnly StartDateUtc,
+    DateOnly EndDateUtc,
+    int MovingAverageWindowDays);
+
+public sealed record AggregateTokenTimelineBucket(
+    CustomerOrganizationId CustomerOrganizationId,
+    string CustomerOrganizationSlug,
+    string Environment,
+    string Region,
+    DateOnly BucketDateUtc,
+    string Period,
+    long? TokenBurn,
+    TokenMetricStatus MetricStatus,
+    TokenMetricConfidence MetricConfidence,
+    double? MovingAverageTokenBurn,
+    int MovingAverageWindowDays,
+    bool IsDenseZeroBurn,
+    DateTimeOffset CalculatedAtUtc);
+
 public sealed record AggregateMetricExportFailureRecord(
     AggregateMetricExportFailureId AggregateMetricExportFailureId,
     CustomerOrganizationId CustomerOrganizationId,
