@@ -112,8 +112,8 @@ terraform validate
 Remote plan flow:
 
 ```bash
-terraform init
-terraform workspace select "$TF_WORKSPACE" || terraform workspace new "$TF_WORKSPACE"
+TF_WORKSPACE=default terraform init
+env -u TF_WORKSPACE terraform workspace select "$TF_WORKSPACE" || env -u TF_WORKSPACE terraform workspace new "$TF_WORKSPACE"
 terraform validate
 terraform plan -out "$PLAN_FILE"
 ```

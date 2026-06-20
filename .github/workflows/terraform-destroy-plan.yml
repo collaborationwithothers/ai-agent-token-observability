@@ -148,7 +148,7 @@ jobs:
             test -d "${stage_dir}"
             cp "${stage_dir}/backend.azurerm.tf.example" "${stage_dir}/backend.generated.tf"
 
-            terraform -chdir="${stage_dir}" init -input=false \
+            TF_WORKSPACE=default terraform -chdir="${stage_dir}" init -input=false \
               -backend-config="resource_group_name=${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}" \
               -backend-config="storage_account_name=${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}" \
               -backend-config="container_name=${{ vars.TF_STATE_CONTAINER_NAME }}" \
@@ -309,7 +309,7 @@ jobs:
             test -f "${DESTROY_PLAN_FILE}"
             cp "${STAGE_DIR}/backend.azurerm.tf.example" "${STAGE_DIR}/backend.generated.tf"
 
-            terraform -chdir="${STAGE_DIR}" init -input=false \
+            TF_WORKSPACE=default terraform -chdir="${STAGE_DIR}" init -input=false \
               -backend-config="resource_group_name=${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}" \
               -backend-config="storage_account_name=${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}" \
               -backend-config="container_name=${{ vars.TF_STATE_CONTAINER_NAME }}" \
