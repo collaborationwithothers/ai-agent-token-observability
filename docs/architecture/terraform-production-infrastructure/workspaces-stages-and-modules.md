@@ -145,7 +145,7 @@ Required stages:
 | 3 | Data platform | `stages/data_platform` | PostgreSQL Flexible Server, product Blob Storage, backup and lifecycle settings |
 | 4 | AI services | `stages/ai_services` | Azure AI Language, Azure AI Content Safety, Azure OpenAI or Foundry resources, deployment aliases, and diagnostics |
 | 5 | App runtime | `stages/app_runtime` | Container Apps environment, Product API, Product Ingestion Endpoint, Product Dashboard, Container Apps Jobs, managed identities, app configuration |
-| 6 | Managed Grafana | `stages/managed_grafana` | Azure Managed Grafana workspace, data source wiring, repo-versioned dashboard JSON deployment, Grafana folders, Grafana role integration |
+| 6 | Managed Grafana | `stages/managed_grafana` | Azure Managed Grafana workspace and aggregate-only Azure Monitor workspace data source wiring. Dashboard JSON deployment, Grafana folders, Grafana RBAC, provider authentication proof gates, and Product Dashboard links are follow-up work. |
 | 7 | Edge | `stages/edge` | Azure Front Door Premium, WAF policy, routes, managed certificates, custom domains, rate-limit rules where supported |
 
 Stage dependency flow:
@@ -165,7 +165,7 @@ manual_remote_state
 Notes:
 
 - `edge` is last because it binds public routes to deployed app origins.
-- `managed_grafana` is after app runtime so dashboard links and identity assignments can reference runtime resources.
+- `managed_grafana` is after app runtime in the stage order, but the #62 implementation only consumes aggregate metrics outputs from `observability_foundation`.
 - `ai_services` is before app runtime because recommendation jobs need endpoint and identity configuration.
 - `observability_foundation` is before app runtime because Container Apps and jobs need diagnostic destinations.
 
@@ -240,7 +240,7 @@ Module rules:
 | PostgreSQL Flexible Server | AVM wrapper if available | AzureRM |
 | Azure Container Apps managed environment | AVM wrapper if available | AzureRM |
 | Azure Container Apps and jobs | AVM wrapper if available | AzureRM |
-| Azure Managed Grafana | AVM wrapper if available | AzureRM or AzAPI |
+| Azure Managed Grafana | AVM wrapper if available | AzureRM wrapper for the workspace, Azure Monitor workspace integration, and workspace-scoped `Monitoring Data Reader` role assignment. AzAPI only if a later unsupported feature requires it. |
 | Azure Front Door and WAF | AVM wrapper if available | AzureRM |
 | Azure AI Language | AzureRM if supported | AzAPI |
 | Azure AI Content Safety | AzureRM if supported | AzAPI |
@@ -279,33 +279,27 @@ Edge and origin evidence validation:
 - `use_front_door_managed_certificates` must be true for first-release hostnames unless a later ADR reopens the certificate decision.
 - App runtime and edge stages must expose a proof command or test showing Front Door access succeeds against generated ACA FQDN origins.
 
-Managed Grafana stage variables:
+Managed Grafana stage variables for #62 workspace and aggregate data source wiring:
 
 | Variable | Required | Notes |
 | --- | --- | --- |
-| `grafana_admin_group_object_id` | Yes | Microsoft Entra group object ID for Grafana Admin |
-| `grafana_editor_group_object_id` | Environment-specific | Microsoft Entra group object ID for Grafana Editor |
-| `grafana_viewer_group_object_id` | Yes | Microsoft Entra group object ID for Grafana Viewer |
-| `allow_production_grafana_editors` | Yes | Defaults false; explicit exception gate for `pp` or `pd` Editor assignment |
-| `grafana_provider_auth_mode` | Yes | Defaults `entra_oidc`; `service_account_token` only after provider proof failure |
-| `allow_grafana_service_account_fallback` | Yes | Defaults false; explicit gate for Grafana service account token fallback |
-| `grafana_service_account_token_secret_name` | Fallback only | Key Vault secret name for Grafana service account token when fallback is approved |
+| `observability_resource_group_name` | Yes | Resource group name exported by `observability_foundation` |
+| `observability_resource_group_id` | Yes | Resource group ID exported by `observability_foundation.resource_group_ids.observability` |
+| `metrics_data_source_identifiers` | Yes | Must include `aggregate_metrics` from `observability_foundation` |
+| `grafana_workspace_name` | Optional | Deterministic native Azure Managed Grafana workspace name override |
+| `grafana_major_version` | Optional | Defaults to `12` |
+| `grafana_public_network_access_enabled` | Optional | Defaults to `true` for the native first-release endpoint |
+| `grafana_sku_size` | Optional | Defaults to `X1` |
 
-Managed Grafana role-assignment validation:
+Managed Grafana aggregate data-source validation:
 
-- Use Microsoft Entra group object IDs, not display names, for Grafana role assignments.
-- `grafana_viewer_group_object_id` must be set for every workspace.
-- `grafana_admin_group_object_id` must be set for every workspace and must point to a small break-glass or platform operations group.
-- `grafana_editor_group_object_id` may be set in `dv` and `qa`.
-- In `pp` and `pd`, `grafana_editor_group_object_id` must be null or empty unless `allow_production_grafana_editors = true`.
-- `allow_production_grafana_editors` must default to `false`.
-- Terraform validation or precondition checks must fail before apply when `environment` is `pp` or `pd`, `grafana_editor_group_object_id` is set, and `allow_production_grafana_editors` is false.
-- GitHub environment protection must be used for a `pd` apply where `allow_production_grafana_editors = true`.
-- `grafana_provider_auth_mode` must default to `entra_oidc`.
-- `grafana_provider_auth_mode = service_account_token` must fail unless `allow_grafana_service_account_fallback = true`.
-- `allow_grafana_service_account_fallback` must default to `false`.
-- Service account fallback must require a documented non-production proof that Entra OIDC is incompatible with the selected Grafana provider path.
-- Service account fallback tokens must be read from Key Vault at workflow runtime and must not be output from Terraform.
+- `metrics_data_source_identifiers.aggregate_metrics.type` must be `azure_monitor_workspace`.
+- `metrics_data_source_identifiers.aggregate_metrics.boundary` must be `aggregate_metrics_only`.
+- `metrics_data_source_identifiers.aggregate_metrics.consumer_stages` must include `managed_grafana`.
+- The Grafana managed identity receives `Monitoring Data Reader` at the Azure Monitor workspace resource ID scope only.
+- The first #62 implementation must not add Grafana provider resources, dashboard JSON, folders, user/group RBAC, service accounts, API keys, private endpoints, custom DNS, Log Analytics data sources, Application Insights data sources, raw session data sources, raw content sources, or developer ranking panels.
+
+Managed Grafana follow-up variables for dashboard deployment, Grafana RBAC, provider authentication proof gates, and Product Dashboard links are intentionally deferred out of #62. Later issues must define their own variable contracts before adding those surfaces.
 
 Environment-specific defaults:
 

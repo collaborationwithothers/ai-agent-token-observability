@@ -37,6 +37,8 @@ Excluded from first-release Grafana:
 
 If Log Analytics or Application Insights is added later, it must be limited to aggregate operational panels. It must not expose raw session content, developer ranking, content review, or recommendation evidence packets in Grafana.
 
+The #62 Terraform implementation provisions only the Azure Managed Grafana workspace and Azure Monitor workspace integration. It grants the Grafana managed identity `Monitoring Data Reader` on the Azure Monitor workspace resource ID exported by `observability_foundation.metrics_data_source_identifiers.aggregate_metrics`. Dashboard JSON, Grafana folders, Grafana user RBAC, Grafana provider authentication proof gates, service account fallback, Product Dashboard links, private endpoints, and custom DNS are follow-up work.
+
 ## Dashboard Boundary
 
 Managed Grafana may show:
@@ -236,6 +238,8 @@ Rules:
 
 ## Grafana RBAC Decision
 
+This section defines a later dashboard/RBAC implementation boundary. It is not part of issue #62, which only creates the workspace and aggregate data source wiring.
+
 Managed Grafana uses coarse-grained RBAC for the Azure Production MVP.
 
 The first release maps Microsoft Entra groups to Azure Managed Grafana built-in roles only:
@@ -292,6 +296,8 @@ Rules:
 - Service account fallback must not be enabled in `pp` or `pd` until a non-production provider compatibility proof records why Entra OIDC failed.
 
 ## Provisioning Decision
+
+Issue #62 implements only the Azure Managed Grafana workspace and aggregate Azure Monitor workspace data source wiring. The dashboard, folder, RBAC, provider authentication, and service account fallback rules below apply to follow-up implementation issues.
 
 Managed Grafana provisioning is Terraform-managed for the Azure Production MVP.
 
