@@ -803,9 +803,24 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
             nameof(request.HarnessSetupProfileId));
         var sessionId = NormalizeRequiredText(request.SessionId, nameof(request.SessionId));
         var telemetryReference = NormalizeRequiredText(request.TelemetryReference, nameof(request.TelemetryReference));
+        var redactionDecisionReason = NormalizeOptionalSafeLabel(
+            request.RedactionDecisionReason,
+            nameof(request.RedactionDecisionReason));
+        var redactionPipelineVersion = NormalizeOptionalSafeLabel(
+            request.RedactionPipelineVersion,
+            nameof(request.RedactionPipelineVersion));
+        var productRuleVersion = NormalizeOptionalSafeLabel(
+            request.ProductRuleVersion,
+            nameof(request.ProductRuleVersion));
+        var redactionFindings = NormalizeRedactionFindings(request.RedactionFindings);
         RejectSensitiveText(policyVersionId);
         RejectSensitiveText(sessionId);
         RejectSensitiveText(telemetryReference);
+        if (redactionDecisionReason is not null)
+        {
+            RejectSensitiveText(redactionDecisionReason);
+        }
+
         var now = clock.UtcNow.ToUniversalTime();
 
         lock (gate)
@@ -830,7 +845,12 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
                 request.RedactionStatus,
                 request.RetentionClass,
                 request.RecommendationUse,
-                now);
+                now,
+                request.RedactionOutcome,
+                redactionDecisionReason,
+                redactionPipelineVersion,
+                productRuleVersion,
+                redactionFindings);
 
             contentCandidateMetadata.Add(metadata.ContentCandidateMetadataId, metadata);
             return Task.FromResult(metadata);
@@ -2262,6 +2282,42 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
                 character is '-' or '_' or '.' or ':' or '/')
             ? normalized
             : throw new ArgumentException("Model name is not allowed.", parameterName);
+    }
+
+    private static IReadOnlyList<ContentRedactionFinding> NormalizeRedactionFindings(
+        IReadOnlyList<ContentRedactionFinding>? findings)
+    {
+        if (findings is null || findings.Count == 0)
+        {
+            return [];
+        }
+
+        return findings
+            .Select(finding =>
+            {
+                if (finding.ConfidenceScore is < 0 or > 1)
+                {
+                    throw new ArgumentException("Redaction finding confidence is out of range.", nameof(findings));
+                }
+
+                return new ContentRedactionFinding(
+                    NormalizeRequiredSafeMetadataLabel(finding.Stage, nameof(findings)),
+                    NormalizeRequiredSafeMetadataLabel(finding.Kind, nameof(findings)),
+                    NormalizeRequiredSafeMetadataLabel(finding.Category, nameof(findings)),
+                    finding.ConfidenceScore,
+                    NormalizeOptionalSafeLabel(finding.ApiVersion, nameof(findings)),
+                    NormalizeOptionalSafeLabel(finding.ModelVersion, nameof(findings)));
+            })
+            .ToArray();
+    }
+
+    private static string NormalizeRequiredSafeMetadataLabel(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+        return normalized.Length <= 128 &&
+            IsSafeResourceId(normalized)
+            ? normalized
+            : throw new ArgumentException("Required metadata label is not allowed.", parameterName);
     }
 
     private static string NormalizeEvidenceState(string value, string parameterName)

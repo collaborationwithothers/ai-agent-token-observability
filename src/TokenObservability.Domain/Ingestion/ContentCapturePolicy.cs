@@ -70,7 +70,12 @@ public sealed record ContentCandidateMetadata(
     ContentRedactionStatus RedactionStatus,
     ContentRetentionClass RetentionClass,
     RecommendationUse RecommendationUse,
-    DateTimeOffset CreatedAtUtc);
+    DateTimeOffset CreatedAtUtc,
+    ContentRedactionOutcome? RedactionOutcome = null,
+    string? RedactionDecisionReason = null,
+    string? RedactionPipelineVersion = null,
+    string? ProductRuleVersion = null,
+    IReadOnlyList<ContentRedactionFinding>? RedactionFindings = null);
 
 public sealed record CreateContentCandidateMetadataRequest(
     CustomerOrganizationId CustomerOrganizationId,
@@ -85,7 +90,12 @@ public sealed record CreateContentCandidateMetadataRequest(
     ContentCandidateEvidenceState EvidenceState,
     ContentRedactionStatus RedactionStatus,
     ContentRetentionClass RetentionClass,
-    RecommendationUse RecommendationUse);
+    RecommendationUse RecommendationUse,
+    ContentRedactionOutcome? RedactionOutcome = null,
+    string? RedactionDecisionReason = null,
+    string? RedactionPipelineVersion = null,
+    string? ProductRuleVersion = null,
+    IReadOnlyList<ContentRedactionFinding>? RedactionFindings = null);
 
 public sealed record CreateContentCandidateExtractionFailureRequest(
     CustomerOrganizationId CustomerOrganizationId,
@@ -126,6 +136,7 @@ public enum ContentCandidateEvidenceState
     PolicyHidden,
     RedactionRequired,
     RedactionFailed,
+    ReviewRequired,
     CapturedMetadataOnly
 }
 

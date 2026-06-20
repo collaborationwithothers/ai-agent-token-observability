@@ -1181,6 +1181,98 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
     }
 
     [Fact]
+    public async Task CodexOtlpEndpointRunsRedactionForAllowedCandidateBeforeStorage()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store);
+        var issued = await IssueCredentialAsync(store, seed);
+        await AllowPromptCaptureAsync(store, seed, issued, retentionClass: ContentRetentionClass.Short);
+        var pii = new EndpointPiiDetector
+        {
+            Result = new PiiDetectionResult(
+                "hello ******** from [REDACTED]",
+                [
+                    new PiiDetectionEntity(
+                        Category: "Person",
+                        ConfidenceScore: 0.91,
+                        ApiVersion: "2026-05-01",
+                        ModelVersion: "2021-01-15")
+                ])
+        };
+        var contentStore = new EndpointRedactedContentStore();
+        using var factory = CreateFactory(
+            store,
+            piiDetector: pii,
+            redactedContentStore: contentStore,
+            contentCaptureEnabledProfiles: [SetupProfileId]);
+        using var client = factory.CreateClient();
+        const string rawPrompt = "hello Ada from ghp_123456789012345678901234567890123456";
+        using var request = CreateOtlpRequest(
+            "/v1/logs",
+            issued.Secret,
+            CreateLogPayloadWithBody($"aito.content.prompt:{rawPrompt}"));
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("hello Ada from [REDACTED]", pii.Inputs.Single());
+        var metadata = Assert.Single(await store.ListContentCandidateMetadataAsync(seed.Organization.CustomerOrganizationId));
+        Assert.Equal(ContentCapturePolicyDecision.CaptureAllowed, metadata.PolicyDecision);
+        Assert.Equal(ContentCandidateEvidenceState.Candidate, metadata.EvidenceState);
+        Assert.Equal(ContentRedactionStatus.Passed, metadata.RedactionStatus);
+        Assert.Equal(ContentRedactionOutcome.Captured, metadata.RedactionOutcome);
+        Assert.Equal("redaction_passed", metadata.RedactionDecisionReason);
+        Assert.Equal("content-redaction-pipeline-v1", metadata.RedactionPipelineVersion);
+        Assert.Equal("product-redaction-rules-v1", metadata.ProductRuleVersion);
+        Assert.NotNull(metadata.RedactionFindings);
+        Assert.Contains(metadata.RedactionFindings, finding => finding.Stage == "azure_ai_language_pii" && finding.Category == "Person");
+        Assert.Equal("hello ******** from [REDACTED]", contentStore.StoredDecisions.Single().RedactedText);
+        Assert.DoesNotContain(rawPrompt, metadata.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task CodexOtlpEndpointRecordsReviewRequiredMetadataWithoutWritingContent()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store);
+        var issued = await IssueCredentialAsync(store, seed);
+        await AllowPromptCaptureAsync(store, seed, issued, retentionClass: ContentRetentionClass.Short);
+        var contentStore = new EndpointRedactedContentStore();
+        using var factory = CreateFactory(
+            store,
+            piiDetector: new EndpointPiiDetector
+            {
+                Result = new PiiDetectionResult(
+                    "hello ********",
+                    [
+                        new PiiDetectionEntity(
+                            Category: "Person",
+                            ConfidenceScore: 0.65,
+                            ApiVersion: "2026-05-01",
+                            ModelVersion: "2021-01-15")
+                    ])
+            },
+            redactedContentStore: contentStore,
+            contentCaptureEnabledProfiles: [SetupProfileId]);
+        using var client = factory.CreateClient();
+        using var request = CreateOtlpRequest(
+            "/v1/logs",
+            issued.Secret,
+            CreateLogPayloadWithBody("aito.content.prompt:hello Ada"));
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Empty(contentStore.StoredDecisions);
+        var metadata = Assert.Single(await store.ListContentCandidateMetadataAsync(seed.Organization.CustomerOrganizationId));
+        Assert.Equal(ContentCapturePolicyDecision.CaptureAllowed, metadata.PolicyDecision);
+        Assert.Equal(ContentRedactionStatus.ReviewRequired, metadata.RedactionStatus);
+        Assert.Equal(ContentRedactionOutcome.ReviewRequired, metadata.RedactionOutcome);
+        Assert.Equal("pii_low_confidence", metadata.RedactionDecisionReason);
+        Assert.DoesNotContain("hello Ada", metadata.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task CodexOtlpEndpointRecordsExtractionFailureMetadataWithoutRawContent()
     {
         var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
@@ -1926,7 +2018,11 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
         InMemoryTenantMetadataStore store,
         IIngestionDiagnosticSink? diagnosticSink = null,
         string? endpointRegion = null,
-        string? azureMonitorConnectionString = null)
+        string? azureMonitorConnectionString = null,
+        IAzurePiiDetector? piiDetector = null,
+        IAzureContentSafetyClassifier? contentSafetyClassifier = null,
+        IRedactedContentStore? redactedContentStore = null,
+        IReadOnlyList<string>? contentCaptureEnabledProfiles = null)
     {
         return new WebApplicationFactory<TokenObservabilityIngestionAssemblyMarker>()
             .WithWebHostBuilder(builder =>
@@ -1941,6 +2037,11 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
                     builder.UseSetting("APPLICATIONINSIGHTS_CONNECTION_STRING", azureMonitorConnectionString);
                 }
 
+                for (var index = 0; index < (contentCaptureEnabledProfiles?.Count ?? 0); index++)
+                {
+                    builder.UseSetting($"ProductIngestion:ContentCaptureEnabledProfiles:{index}", contentCaptureEnabledProfiles![index]);
+                }
+
                 builder.ConfigureServices(services =>
                 {
                     services.RemoveAll<InMemoryTenantMetadataStore>();
@@ -1950,6 +2051,24 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
                     {
                         services.RemoveAll<IIngestionDiagnosticSink>();
                         services.AddSingleton(diagnosticSink);
+                    }
+
+                    if (piiDetector is not null)
+                    {
+                        services.RemoveAll<IAzurePiiDetector>();
+                        services.AddSingleton(piiDetector);
+                    }
+
+                    if (contentSafetyClassifier is not null)
+                    {
+                        services.RemoveAll<IAzureContentSafetyClassifier>();
+                        services.AddSingleton(contentSafetyClassifier);
+                    }
+
+                    if (redactedContentStore is not null)
+                    {
+                        services.RemoveAll<IRedactedContentStore>();
+                        services.AddSingleton(redactedContentStore);
                     }
                 });
             });
@@ -2310,6 +2429,58 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
         foreach (var forbiddenLabel in forbiddenLabels)
         {
             Assert.False(labels.ContainsKey(forbiddenLabel), $"Aggregate label '{forbiddenLabel}' must not be emitted.");
+        }
+    }
+
+    private static Task AllowPromptCaptureAsync(
+        InMemoryTenantMetadataStore store,
+        TenantSeed seed,
+        IssuedScopedIngestionCredential issued,
+        ContentRetentionClass retentionClass)
+    {
+        return store.SetActiveContentCapturePolicyAsync(new SetActiveContentCapturePolicyRequest(
+            new ContentCapturePolicy(
+                seed.Organization.CustomerOrganizationId,
+                "content-policy-active-001",
+                CaptureEnabledByDefault: false,
+                Rules:
+                [
+                    new ContentCapturePolicyRule(
+                        AllowCapture: true,
+                        Harness: CodingAgentHarness.CodexCli,
+                        HarnessSetupProfileId: SetupProfileId,
+                        ProductUserId: issued.Credential.ProductUserId,
+                        ContentClass: ContentClass.PromptSnippet,
+                        RetentionClass: retentionClass,
+                        RecommendationUse: RecommendationUse.Disabled)
+                ]),
+            issued.Credential.ProductUserId,
+            ProductRole.PlatformAdmin,
+            CorrelationId: "content-policy-activation-001",
+            ContentCapturePolicyChangeKind.Activated));
+    }
+
+    private sealed class EndpointPiiDetector : IAzurePiiDetector
+    {
+        public List<string> Inputs { get; } = [];
+
+        public PiiDetectionResult Result { get; init; } = new(RedactedText: null, Entities: []);
+
+        public Task<PiiDetectionResult> DetectAsync(string text, CancellationToken cancellationToken)
+        {
+            Inputs.Add(text);
+            return Task.FromResult(Result);
+        }
+    }
+
+    private sealed class EndpointRedactedContentStore : IRedactedContentStore
+    {
+        public List<ContentRedactionDecision> StoredDecisions { get; } = [];
+
+        public Task StoreAsync(ContentRedactionDecision decision, CancellationToken cancellationToken)
+        {
+            StoredDecisions.Add(decision);
+            return Task.CompletedTask;
         }
     }
 
