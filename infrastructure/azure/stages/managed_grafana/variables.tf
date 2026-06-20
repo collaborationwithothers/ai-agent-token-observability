@@ -88,6 +88,48 @@ variable "grafana_workspace_name" {
   }
 }
 
+variable "grafana_admin_group_object_id" {
+  description = "Microsoft Entra group object ID assigned the Azure Managed Grafana Admin role for this environment."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.grafana_admin_group_object_id == null || can(regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", var.grafana_admin_group_object_id))
+    error_message = "grafana_admin_group_object_id must be a Microsoft Entra group object ID UUID when supplied."
+  }
+}
+
+variable "grafana_editor_group_object_id" {
+  description = "Optional Microsoft Entra group object ID assigned the Azure Managed Grafana Editor role for this environment."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.grafana_editor_group_object_id == null || can(regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", var.grafana_editor_group_object_id))
+    error_message = "grafana_editor_group_object_id must be a Microsoft Entra group object ID UUID when supplied."
+  }
+}
+
+variable "grafana_viewer_group_object_id" {
+  description = "Microsoft Entra group object ID assigned the Azure Managed Grafana Viewer role for this environment."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.grafana_viewer_group_object_id == null || can(regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", var.grafana_viewer_group_object_id))
+    error_message = "grafana_viewer_group_object_id must be a Microsoft Entra group object ID UUID when supplied."
+  }
+}
+
+variable "allow_production_grafana_editors" {
+  description = "Explicit exception gate for assigning the Azure Managed Grafana Editor role in pp or pd environments."
+  type        = bool
+  default     = false
+}
+
 variable "metrics_data_source_identifiers" {
   description = "Non-secret aggregate metrics data source identifiers from observability_foundation."
   type = map(object({

@@ -1,6 +1,6 @@
 # Managed Grafana Stage
 
-Responsibility: Azure Managed Grafana workspace provisioning, aggregate-only Azure Monitor workspace integration, and repo-versioned first-release dashboard deployment.
+Responsibility: Azure Managed Grafana workspace provisioning, aggregate-only Azure Monitor workspace integration, repo-versioned first-release dashboard deployment, and environment-scoped Grafana RBAC role assignments.
 
 Backend key: `managed_grafana.tfstate`
 
@@ -24,13 +24,24 @@ This stage deploys the `Token Observability` Grafana folder and first-release da
 
 Grafana provider connection details and authentication must be supplied through process-local provider environment variables. Do not add provider `url`, `auth`, or `http_headers` arguments to Terraform files, and do not place tokens in variables, outputs, state, dashboard JSON, repository files, or validation artifacts.
 
-Grafana user or group RBAC, Product Dashboard links, private endpoints, custom DNS, service accounts, and API keys remain separate follow-up work. Keep `api_key_enabled = false`.
+## Grafana RBAC Boundary
+
+This stage assigns Microsoft Entra groups to Azure Managed Grafana built-in roles at the workspace scope:
+
+- `grafana_admin_group_object_id` maps to `Grafana Admin` and is required in every environment.
+- `grafana_viewer_group_object_id` maps to `Grafana Viewer` and is required in every environment.
+- `grafana_editor_group_object_id` maps to `Grafana Editor` and is optional for `dv` and `qa`.
+- `allow_production_grafana_editors` defaults to `false`; `pp` or `pd` plans with an editor group fail unless this explicit exception gate is enabled.
+
+Grafana RBAC grants aggregate dashboard access only and does not authorize Product API routes. Product Dashboard roles remain separate from Grafana roles. Individual ranking and punitive dashboard use are out of scope.
+
+Product Dashboard links, private endpoints, custom DNS, service accounts, and API keys remain separate follow-up work. Keep `api_key_enabled = false`.
 
 ## Provider And AVM Choice
 
 No suitable Azure Verified Module exists for Azure Managed Grafana in the current AVM list. The local wrapper module uses AzureRM `azurerm_dashboard_grafana` and `azurerm_role_assignment`.
 
-No AzAPI workaround is required for the workspace, Azure Monitor workspace integration, or role assignment in this issue.
+No AzAPI workaround is required for the workspace, Azure Monitor workspace integration, or role assignments in this issue.
 
 ## Local Validation
 

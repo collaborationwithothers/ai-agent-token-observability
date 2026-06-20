@@ -718,6 +718,57 @@ public sealed class ProductRoleMappingTests
     }
 
     [Fact]
+    public async Task GrafanaRoleNamesCannotBeMappedAsProductApiAppRoles()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "internal", "contoso-tenant");
+        var adminClaims = CreateClaims(subject: "admin-subject", groupObjectIds: ["entra-admin-group"]);
+        var admin = await SeedPlatformAdminAsync(store, seed, adminClaims);
+        var grafanaRoleNames = new[]
+        {
+            "Grafana Admin",
+            "Grafana Editor",
+            "Grafana Viewer",
+            "Grafana Limited Viewer",
+            "GrafanaAdmin",
+            "GrafanaEditor",
+            "GrafanaViewer",
+            "GrafanaLimitedViewer",
+        };
+
+        for (var index = 0; index < grafanaRoleNames.Length; index++)
+        {
+            var grafanaRoleName = grafanaRoleNames[index];
+
+            await Assert.ThrowsAsync<ArgumentException>(() => store.CreateProductRoleMappingAsync(
+                seed.Organization.CustomerOrganizationId,
+                new CreateProductRoleMappingRequest(
+                    IdentityTenantId: seed.IdentityTenant.IdentityTenantId,
+                    ExternalPrincipalType: ExternalPrincipalType.AppRole,
+                    ExternalPrincipalId: grafanaRoleName,
+                    ProductRole: ProductRole.PlatformAdmin,
+                    ScopeKind: ProductScopeKind.Organization,
+                    ScopeId: null,
+                    EffectiveFromUtc: Now,
+                    EffectiveToUtc: null,
+                    ChangedByClaims: adminClaims,
+                    CorrelationId: $"authz-grafana-app-role-denied-{index}",
+                    AuditEventId: $"audit-grafana-app-role-denied-{index}")));
+
+            await Assert.ThrowsAsync<ArgumentException>(() => SeedRoleMappingAsync(
+                store,
+                seed,
+                admin.ProductUserId,
+                ExternalPrincipalType.AppRole,
+                grafanaRoleName,
+                ProductRole.PlatformAdmin,
+                ProductScopeKind.Organization,
+                scopeId: null,
+                auditEventId: $"audit-grafana-app-role-seed-denied-{index}"));
+        }
+    }
+
+    [Fact]
     public void PostgreSqlTenantMetadataMigrationIncludesAuditableProductRoleMapping()
     {
         var root = FindRepositoryRoot();

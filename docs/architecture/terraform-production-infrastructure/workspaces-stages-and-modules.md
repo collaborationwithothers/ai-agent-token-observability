@@ -145,7 +145,7 @@ Required stages:
 | 3 | Data platform | `stages/data_platform` | PostgreSQL Flexible Server, product Blob Storage, backup and lifecycle settings |
 | 4 | AI services | `stages/ai_services` | Azure AI Language, Azure AI Content Safety, Azure OpenAI or Foundry resources, deployment aliases, and diagnostics |
 | 5 | App runtime | `stages/app_runtime` | Container Apps environment, Product API, Product Ingestion Endpoint, Product Dashboard, Container Apps Jobs, managed identities, app configuration |
-| 6 | Managed Grafana | `stages/managed_grafana` | Azure Managed Grafana workspace, aggregate-only Azure Monitor workspace data source wiring, and Terraform-managed first-release dashboard JSON deployment. Grafana RBAC and Product Dashboard links are follow-up work. |
+| 6 | Managed Grafana | `stages/managed_grafana` | Azure Managed Grafana workspace, aggregate-only Azure Monitor workspace data source wiring, Terraform-managed first-release dashboard JSON deployment, and environment-scoped Grafana RBAC role assignments. Product Dashboard links are follow-up work. |
 | 7 | Edge | `stages/edge` | Azure Front Door Premium, WAF policy, routes, managed certificates, custom domains, rate-limit rules where supported |
 
 Stage dependency flow:
@@ -165,7 +165,7 @@ manual_remote_state
 Notes:
 
 - `edge` is last because it binds public routes to deployed app origins.
-- `managed_grafana` is after app runtime in the stage order, but the #62 implementation only consumes aggregate metrics outputs from `observability_foundation`.
+- `managed_grafana` is after app runtime in the stage order, but its workspace, dashboard, and RBAC implementation consumes only aggregate metrics outputs from `observability_foundation` plus environment-scoped Microsoft Entra group object IDs.
 - `ai_services` is before app runtime because recommendation jobs need endpoint and identity configuration.
 - `observability_foundation` is before app runtime because Container Apps and jobs need diagnostic destinations.
 
@@ -298,9 +298,20 @@ Managed Grafana aggregate data-source validation:
 - `metrics_data_source_identifiers.aggregate_metrics.consumer_stages` must include `managed_grafana`.
 - The Grafana managed identity receives `Monitoring Data Reader` at the Azure Monitor workspace resource ID scope only.
 - The #62 workspace implementation did not add Grafana provider resources, dashboard JSON, folders, user/group RBAC, service accounts, API keys, private endpoints, custom DNS, Log Analytics data sources, Application Insights data sources, raw session data sources, raw content sources, or developer ranking panels.
-- The #64 dashboard deployment may add only `grafana_folder` and `grafana_dashboard` resources that read repository-owned JSON artifacts. It must not add Grafana RBAC, service accounts, API keys, private endpoints, custom DNS, raw session data sources, raw content sources, or developer ranking panels.
+- The #64 dashboard deployment may add only `grafana_folder` and `grafana_dashboard` resources that read repository-owned JSON artifacts. It must not add service accounts, API keys, private endpoints, custom DNS, raw session data sources, raw content sources, or developer ranking panels.
+- The #65 RBAC implementation may add only workspace-scoped Azure role assignments for Microsoft Entra groups using the Azure Managed Grafana built-in `Grafana Admin`, `Grafana Editor`, and `Grafana Viewer` roles.
+- Grafana RBAC grants aggregate dashboard access only and does not authorize Product API routes. Product Dashboard roles remain separate from Grafana roles.
 
-Managed Grafana follow-up variables for Grafana RBAC and Product Dashboard links are intentionally deferred out of #64. Later issues must define their own variable contracts before adding those surfaces.
+Managed Grafana follow-up variables for Product Dashboard links are intentionally deferred out of #65. Later issues must define their own variable contracts before adding that surface.
+
+Managed Grafana RBAC inputs:
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `grafana_admin_group_object_id` | Yes | Microsoft Entra group object ID assigned `Grafana Admin` |
+| `grafana_viewer_group_object_id` | Yes | Microsoft Entra group object ID assigned `Grafana Viewer` |
+| `grafana_editor_group_object_id` | Optional | Microsoft Entra group object ID assigned `Grafana Editor` |
+| `allow_production_grafana_editors` | Yes | Explicit exception gate for `pp` or `pd` editor assignments; defaults to `false` |
 
 Environment-specific defaults:
 

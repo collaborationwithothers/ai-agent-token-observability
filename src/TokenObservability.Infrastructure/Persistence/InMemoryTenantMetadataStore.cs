@@ -388,6 +388,8 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         var effectiveFromUtc = request.EffectiveFromUtc.ToUniversalTime();
         var effectiveToUtc = request.EffectiveToUtc?.ToUniversalTime();
 
+        RejectGrafanaAppRolePrincipal(request.ExternalPrincipalType, externalPrincipalId);
+
         if (effectiveToUtc is not null && effectiveToUtc <= effectiveFromUtc)
         {
             throw new ArgumentException("Effective end must be after effective start.", nameof(request));
@@ -487,6 +489,8 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
         var now = clock.UtcNow.ToUniversalTime();
         var effectiveFromUtc = request.EffectiveFromUtc.ToUniversalTime();
         var effectiveToUtc = request.EffectiveToUtc?.ToUniversalTime();
+
+        RejectGrafanaAppRolePrincipal(request.ExternalPrincipalType, externalPrincipalId);
 
         if (effectiveToUtc is not null && effectiveToUtc <= effectiveFromUtc)
         {
@@ -3157,6 +3161,25 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock)
             ExternalPrincipalType.ServicePrincipal => StringComparer.Ordinal.Equals(claims.Subject, mapping.ExternalPrincipalId),
             _ => false
         };
+    }
+
+    private static void RejectGrafanaAppRolePrincipal(
+        ExternalPrincipalType externalPrincipalType,
+        string externalPrincipalId)
+    {
+        if (externalPrincipalType != ExternalPrincipalType.AppRole)
+        {
+            return;
+        }
+
+        var normalizedPrincipalId = externalPrincipalId.Replace(" ", string.Empty, StringComparison.Ordinal);
+        if (StringComparer.OrdinalIgnoreCase.Equals(normalizedPrincipalId, "GrafanaAdmin") ||
+            StringComparer.OrdinalIgnoreCase.Equals(normalizedPrincipalId, "GrafanaEditor") ||
+            StringComparer.OrdinalIgnoreCase.Equals(normalizedPrincipalId, "GrafanaViewer") ||
+            StringComparer.OrdinalIgnoreCase.Equals(normalizedPrincipalId, "GrafanaLimitedViewer"))
+        {
+            throw new ArgumentException("Grafana role names must not be used as Product API app-role mapping external principal IDs.", nameof(externalPrincipalId));
+        }
     }
 
     private static bool ScopeMatches(ProductRoleMapping mapping, ProductScope requestedScope)

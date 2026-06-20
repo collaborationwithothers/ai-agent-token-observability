@@ -45,6 +45,27 @@ resource "terraform_data" "upstream_contract_guard" {
   }
 }
 
+resource "terraform_data" "grafana_rbac_guard" {
+  input = local.stage_name
+
+  lifecycle {
+    precondition {
+      condition     = local.grafana_admin_group_object_id != null && local.grafana_admin_group_object_id != ""
+      error_message = "grafana_admin_group_object_id is required for environment-scoped Azure Managed Grafana Admin access."
+    }
+
+    precondition {
+      condition     = local.grafana_viewer_group_object_id != null && local.grafana_viewer_group_object_id != ""
+      error_message = "grafana_viewer_group_object_id is required for environment-scoped Azure Managed Grafana Viewer access."
+    }
+
+    precondition {
+      condition     = !local.production_editor_role_blocked
+      error_message = "Production Azure Managed Grafana Editor assignments require allow_production_grafana_editors = true and a captured approval exception."
+    }
+  }
+}
+
 module "managed_grafana" {
   source = "../../modules/managed_grafana"
 
@@ -61,5 +82,20 @@ module "managed_grafana" {
   depends_on = [
     terraform_data.workspace_guard,
     terraform_data.upstream_contract_guard,
+  ]
+}
+
+resource "azurerm_role_assignment" "grafana_workspace_rbac" {
+  for_each = local.grafana_rbac_groups
+
+  scope                = module.managed_grafana.resource_id
+  role_definition_name = each.value.role_definition_name
+  principal_id         = each.value.principal_id
+  principal_type       = "Group"
+  description          = each.value.description
+
+  depends_on = [
+    terraform_data.grafana_rbac_guard,
+    module.managed_grafana,
   ]
 }
