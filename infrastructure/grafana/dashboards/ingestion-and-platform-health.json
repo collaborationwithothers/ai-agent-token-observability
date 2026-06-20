@@ -1,0 +1,216 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "panels": [
+    {
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "targets": [
+        {
+          "expr": "sum(rate(tokenobs_ingestion_requests_total{environment=~\"$environment\",region=~\"$region\"}[$__rate_interval]))",
+          "legendFormat": "requests/sec"
+        }
+      ],
+      "title": "Ingestion request rate",
+      "type": "timeseries"
+    },
+    {
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "targets": [
+        {
+          "expr": "sum by (result) (increase(tokenobs_ingestion_requests_total{environment=~\"$environment\",region=~\"$region\"}[$__range]))",
+          "legendFormat": "{{result}}"
+        }
+      ],
+      "title": "Accepted versus rejected telemetry",
+      "type": "barchart"
+    },
+    {
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 8
+      },
+      "id": 3,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(tokenobs_ingestion_request_duration_seconds_bucket{environment=~\"$environment\",region=~\"$region\"}[$__rate_interval])))",
+          "legendFormat": "p95"
+        }
+      ],
+      "title": "Ingestion latency p95",
+      "type": "timeseries"
+    },
+    {
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 8
+      },
+      "id": 4,
+      "targets": [
+        {
+          "expr": "sum by (failure_reason) (increase(tokenobs_payload_normalization_failures_total{environment=~\"$environment\",region=~\"$region\"}[$__range]))",
+          "legendFormat": "{{failure_reason}}"
+        }
+      ],
+      "title": "Payload normalization failures",
+      "type": "barchart"
+    },
+    {
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 8
+      },
+      "id": 5,
+      "targets": [
+        {
+          "expr": "sum by (job_type) (increase(tokenobs_background_jobs_total{environment=~\"$environment\",region=~\"$region\",result=\"failed\"}[$__range]))",
+          "legendFormat": "{{job_type}}"
+        }
+      ],
+      "title": "Background job failures",
+      "type": "barchart"
+    },
+    {
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 16
+      },
+      "id": 6,
+      "targets": [
+        {
+          "expr": "sum by (result) (rate(tokenobs_redaction_events_total{environment=~\"$environment\",region=~\"$region\",result=~\"redaction_failed|review_required\"}[$__rate_interval]))",
+          "legendFormat": "{{result}}"
+        }
+      ],
+      "title": "Redaction failure or review-required rate",
+      "type": "timeseries"
+    },
+    {
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 16
+      },
+      "id": 7,
+      "targets": [
+        {
+          "expr": "sum(rate(tokenobs_product_api_requests_total{environment=~\"$environment\",region=~\"$region\",status_class=~\"4xx|5xx\"}[$__rate_interval])) / sum(rate(tokenobs_product_api_requests_total{environment=~\"$environment\",region=~\"$region\"}[$__rate_interval]))",
+          "legendFormat": "error rate"
+        }
+      ],
+      "title": "Product API error rate",
+      "type": "timeseries"
+    },
+    {
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 16
+      },
+      "id": 8,
+      "targets": [
+        {
+          "expr": "sum by (container_app) (tokenobs_container_app_replicas_ready{environment=~\"$environment\",region=~\"$region\"})",
+          "legendFormat": "{{container_app}} ready"
+        },
+        {
+          "expr": "sum by (container_app) (tokenobs_container_app_replicas_desired{environment=~\"$environment\",region=~\"$region\"})",
+          "legendFormat": "{{container_app}} desired"
+        }
+      ],
+      "title": "Container Apps ready and desired replicas",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5m",
+  "schemaVersion": 39,
+  "tags": [
+    "token-observability",
+    "aggregate"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "includeAll": true,
+        "multi": true,
+        "name": "environment",
+        "query": "label_values(tokenobs_sessions_started_total, environment)",
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "includeAll": true,
+        "multi": true,
+        "name": "region",
+        "query": "label_values(tokenobs_sessions_started_total, region)",
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "includeAll": true,
+        "multi": true,
+        "name": "harness",
+        "query": "label_values(tokenobs_sessions_started_total, harness)",
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "includeAll": true,
+        "multi": true,
+        "name": "model",
+        "query": "label_values(tokenobs_model_invocations_total, model)",
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "Ingestion And Platform Health",
+  "uid": "tokenobs-ingestion-platform-health",
+  "version": 1
+}

@@ -145,7 +145,7 @@ Required stages:
 | 3 | Data platform | `stages/data_platform` | PostgreSQL Flexible Server, product Blob Storage, backup and lifecycle settings |
 | 4 | AI services | `stages/ai_services` | Azure AI Language, Azure AI Content Safety, Azure OpenAI or Foundry resources, deployment aliases, and diagnostics |
 | 5 | App runtime | `stages/app_runtime` | Container Apps environment, Product API, Product Ingestion Endpoint, Product Dashboard, Container Apps Jobs, managed identities, app configuration |
-| 6 | Managed Grafana | `stages/managed_grafana` | Azure Managed Grafana workspace and aggregate-only Azure Monitor workspace data source wiring. Dashboard JSON deployment, Grafana folders, Grafana RBAC, provider authentication proof gates, and Product Dashboard links are follow-up work. |
+| 6 | Managed Grafana | `stages/managed_grafana` | Azure Managed Grafana workspace, aggregate-only Azure Monitor workspace data source wiring, and Terraform-managed first-release dashboard JSON deployment. Grafana RBAC and Product Dashboard links are follow-up work. |
 | 7 | Edge | `stages/edge` | Azure Front Door Premium, WAF policy, routes, managed certificates, custom domains, rate-limit rules where supported |
 
 Stage dependency flow:
@@ -297,9 +297,10 @@ Managed Grafana aggregate data-source validation:
 - `metrics_data_source_identifiers.aggregate_metrics.boundary` must be `aggregate_metrics_only`.
 - `metrics_data_source_identifiers.aggregate_metrics.consumer_stages` must include `managed_grafana`.
 - The Grafana managed identity receives `Monitoring Data Reader` at the Azure Monitor workspace resource ID scope only.
-- The first #62 implementation must not add Grafana provider resources, dashboard JSON, folders, user/group RBAC, service accounts, API keys, private endpoints, custom DNS, Log Analytics data sources, Application Insights data sources, raw session data sources, raw content sources, or developer ranking panels.
+- The #62 workspace implementation did not add Grafana provider resources, dashboard JSON, folders, user/group RBAC, service accounts, API keys, private endpoints, custom DNS, Log Analytics data sources, Application Insights data sources, raw session data sources, raw content sources, or developer ranking panels.
+- The #64 dashboard deployment may add only `grafana_folder` and `grafana_dashboard` resources that read repository-owned JSON artifacts. It must not add Grafana RBAC, service accounts, API keys, private endpoints, custom DNS, raw session data sources, raw content sources, or developer ranking panels.
 
-Managed Grafana follow-up variables for dashboard deployment, Grafana RBAC, provider authentication proof gates, and Product Dashboard links are intentionally deferred out of #62. Later issues must define their own variable contracts before adding those surfaces.
+Managed Grafana follow-up variables for Grafana RBAC and Product Dashboard links are intentionally deferred out of #64. Later issues must define their own variable contracts before adding those surfaces.
 
 Environment-specific defaults:
 

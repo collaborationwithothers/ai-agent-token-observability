@@ -1,6 +1,6 @@
 # Managed Grafana Stage
 
-Responsibility: Azure Managed Grafana workspace provisioning and aggregate-only Azure Monitor workspace integration.
+Responsibility: Azure Managed Grafana workspace provisioning, aggregate-only Azure Monitor workspace integration, and repo-versioned first-release dashboard deployment.
 
 Backend key: `managed_grafana.tfstate`
 
@@ -18,11 +18,13 @@ The Azure Monitor workspace integration is the only first-release Grafana data s
 
 This stage must not consume `trace_log_data_source_identifiers`, Log Analytics workspace IDs, Application Insights IDs, raw session data, raw content, raw logs, recommendation evidence packets, content review data, or developer ranking data.
 
-## No Dashboard Or RBAC Automation
+## Repo-Versioned Dashboard Deployment
 
-Issue #62 intentionally does not implement dashboard JSON deployment, Grafana folders, Grafana provider authentication, Grafana user or group RBAC, Product Dashboard links, private endpoints, custom DNS, service accounts, or API keys.
+This stage deploys the `Token Observability` Grafana folder and first-release dashboard JSON artifacts from `infrastructure/grafana/dashboards/` through the `grafana/grafana` provider.
 
-Those surfaces remain separate follow-up work. Keep `api_key_enabled = false`.
+Grafana provider connection details and authentication must be supplied through process-local provider environment variables. Do not add provider `url`, `auth`, or `http_headers` arguments to Terraform files, and do not place tokens in variables, outputs, state, dashboard JSON, repository files, or validation artifacts.
+
+Grafana user or group RBAC, Product Dashboard links, private endpoints, custom DNS, service accounts, and API keys remain separate follow-up work. Keep `api_key_enabled = false`.
 
 ## Provider And AVM Choice
 

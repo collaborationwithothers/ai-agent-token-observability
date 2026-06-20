@@ -4,14 +4,16 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAGE_DIR="$ROOT_DIR/infrastructure/azure/stages/managed_grafana"
 MODULE_DIR="$ROOT_DIR/infrastructure/azure/modules/managed_grafana"
+DASHBOARD_DIR="$ROOT_DIR/infrastructure/grafana/dashboards"
 DEPLOY_HELPER="$ROOT_DIR/scripts/terraform-stage-deploy.sh"
 FOCUSED_VALIDATOR="$ROOT_DIR/scripts/validate-focused.sh"
 PR_VALIDATOR="$ROOT_DIR/scripts/validate-pr.sh"
 README="$STAGE_DIR/README.md"
 
-python3 - "$ROOT_DIR" "$STAGE_DIR" "$MODULE_DIR" "$DEPLOY_HELPER" "$FOCUSED_VALIDATOR" "$PR_VALIDATOR" "$README" <<'PY'
+python3 - "$ROOT_DIR" "$STAGE_DIR" "$MODULE_DIR" "$DASHBOARD_DIR" "$DEPLOY_HELPER" "$FOCUSED_VALIDATOR" "$PR_VALIDATOR" "$README" <<'PY'
 from __future__ import annotations
 
+import json
 import pathlib
 import re
 import sys
@@ -19,10 +21,11 @@ import sys
 root_dir = pathlib.Path(sys.argv[1])
 stage_dir = pathlib.Path(sys.argv[2])
 module_dir = pathlib.Path(sys.argv[3])
-deploy_helper = pathlib.Path(sys.argv[4])
-focused_validator = pathlib.Path(sys.argv[5])
-pr_validator = pathlib.Path(sys.argv[6])
-readme_path = pathlib.Path(sys.argv[7])
+dashboard_dir = pathlib.Path(sys.argv[4])
+deploy_helper = pathlib.Path(sys.argv[5])
+focused_validator = pathlib.Path(sys.argv[6])
+pr_validator = pathlib.Path(sys.argv[7])
+readme_path = pathlib.Path(sys.argv[8])
 
 stage_content = "\n".join(path.read_text(encoding="utf-8") for path in sorted(stage_dir.glob("*.tf")))
 module_content = "\n".join(path.read_text(encoding="utf-8") for path in sorted(module_dir.glob("*.tf")))
@@ -30,8 +33,92 @@ deploy_content = deploy_helper.read_text(encoding="utf-8")
 focused_content = focused_validator.read_text(encoding="utf-8")
 pr_content = pr_validator.read_text(encoding="utf-8")
 readme_content = readme_path.read_text(encoding="utf-8")
+dashboard_files = sorted(dashboard_dir.glob("*.json"))
 
 errors: list[str] = []
+
+dashboard_contract = {
+    "executive-cost-overview.json": {
+        "title": "Executive Cost Overview",
+        "uid": "tokenobs-executive-cost-overview",
+    },
+    "harness-and-model-operations.json": {
+        "title": "Harness And Model Operations",
+        "uid": "tokenobs-harness-model-operations",
+    },
+    "cache-and-hotspot-trends.json": {
+        "title": "Cache And Hotspot Trends",
+        "uid": "tokenobs-cache-hotspot-trends",
+    },
+    "ingestion-and-platform-health.json": {
+        "title": "Ingestion And Platform Health",
+        "uid": "tokenobs-ingestion-platform-health",
+    },
+}
+
+allowed_dashboard_variables = {"environment", "region", "harness", "model"}
+forbidden_dashboard_variables = {
+    "user",
+    "user_id",
+    "userId",
+    "product_user_id",
+    "productUserId",
+    "developer",
+    "developer_id",
+    "developerId",
+    "session",
+    "session_id",
+    "sessionId",
+    "credential",
+    "credential_id",
+    "credentialId",
+    "trace",
+    "trace_id",
+    "traceId",
+    "span_id",
+    "spanId",
+    "file",
+    "file_path",
+    "filePath",
+    "prompt",
+    "prompt_text",
+    "promptText",
+    "repository_path",
+    "repositoryPath",
+    "raw_content",
+    "rawContent",
+}
+forbidden_dashboard_terms = [
+    "leaderboard",
+    "raw session",
+    "raw content",
+    "review queue",
+    "evidence packet",
+    "credential",
+    "credentialid",
+    "trace_id",
+    "traceid",
+    "span_id",
+    "spanid",
+    "session_id",
+    "sessionid",
+    "user_id",
+    "userid",
+    "product_user_id",
+    "productuserid",
+    "developer_id",
+    "developerid",
+    "repository_path",
+    "repositorypath",
+    "file_path",
+    "filepath",
+    "prompt_text",
+    "prompttext",
+    "command_output",
+    "commandoutput",
+    "tool_result",
+    "toolresult",
+]
 
 required_stage_patterns = {
     "workspace guard": r'resource\s+"terraform_data"\s+"workspace_guard"',
@@ -45,6 +132,13 @@ required_stage_patterns = {
     "aggregate metrics local": r'aggregate_metrics_data_source\s*=\s*var\.metrics_data_source_identifiers\["aggregate_metrics"\]',
     "aggregate boundary precondition": r'boundary\s*==\s*"aggregate_metrics_only"',
     "aggregate consumer precondition": r'contains\(local\.aggregate_metrics_data_source\.consumer_stages,\s*local\.stage_name\)',
+    "Grafana provider source": r'source\s*=\s*"grafana/grafana"',
+    "Grafana provider exact pin": r'version\s*=\s*"4\.39\.0"',
+    "empty Grafana provider block": r'provider\s+"grafana"\s*\{\s*\}',
+    "Token Observability folder": r'resource\s+"grafana_folder"\s+"token_observability"\s+\{[^}]*title\s*=\s*"Token Observability"[^}]*uid\s*=\s*"tokenobs"',
+    "first release dashboard resources": r'resource\s+"grafana_dashboard"\s+"first_release"',
+    "dashboard artifact local": r'grafana_dashboard_artifacts\s*=\s*\{',
+    "dashboard file config": r'config_json\s*=\s*file\(each\.value\.path\)',
 }
 
 required_module_patterns = {
@@ -90,10 +184,9 @@ forbidden_tf_patterns = {
     "direct Log Analytics ownership": r'resource\s+"azurerm_log_analytics_workspace"',
     "direct Application Insights ownership": r'resource\s+"azurerm_application_insights"',
     "direct Azure Monitor workspace ownership": r'resource\s+"azurerm_monitor_workspace"',
-    "Grafana provider resources": r'resource\s+"grafana_',
-    "Grafana provider block": r'provider\s+"grafana"',
-    "dashboard imports": r'(az grafana dashboard import|grafana_dashboard|dashboard_json|dashboard_uid)',
-    "Grafana folders": r'grafana_folder',
+    "provider auth arguments": r'(?m)^\s*(auth|http_headers|url)\s*=',
+    "imperative dashboard import": r'az grafana dashboard import',
+    "dashboard JSON outputs": r'(?m)^\s*output\s+"[^"]*(dashboard_json|dashboard_uid)[^"]*"',
     "service account tokens": r'(service_account_token|grafana_service_account|api_key\s*=|api_key_enabled\s*=\s*true)',
     "custom hostname": r'(custom_hostname|custom_domain|vanity|grafana\.tokenobs)',
     "raw telemetry sources": r'(trace_log_data_source_identifiers|operational_traces_logs|raw_session|raw_content|raw_logs|developer_ranking)',
@@ -103,6 +196,54 @@ combined_tf = f"{stage_content}\n{module_content}"
 for name, pattern in forbidden_tf_patterns.items():
     if re.search(pattern, combined_tf, re.IGNORECASE | re.MULTILINE | re.DOTALL):
         errors.append(f"managed_grafana Terraform contains forbidden {name}")
+
+grafana_resource_matches = set(re.findall(r'resource\s+"(grafana_[^"]+)"', combined_tf))
+unexpected_grafana_resources = grafana_resource_matches - {"grafana_folder", "grafana_dashboard"}
+if unexpected_grafana_resources:
+    errors.append(f"managed_grafana Terraform contains unsupported Grafana resources: {sorted(unexpected_grafana_resources)}")
+
+if not dashboard_dir.exists():
+    errors.append("missing infrastructure/grafana/dashboards directory")
+elif {path.name for path in dashboard_files} != set(dashboard_contract):
+    errors.append("dashboard directory must contain exactly the first-release dashboard JSON artifacts")
+
+for file_name, contract in dashboard_contract.items():
+    path = dashboard_dir / file_name
+    if not path.exists():
+        errors.append(f"missing dashboard artifact: infrastructure/grafana/dashboards/{file_name}")
+        continue
+
+    raw = path.read_text(encoding="utf-8")
+    try:
+        dashboard = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        errors.append(f"{file_name} is not valid JSON: {exc}")
+        continue
+
+    if dashboard.get("uid") != contract["uid"]:
+        errors.append(f"{file_name} UID must be {contract['uid']}")
+    if dashboard.get("title") != contract["title"]:
+        errors.append(f"{file_name} title must be {contract['title']}")
+
+    variables = {
+        item.get("name")
+        for item in dashboard.get("templating", {}).get("list", [])
+        if isinstance(item, dict)
+    }
+    if variables != allowed_dashboard_variables:
+        errors.append(f"{file_name} dashboard variables must be {sorted(allowed_dashboard_variables)}")
+    forbidden_variables = variables & forbidden_dashboard_variables
+    if forbidden_variables:
+        errors.append(f"{file_name} contains forbidden dashboard variables: {sorted(forbidden_variables)}")
+
+    panels = dashboard.get("panels", [])
+    if not isinstance(panels, list) or not panels:
+        errors.append(f"{file_name} must include at least one dashboard panel")
+
+    lowered = raw.lower()
+    for term in forbidden_dashboard_terms:
+        if term in lowered:
+            errors.append(f"{file_name} contains forbidden dashboard term: {term}")
 
 for forbidden_output in [
     r'output\s+"[^"]*(connection_string|instrumentation_key|secret|token|key)[^"]*"',
@@ -139,7 +280,7 @@ required_readme_terms = [
     "Aggregate Metrics Boundary",
     "Azure Monitor workspace integration",
     "Monitoring Data Reader",
-    "No Dashboard Or RBAC Automation",
+    "Repo-Versioned Dashboard Deployment",
     "Provider And AVM Choice",
     "No AzAPI workaround is required",
     "Do not add .NET, xUnit, or C# tests for Terraform behavior.",
