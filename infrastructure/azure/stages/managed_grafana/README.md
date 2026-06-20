@@ -24,6 +24,8 @@ This stage deploys the `Token Observability` Grafana folder and first-release da
 
 Grafana provider connection details and authentication must be supplied through process-local provider environment variables. Do not add provider `url`, `auth`, or `http_headers` arguments to Terraform files, and do not place tokens in variables, outputs, state, dashboard JSON, repository files, or validation artifacts.
 
+The guarded deploy helper prepares `GRAFANA_URL` and `GRAFANA_HTTP_HEADERS` from the existing Azure Managed Grafana endpoint and a Microsoft Entra token before Terraform plans or applies Grafana provider resources. If the endpoint is not available during the first workspace bootstrap, rerun the managed_grafana stage after the Azure workspace exists so the dashboard folder and JSON resources can use the process-local provider environment variables.
+
 ## Grafana RBAC Boundary
 
 This stage assigns Microsoft Entra groups to Azure Managed Grafana built-in roles at the workspace scope:
