@@ -11,6 +11,8 @@ public sealed class TokenObservabilityDashboardSkeletonTests
         var dashboardRoot = Path.Combine(root, "web", "token-observability-dashboard");
         var packageJsonPath = Path.Combine(dashboardRoot, "package.json");
         var appPath = Path.Combine(dashboardRoot, "src", "App.tsx");
+        var grafanaNavigationPath = Path.Combine(dashboardRoot, "src", "grafanaNavigation.ts");
+        var grafanaNavigationTestPath = Path.Combine(dashboardRoot, "src", "grafanaNavigation.test.ts");
         var indexPath = Path.Combine(dashboardRoot, "index.html");
         var dockerfilePath = Path.Combine(dashboardRoot, "Dockerfile");
         var nginxConfigPath = Path.Combine(dashboardRoot, "nginx.conf");
@@ -22,6 +24,8 @@ public sealed class TokenObservabilityDashboardSkeletonTests
         Assert.True(File.Exists(indexPath));
         Assert.True(File.Exists(Path.Combine(dashboardRoot, "src", "main.tsx")));
         Assert.True(File.Exists(appPath));
+        Assert.True(File.Exists(grafanaNavigationPath));
+        Assert.True(File.Exists(grafanaNavigationTestPath));
         Assert.True(File.Exists(nginxConfigPath));
         Assert.True(File.Exists(runtimeConfigPath));
         Assert.True(File.Exists(dockerEntrypointPath));
@@ -33,8 +37,11 @@ public sealed class TokenObservabilityDashboardSkeletonTests
         Assert.True(rootElement.GetProperty("dependencies").TryGetProperty("react", out _));
         Assert.True(rootElement.GetProperty("devDependencies").TryGetProperty("vite", out _));
         Assert.True(rootElement.GetProperty("devDependencies").TryGetProperty("@vitejs/plugin-react", out _));
+        Assert.True(rootElement.GetProperty("devDependencies").TryGetProperty("vitest", out _));
 
         var appSource = File.ReadAllText(appPath);
+        var grafanaNavigationSource = File.ReadAllText(grafanaNavigationPath);
+        var grafanaNavigationTestSource = File.ReadAllText(grafanaNavigationTestPath);
         var indexSource = File.ReadAllText(indexPath);
         var dockerfile = File.ReadAllText(dockerfilePath);
         var nginxConfig = File.ReadAllText(nginxConfigPath);
@@ -46,6 +53,15 @@ public sealed class TokenObservabilityDashboardSkeletonTests
         Assert.Contains("requiredScopeKinds", appSource);
         Assert.Contains("scopeMatchesRoute", appSource);
         Assert.DoesNotContain("currentUser.scopes.length > 0", appSource);
+        Assert.Contains("sanitizeGrafanaNavigation", appSource);
+        Assert.Contains("allowedGrafanaRoutes", grafanaNavigationSource);
+        Assert.Contains("allowedGrafanaQueryParameters", grafanaNavigationSource);
+        Assert.Contains("forbiddenGrafanaQueryParameters", grafanaNavigationSource);
+        Assert.Contains("drops unknown and forbidden parameters", grafanaNavigationTestSource);
+        Assert.Contains("drops absolute URL values", grafanaNavigationTestSource);
+        Assert.Contains("preserves query strings for non-Grafana dashboard routes", grafanaNavigationTestSource);
+        Assert.DoesNotContain("repositoryScope: params.get(\"repositoryScope\")", appSource);
+        Assert.DoesNotContain("metricQuality: params.get(\"metricQuality\")", appSource);
         Assert.Contains("runtime-config.js", indexSource);
         Assert.Contains("__TOKENOBSERVABILITY_CONFIG__", runtimeConfig);
         Assert.Contains("PRODUCT_API_BASE_URL", dockerEntrypoint);
