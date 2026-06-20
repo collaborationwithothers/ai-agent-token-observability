@@ -867,6 +867,7 @@ jobs:
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
+    environment: ${{ inputs.environment }}
     steps:
       - uses: actions/checkout@v4
       - uses: azure/login@v2
@@ -888,6 +889,10 @@ jobs:
           TF_STATE_RESOURCE_GROUP_NAME: ${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}
           TF_STATE_STORAGE_ACCOUNT_NAME: ${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}
           TF_STATE_CONTAINER_NAME: ${{ vars.TF_STATE_CONTAINER_NAME }}
+          GRAFANA_ADMIN_GROUP_OBJECT_ID: ${{ vars.GRAFANA_ADMIN_GROUP_OBJECT_ID }}
+          GRAFANA_VIEWER_GROUP_OBJECT_ID: ${{ vars.GRAFANA_VIEWER_GROUP_OBJECT_ID }}
+          GRAFANA_EDITOR_GROUP_OBJECT_ID: ${{ vars.GRAFANA_EDITOR_GROUP_OBJECT_ID }}
+          ALLOW_PRODUCTION_GRAFANA_EDITORS: ${{ vars.ALLOW_PRODUCTION_GRAFANA_EDITORS }}
         run: |
           set -euo pipefail
           TERRAFORM_STAGE="managed_grafana" bash scripts/terraform-stage-deploy.sh plan

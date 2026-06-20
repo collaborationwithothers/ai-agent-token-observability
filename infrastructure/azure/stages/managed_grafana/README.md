@@ -33,6 +33,13 @@ This stage assigns Microsoft Entra groups to Azure Managed Grafana built-in role
 - `grafana_editor_group_object_id` maps to `Grafana Editor` and is optional for `dv` and `qa`.
 - `allow_production_grafana_editors` defaults to `false`; `pp` or `pd` plans with an editor group fail unless this explicit exception gate is enabled.
 
+The deploy workflow binds the plan job to the selected GitHub deployment environment and supplies these Terraform variables from GitHub configuration variables:
+
+- `GRAFANA_ADMIN_GROUP_OBJECT_ID`.
+- `GRAFANA_VIEWER_GROUP_OBJECT_ID`.
+- `GRAFANA_EDITOR_GROUP_OBJECT_ID`, optional.
+- `ALLOW_PRODUCTION_GRAFANA_EDITORS`, optional and defaults to `false`.
+
 Grafana RBAC grants aggregate dashboard access only and does not authorize Product API routes. Product Dashboard roles remain separate from Grafana roles. Individual ranking and punitive dashboard use are out of scope.
 
 Product Dashboard links, private endpoints, custom DNS, service accounts, and API keys remain separate follow-up work. Keep `api_key_enabled = false`.

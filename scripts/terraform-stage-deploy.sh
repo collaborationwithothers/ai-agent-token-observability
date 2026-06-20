@@ -20,6 +20,10 @@ Required environment:
 
 Optional environment:
   APP_RUNTIME_IMAGES_TFVARS_PATH
+  GRAFANA_ADMIN_GROUP_OBJECT_ID
+  GRAFANA_VIEWER_GROUP_OBJECT_ID
+  GRAFANA_EDITOR_GROUP_OBJECT_ID
+  ALLOW_PRODUCTION_GRAFANA_EDITORS
 USAGE
 }
 
@@ -155,6 +159,41 @@ terraform_output_raw() {
     exit 1
   fi
   printf '%s\n' "${output_value}"
+}
+
+require_uuid_env() {
+  local name="$1"
+  local value
+
+  value="$(printenv "${name}" || true)"
+  if [[ -z "${value}" ]]; then
+    echo "Missing required environment variable for managed_grafana: ${name}" >&2
+    exit 1
+  fi
+
+  if [[ ! "${value}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+    echo "${name} must be a Microsoft Entra group object ID UUID." >&2
+    exit 1
+  fi
+
+  printf '%s\n' "${value}"
+}
+
+optional_uuid_env() {
+  local name="$1"
+  local value
+
+  value="$(printenv "${name}" || true)"
+  if [[ -z "${value}" ]]; then
+    return 0
+  fi
+
+  if [[ ! "${value}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+    echo "${name} must be a Microsoft Entra group object ID UUID when supplied." >&2
+    exit 1
+  fi
+
+  printf '%s\n' "${value}"
 }
 
 common_var_args() {
@@ -302,6 +341,17 @@ case "${mode}" in
         var_args+=("-var=content_safety_contract=${content_safety_contract}")
         ;;
       managed_grafana)
+        grafana_admin_group_object_id="$(require_uuid_env GRAFANA_ADMIN_GROUP_OBJECT_ID)"
+        grafana_viewer_group_object_id="$(require_uuid_env GRAFANA_VIEWER_GROUP_OBJECT_ID)"
+        grafana_editor_group_object_id="$(optional_uuid_env GRAFANA_EDITOR_GROUP_OBJECT_ID)"
+        allow_production_grafana_editors="${ALLOW_PRODUCTION_GRAFANA_EDITORS:-false}"
+        case "${allow_production_grafana_editors}" in
+          true|false) ;;
+          *)
+            echo "ALLOW_PRODUCTION_GRAFANA_EDITORS must be true or false when supplied." >&2
+            exit 1
+            ;;
+        esac
         observability_resource_group_name="$(terraform_output_raw observability_foundation "${TF_WORKSPACE}" observability_resource_group_name)"
         observability_resource_group_ids="$(terraform_output_json observability_foundation "${TF_WORKSPACE}" resource_group_ids)"
         metrics_data_source_identifiers="$(terraform_output_json observability_foundation "${TF_WORKSPACE}" metrics_data_source_identifiers)"
@@ -320,6 +370,12 @@ case "${mode}" in
         var_args+=("-var=observability_resource_group_name=${observability_resource_group_name}")
         var_args+=("-var=observability_resource_group_id=${observability_resource_group_id}")
         var_args+=("-var=metrics_data_source_identifiers=${metrics_data_source_identifiers}")
+        var_args+=("-var=grafana_admin_group_object_id=${grafana_admin_group_object_id}")
+        var_args+=("-var=grafana_viewer_group_object_id=${grafana_viewer_group_object_id}")
+        var_args+=("-var=allow_production_grafana_editors=${allow_production_grafana_editors}")
+        if [[ -n "${grafana_editor_group_object_id}" ]]; then
+          var_args+=("-var=grafana_editor_group_object_id=${grafana_editor_group_object_id}")
+        fi
         ;;
       edge)
         app_runtime_container_app_fqdns="$(terraform_output_json app_runtime "${TF_WORKSPACE}" container_app_fqdns)"
