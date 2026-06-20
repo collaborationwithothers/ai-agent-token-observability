@@ -9,8 +9,9 @@ DEPLOY_HELPER="$ROOT_DIR/scripts/terraform-stage-deploy.sh"
 FOCUSED_VALIDATOR="$ROOT_DIR/scripts/validate-focused.sh"
 PR_VALIDATOR="$ROOT_DIR/scripts/validate-pr.sh"
 README="$STAGE_DIR/README.md"
+TERRAFORM_WORKFLOW="$ROOT_DIR/.github/workflows/terraform-plan.yml"
 
-python3 - "$ROOT_DIR" "$STAGE_DIR" "$MODULE_DIR" "$DASHBOARD_DIR" "$DEPLOY_HELPER" "$FOCUSED_VALIDATOR" "$PR_VALIDATOR" "$README" <<'PY'
+python3 - "$ROOT_DIR" "$STAGE_DIR" "$MODULE_DIR" "$DASHBOARD_DIR" "$DEPLOY_HELPER" "$FOCUSED_VALIDATOR" "$PR_VALIDATOR" "$README" "$TERRAFORM_WORKFLOW" <<'PY'
 from __future__ import annotations
 
 import json
@@ -26,6 +27,7 @@ deploy_helper = pathlib.Path(sys.argv[5])
 focused_validator = pathlib.Path(sys.argv[6])
 pr_validator = pathlib.Path(sys.argv[7])
 readme_path = pathlib.Path(sys.argv[8])
+terraform_workflow = pathlib.Path(sys.argv[9])
 
 stage_content = "\n".join(path.read_text(encoding="utf-8") for path in sorted(stage_dir.glob("*.tf")))
 module_content = "\n".join(path.read_text(encoding="utf-8") for path in sorted(module_dir.glob("*.tf")))
@@ -33,6 +35,7 @@ deploy_content = deploy_helper.read_text(encoding="utf-8")
 focused_content = focused_validator.read_text(encoding="utf-8")
 pr_content = pr_validator.read_text(encoding="utf-8")
 readme_content = readme_path.read_text(encoding="utf-8")
+workflow_content = terraform_workflow.read_text(encoding="utf-8")
 dashboard_files = sorted(dashboard_dir.glob("*.json"))
 
 errors: list[str] = []
@@ -280,6 +283,10 @@ for forbidden_output in [
 
 required_helper_patterns = {
     "managed_grafana branch": r'\bmanaged_grafana\)',
+    "required Grafana admin group env": r'require_uuid_env GRAFANA_ADMIN_GROUP_OBJECT_ID',
+    "required Grafana viewer group env": r'require_uuid_env GRAFANA_VIEWER_GROUP_OBJECT_ID',
+    "optional Grafana editor group env": r'optional_uuid_env GRAFANA_EDITOR_GROUP_OBJECT_ID',
+    "optional production editor exception env": r'ALLOW_PRODUCTION_GRAFANA_EDITORS',
     "observability resource group output": r'terraform_output_raw observability_foundation "\$\{TF_WORKSPACE\}" observability_resource_group_name',
     "resource group IDs output": r'terraform_output_json observability_foundation "\$\{TF_WORKSPACE\}" resource_group_ids',
     "metrics data source output": r'terraform_output_json observability_foundation "\$\{TF_WORKSPACE\}" metrics_data_source_identifiers',
@@ -287,11 +294,27 @@ required_helper_patterns = {
     "managed_grafana consumer jq guard": r'index\("managed_grafana"\)',
     "observability resource group var": r'-var=observability_resource_group_name=',
     "metrics data source var": r'-var=metrics_data_source_identifiers=',
+    "Grafana admin group var": r'-var=grafana_admin_group_object_id=',
+    "Grafana viewer group var": r'-var=grafana_viewer_group_object_id=',
+    "production editor exception var": r'-var=allow_production_grafana_editors=',
 }
 
 for name, pattern in required_helper_patterns.items():
     if re.search(pattern, deploy_content, re.IGNORECASE | re.MULTILINE | re.DOTALL) is None:
         errors.append(f"terraform-stage-deploy.sh missing {name}")
+
+required_workflow_patterns = {
+    "managed Grafana plan job": r'plan-managed-grafana:',
+    "managed Grafana plan deployment environment": r'plan-managed-grafana:\s+name:\s+Plan managed_grafana.*?environment:\s*\$\{\{\s*inputs\.environment\s*\}\}',
+    "Grafana admin group workflow variable": r'GRAFANA_ADMIN_GROUP_OBJECT_ID:\s*\$\{\{\s*vars\.GRAFANA_ADMIN_GROUP_OBJECT_ID\s*\}\}',
+    "Grafana viewer group workflow variable": r'GRAFANA_VIEWER_GROUP_OBJECT_ID:\s*\$\{\{\s*vars\.GRAFANA_VIEWER_GROUP_OBJECT_ID\s*\}\}',
+    "Grafana editor group workflow variable": r'GRAFANA_EDITOR_GROUP_OBJECT_ID:\s*\$\{\{\s*vars\.GRAFANA_EDITOR_GROUP_OBJECT_ID\s*\}\}',
+    "production editor exception workflow variable": r'ALLOW_PRODUCTION_GRAFANA_EDITORS:\s*\$\{\{\s*vars\.ALLOW_PRODUCTION_GRAFANA_EDITORS\s*\}\}',
+}
+
+for name, pattern in required_workflow_patterns.items():
+    if re.search(pattern, workflow_content, re.IGNORECASE | re.MULTILINE | re.DOTALL) is None:
+        errors.append(f"terraform-plan.yml missing {name}")
 
 for path_name, content in [
     ("validate-focused.sh", focused_content),
