@@ -47,12 +47,15 @@ run_docs_checks() {
   bash -n scripts/validate-markdown-links.sh
   bash -n scripts/workflow-digest.sh
   bash -n scripts/validate-edge-origin-workflow.sh
+  bash -n scripts/prove-grafana-provider-auth.sh
+  bash -n scripts/validate-grafana-provider-auth-proof.sh
   bash -n scripts/validate-terraform-app-runtime.sh
   bash -n scripts/validate-terraform-managed-grafana.sh
   bash -n scripts/validate-terraform-ai-services.sh
   bash -n scripts/validate-terraform-workflow-guardrails.sh
   bash -n scripts/validate-focused.sh
   bash -n scripts/validate-pr.sh
+  scripts/validate-grafana-provider-auth-proof.sh
   scripts/validate-markdown-links.sh
   if [[ -f .agents/skills/review-worktree-issue-pr/SKILL.md ]]; then
     grep -q '^name: review-worktree-issue-pr$' .agents/skills/review-worktree-issue-pr/SKILL.md
@@ -99,6 +102,7 @@ case "$profile" in
     scripts/validate-terraform-ai-services.sh
     scripts/validate-terraform-app-runtime.sh
     scripts/validate-terraform-managed-grafana.sh
+    scripts/validate-grafana-provider-auth-proof.sh
     scripts/terraform-stage-check.sh app_runtime
     scripts/terraform-stage-check.sh ai_services
     scripts/terraform-stage-check.sh edge
