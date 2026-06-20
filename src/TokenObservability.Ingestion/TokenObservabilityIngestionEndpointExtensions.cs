@@ -36,6 +36,10 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         builder.Services.TryAddSingleton<ScopedIngestionCredentialLifecycleService>();
         builder.Services.TryAddSingleton<IAggregateMetricSink, NoopAggregateMetricSink>();
         builder.Services.TryAddSingleton<IIngestionDiagnosticSink, IngestionDiagnosticLoggerSink>();
+        builder.Services.TryAddSingleton<IAzurePiiDetector, UnavailableAzurePiiDetector>();
+        builder.Services.TryAddSingleton<IAzureContentSafetyClassifier, NoopAzureContentSafetyClassifier>();
+        builder.Services.TryAddSingleton<IRedactedContentStore, NoopRedactedContentStore>();
+        builder.Services.TryAddSingleton<IContentRedactionPipeline, ContentRedactionPipeline>();
         builder.Services.TryAddSingleton(static services =>
         {
             var options = services.GetRequiredService<IOptions<TokenObservabilityIngestionOptions>>().Value;
@@ -63,6 +67,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         InMemoryTenantMetadataStore tenantMetadataStore,
         AggregateMetricsExporter aggregateMetricsExporter,
         IIngestionDiagnosticSink diagnosticSink,
+        IContentRedactionPipeline contentRedactionPipeline,
         IOptions<TokenObservabilityIngestionOptions> options)
     {
         return HandleOtlpSignalAsync(
@@ -71,6 +76,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
             tenantMetadataStore,
             aggregateMetricsExporter,
             diagnosticSink,
+            contentRedactionPipeline,
             options.Value,
             "logs");
     }
@@ -81,6 +87,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         InMemoryTenantMetadataStore tenantMetadataStore,
         AggregateMetricsExporter aggregateMetricsExporter,
         IIngestionDiagnosticSink diagnosticSink,
+        IContentRedactionPipeline contentRedactionPipeline,
         IOptions<TokenObservabilityIngestionOptions> options)
     {
         return HandleOtlpSignalAsync(
@@ -89,6 +96,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
             tenantMetadataStore,
             aggregateMetricsExporter,
             diagnosticSink,
+            contentRedactionPipeline,
             options.Value,
             "traces");
     }
@@ -99,6 +107,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         InMemoryTenantMetadataStore tenantMetadataStore,
         AggregateMetricsExporter aggregateMetricsExporter,
         IIngestionDiagnosticSink diagnosticSink,
+        IContentRedactionPipeline contentRedactionPipeline,
         IOptions<TokenObservabilityIngestionOptions> options)
     {
         return HandleOtlpSignalAsync(
@@ -107,6 +116,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
             tenantMetadataStore,
             aggregateMetricsExporter,
             diagnosticSink,
+            contentRedactionPipeline,
             options.Value,
             "metrics");
     }
@@ -117,6 +127,7 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         InMemoryTenantMetadataStore tenantMetadataStore,
         AggregateMetricsExporter aggregateMetricsExporter,
         IIngestionDiagnosticSink diagnosticSink,
+        IContentRedactionPipeline contentRedactionPipeline,
         TokenObservabilityIngestionOptions options,
         string signalType)
     {
@@ -364,6 +375,8 @@ internal static class TokenObservabilityIngestionEndpointExtensions
             signalType,
             payloadValidation.ContentCandidates,
             payloadValidation.ExtractionFailures,
+            contentRedactionPipeline,
+            options,
             correlationId);
         await RouteAcceptedIngestionDiagnosticAsync(
             tenantMetadataStore,
@@ -383,6 +396,8 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         string signalType,
         IReadOnlyList<EmittedContentCandidate> contentCandidates,
         IReadOnlyList<ContentCandidateExtractionFailure> extractionFailures,
+        IContentRedactionPipeline contentRedactionPipeline,
+        TokenObservabilityIngestionOptions options,
         string correlationId)
     {
         var envelopeSignalType = ToEnvelopeSignalType(signalType);
@@ -472,7 +487,9 @@ internal static class TokenObservabilityIngestionEndpointExtensions
             envelope,
             session,
             contentCandidates,
-            extractionFailures);
+            extractionFailures,
+            contentRedactionPipeline,
+            options);
 
         var existingObservations = await tenantMetadataStore.ListTokenObservationsAsync(
             credential.CustomerOrganizationId,
@@ -516,7 +533,9 @@ internal static class TokenObservabilityIngestionEndpointExtensions
         TelemetryEnvelopeRecord envelope,
         AgentSessionRecord session,
         IReadOnlyList<EmittedContentCandidate> contentCandidates,
-        IReadOnlyList<ContentCandidateExtractionFailure> extractionFailures)
+        IReadOnlyList<ContentCandidateExtractionFailure> extractionFailures,
+        IContentRedactionPipeline contentRedactionPipeline,
+        TokenObservabilityIngestionOptions options)
     {
         var policy = await tenantMetadataStore.GetActiveContentCapturePolicyAsync(
             credential.CustomerOrganizationId,
@@ -525,12 +544,12 @@ internal static class TokenObservabilityIngestionEndpointExtensions
             credential.CustomerOrganizationId,
             credential.AllowedHarness,
             credential.HarnessSetupProfileId,
-            SetupProfileContentCaptureEnabled: false,
+            SetupProfileContentCaptureEnabled: IsContentCaptureEnabledForProfile(options, credential.HarnessSetupProfileId),
             credential.ProductUserId,
             ProductRole: null,
             TeamId: null,
             RepositoryId: ResolveRepositoryScopeId(credential),
-            ContentRetentionClass.MetadataOnly,
+            ResolveRetentionClass(options, credential.HarnessSetupProfileId),
             RecommendationUse.Disabled);
 
         foreach (var candidate in contentCandidates)
@@ -547,6 +566,14 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 continue;
             }
 
+            var redactionDecision = evaluation.Decision == ContentCapturePolicyDecision.CaptureAllowed
+                ? await contentRedactionPipeline.RedactAsync(new ContentRedactionRequest(
+                    evaluation.Metadata.PolicyVersionId,
+                    evaluation.Metadata.ContentClass,
+                    candidate.RawValue,
+                    contentCandidates.Sum(candidate => Encoding.UTF8.GetByteCount(candidate.RawValue))))
+                : null;
+
             await tenantMetadataStore.RecordContentCandidateMetadataAsync(new CreateContentCandidateMetadataRequest(
                 evaluation.Metadata.CustomerOrganizationId,
                 evaluation.Metadata.PolicyVersionId,
@@ -557,10 +584,15 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 evaluation.Metadata.ContentClass,
                 evaluation.Metadata.OriginalLength,
                 evaluation.Metadata.PolicyDecision,
-                evaluation.Metadata.EvidenceState,
-                evaluation.Metadata.RedactionStatus,
+                redactionDecision?.EvidenceState ?? evaluation.Metadata.EvidenceState,
+                redactionDecision?.RedactionStatus ?? evaluation.Metadata.RedactionStatus,
                 evaluation.Metadata.RetentionClass,
-                evaluation.Metadata.RecommendationUse));
+                evaluation.Metadata.RecommendationUse,
+                redactionDecision?.Outcome,
+                redactionDecision?.DecisionReason,
+                redactionDecision?.PipelineVersion,
+                redactionDecision?.ProductRuleVersion,
+                redactionDecision?.Findings));
         }
 
         foreach (var extractionFailure in extractionFailures)
@@ -585,6 +617,23 @@ internal static class TokenObservabilityIngestionEndpointExtensions
             .Where(scope => scope.Kind == ProductScopeKind.Repository && !string.IsNullOrWhiteSpace(scope.ScopeId))
             .Select(scope => scope.ScopeId)
             .FirstOrDefault();
+    }
+
+    private static bool IsContentCaptureEnabledForProfile(
+        TokenObservabilityIngestionOptions options,
+        string harnessSetupProfileId)
+    {
+        return options.ContentCaptureEnabledProfiles.Any(profile =>
+            StringComparer.Ordinal.Equals(profile, harnessSetupProfileId));
+    }
+
+    private static ContentRetentionClass ResolveRetentionClass(
+        TokenObservabilityIngestionOptions options,
+        string harnessSetupProfileId)
+    {
+        return IsContentCaptureEnabledForProfile(options, harnessSetupProfileId)
+            ? ContentRetentionClass.Short
+            : ContentRetentionClass.MetadataOnly;
     }
 
     private static IResult CreateCredentialProblem(
@@ -1620,4 +1669,6 @@ internal sealed class TokenObservabilityIngestionOptions
     public string Environment { get; set; } = "dv";
 
     public string? Region { get; set; }
+
+    public string[] ContentCaptureEnabledProfiles { get; set; } = [];
 }
