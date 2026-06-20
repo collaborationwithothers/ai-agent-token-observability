@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import "./App.css";
+import { sanitizeGrafanaNavigation } from "./grafanaNavigation";
 
 const defaultProductApiBaseUrl = "/api/v1";
 
@@ -68,10 +69,17 @@ type DashboardRoute = {
 type OverviewFilters = {
   from: string;
   to: string;
-  repositoryScope: string;
+  environment: string;
+  region: string;
   harness: string;
   model: string;
-  metricQuality: string;
+  modelProvider: string;
+  hotspotType: string;
+  cacheBustCategory: string;
+  findingState: string;
+  signalType: string;
+  result: string;
+  rejectionReason: string;
 };
 
 const dashboardRoutes: DashboardRoute[] = [
@@ -449,11 +457,19 @@ function OverviewShell({
           />
         </label>
         <label>
-          <span>Repository scope</span>
+          <span>Environment</span>
           <input
-            value={filters.repositoryScope}
-            onChange={(event) => setFilters({ ...filters, repositoryScope: event.target.value })}
-            placeholder="Scope identifier"
+            value={filters.environment}
+            onChange={(event) => setFilters({ ...filters, environment: event.target.value })}
+            placeholder="dv"
+          />
+        </label>
+        <label>
+          <span>Region</span>
+          <input
+            value={filters.region}
+            onChange={(event) => setFilters({ ...filters, region: event.target.value })}
+            placeholder="eastus2"
           />
         </label>
         <label>
@@ -475,18 +491,20 @@ function OverviewShell({
           />
         </label>
         <label>
-          <span>Metric quality</span>
-          <select
-            value={filters.metricQuality}
-            onChange={(event) => setFilters({ ...filters, metricQuality: event.target.value })}
-          >
-            <option value="">Any metric quality</option>
-            <option value="observed">Observed</option>
-            <option value="estimated">Estimated</option>
-            <option value="mixed">Mixed</option>
-            <option value="unavailable">Unavailable</option>
-            <option value="not_applicable">Not applicable</option>
-          </select>
+          <span>Model provider</span>
+          <input
+            value={filters.modelProvider}
+            onChange={(event) => setFilters({ ...filters, modelProvider: event.target.value })}
+            placeholder="openai"
+          />
+        </label>
+        <label>
+          <span>Finding state</span>
+          <input
+            value={filters.findingState}
+            onChange={(event) => setFilters({ ...filters, findingState: event.target.value })}
+            placeholder="confirmed"
+          />
         </label>
         <button type="submit">Apply filters</button>
       </form>
@@ -539,11 +557,29 @@ function StatusSurface({ title, detail, problem }: { title: string; detail: stri
 }
 
 function useBrowserPath(): [string, (path: string, options?: { replace?: boolean }) => void] {
-  const readPath = useCallback(() => `${window.location.pathname}${window.location.search}`, []);
-  const [path, setPath] = useState(readPath);
+  const readPath = useCallback(() => sanitizeGrafanaNavigation(window.location.pathname, window.location.search), []);
+  const [path, setPath] = useState(() => {
+    const sanitizedPath = readPath();
+    const currentPath = `${window.location.pathname}${window.location.search}`;
+
+    if (sanitizedPath !== currentPath) {
+      window.history.replaceState(null, "", sanitizedPath);
+    }
+
+    return sanitizedPath;
+  });
 
   useEffect(() => {
-    const onPopState = () => setPath(readPath());
+    const onPopState = () => {
+      const sanitizedPath = readPath();
+      const currentPath = `${window.location.pathname}${window.location.search}`;
+
+      if (sanitizedPath !== currentPath) {
+        window.history.replaceState(null, "", sanitizedPath);
+      }
+
+      setPath(sanitizedPath);
+    };
     window.addEventListener("popstate", onPopState);
 
     return () => {
@@ -553,10 +589,13 @@ function useBrowserPath(): [string, (path: string, options?: { replace?: boolean
 
   const navigate = useCallback(
     (nextPath: string, options?: { replace?: boolean }) => {
+      const [nextPathname, nextSearch = ""] = nextPath.split("?");
+      const sanitizedPath = sanitizeGrafanaNavigation(nextPathname || "/", nextSearch ? `?${nextSearch}` : "");
+
       if (options?.replace) {
-        window.history.replaceState(null, "", nextPath);
+        window.history.replaceState(null, "", sanitizedPath);
       } else {
-        window.history.pushState(null, "", nextPath);
+        window.history.pushState(null, "", sanitizedPath);
       }
 
       setPath(readPath());
@@ -634,10 +673,17 @@ function readOverviewFilters(): OverviewFilters {
   return {
     from: params.get("from") ?? "",
     to: params.get("to") ?? "",
-    repositoryScope: params.get("repositoryScope") ?? "",
+    environment: params.get("environment") ?? "",
+    region: params.get("region") ?? "",
     harness: params.get("harness") ?? "",
     model: params.get("model") ?? "",
-    metricQuality: params.get("metricQuality") ?? ""
+    modelProvider: params.get("modelProvider") ?? "",
+    hotspotType: params.get("hotspotType") ?? "",
+    cacheBustCategory: params.get("cacheBustCategory") ?? "",
+    findingState: params.get("findingState") ?? "",
+    signalType: params.get("signalType") ?? "",
+    result: params.get("result") ?? "",
+    rejectionReason: params.get("rejectionReason") ?? ""
   };
 }
 

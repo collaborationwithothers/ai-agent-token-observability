@@ -921,14 +921,39 @@ public sealed class ProductApiAuthorizationContextTests
         Assert.Equal("openai", filters.GetProperty("modelProvider").GetString());
         Assert.DoesNotContain("sessionId", allowedBody.RootElement.ToString(), StringComparison.OrdinalIgnoreCase);
 
-        using var forbiddenParameterRequest = CreateAuthorizedRequest(
+        foreach (var forbiddenParameter in new[]
+        {
+            "sessionId",
+            "developer",
+            "credentialId",
+            "traceId",
+            "filePath",
+            "contentReferenceId",
+            "blobUri",
+            "prompt",
+            "commandOutput",
+            "toolResult",
+            "returnUrl"
+        })
+        {
+            using var forbiddenParameterRequest = CreateAuthorizedRequest(
+                HttpMethod.Get,
+                $"/api/v1/grafana/drilldown?route=/overview&from=2026-06-10&{forbiddenParameter}=forbidden",
+                "contoso",
+                adminClaims);
+            using var forbiddenParameterResponse = await client.SendAsync(forbiddenParameterRequest);
+            Assert.Equal(HttpStatusCode.BadRequest, forbiddenParameterResponse.StatusCode);
+            await AssertProblemCodeAsync(forbiddenParameterResponse, "invalid_grafana_drilldown_filter");
+        }
+
+        using var unknownParameterRequest = CreateAuthorizedRequest(
             HttpMethod.Get,
-            "/api/v1/grafana/drilldown?route=/overview&from=2026-06-10&sessionId=session-001",
+            "/api/v1/grafana/drilldown?route=/overview&from=2026-06-10&workspaceId=unknown",
             "contoso",
             adminClaims);
-        using var forbiddenParameterResponse = await client.SendAsync(forbiddenParameterRequest);
-        Assert.Equal(HttpStatusCode.BadRequest, forbiddenParameterResponse.StatusCode);
-        await AssertProblemCodeAsync(forbiddenParameterResponse, "invalid_grafana_drilldown_filter");
+        using var unknownParameterResponse = await client.SendAsync(unknownParameterRequest);
+        Assert.Equal(HttpStatusCode.BadRequest, unknownParameterResponse.StatusCode);
+        await AssertProblemCodeAsync(unknownParameterResponse, "invalid_grafana_drilldown_filter");
 
         using var absoluteRouteRequest = CreateAuthorizedRequest(
             HttpMethod.Get,
@@ -938,6 +963,15 @@ public sealed class ProductApiAuthorizationContextTests
         using var absoluteRouteResponse = await client.SendAsync(absoluteRouteRequest);
         Assert.Equal(HttpStatusCode.BadRequest, absoluteRouteResponse.StatusCode);
         await AssertProblemCodeAsync(absoluteRouteResponse, "invalid_grafana_drilldown_filter");
+
+        using var absoluteFilterRequest = CreateAuthorizedRequest(
+            HttpMethod.Get,
+            "/api/v1/grafana/drilldown?route=/overview&from=2026-06-10&model=https://example.test/model",
+            "contoso",
+            adminClaims);
+        using var absoluteFilterResponse = await client.SendAsync(absoluteFilterRequest);
+        Assert.Equal(HttpStatusCode.BadRequest, absoluteFilterResponse.StatusCode);
+        await AssertProblemCodeAsync(absoluteFilterResponse, "invalid_grafana_drilldown_filter");
 
         using var sessionsRouteRequest = CreateAuthorizedRequest(
             HttpMethod.Get,

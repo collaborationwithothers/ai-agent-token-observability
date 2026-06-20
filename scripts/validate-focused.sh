@@ -90,6 +90,7 @@ case "$profile" in
     ;;
   dashboard)
     check_comments_not_staged
+    npm --prefix web/token-observability-dashboard test
     npm --prefix web/token-observability-dashboard run build
     git diff --check
     ;;
@@ -121,6 +122,7 @@ case "$profile" in
     dotnet build AiAgentTokenObservability.slnx --no-restore
     dotnet test AiAgentTokenObservability.slnx --no-restore
     dotnet format AiAgentTokenObservability.slnx --verify-no-changes --no-restore
+    npm --prefix web/token-observability-dashboard test
     npm --prefix web/token-observability-dashboard run build
     git diff --check
     ;;

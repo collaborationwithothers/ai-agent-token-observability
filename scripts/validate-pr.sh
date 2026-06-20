@@ -207,6 +207,7 @@ run_full_gate() {
   run_step "dotnet test" dotnet test AiAgentTokenObservability.slnx --no-restore
   run_step "dotnet format verify" dotnet format AiAgentTokenObservability.slnx --verify-no-changes --no-restore
   run_step "npm ci dashboard" npm --prefix web/token-observability-dashboard ci
+  run_step "npm test dashboard" npm --prefix web/token-observability-dashboard test
   run_step "npm build dashboard" npm --prefix web/token-observability-dashboard run build
   run_step "terraform foundation ACR validation" scripts/validate-terraform-foundation-acr.sh
   run_step "terraform network private data plane validation" scripts/validate-terraform-network-private-data-plane.sh
