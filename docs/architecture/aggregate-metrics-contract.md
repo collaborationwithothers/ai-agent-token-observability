@@ -89,6 +89,43 @@ Every product aggregate metric includes these labels unless explicitly marked ot
 
 `tokenobs_tokens_total` may use `token_type="total"` only when component token classes are unavailable for the same invocation. If component token classes are emitted for an invocation, `total` must not also be emitted for that invocation.
 
+## Daily Token Timeline Buckets
+
+The Product API exposes dense tenant-scoped daily token timeline buckets at:
+
+`GET /api/v1/overview/token-timeline?from=YYYY-MM-DD&to=YYYY-MM-DD&movingAverageWindowDays=N`
+
+The route requires `OverviewRead`.
+
+Rules:
+
+- `from` and `to` are inclusive UTC dates.
+- `movingAverageWindowDays` must be between 1 and 90.
+- The response is aggregate-only and must not include session IDs, Product user IDs, scoped ingestion credential IDs, trace IDs, span IDs, file paths, repository paths, prompts, command output, tool results, raw content references, or external URLs.
+- One bucket is returned for every UTC day in the requested range, even when no accepted observations exist for that day.
+- A day with no accepted token observations has `tokenBurn=0`, `metricStatus=not_applicable`, `metricConfidence=unavailable`, and `isDenseZeroBurn=true`.
+- A day with only unavailable or not applicable observations has `tokenBurn=null`. The metric status remains `unavailable`, `not_applicable`, or `mixed` according to the accepted observations.
+- Observed, derived, estimated, unavailable, not applicable, and mixed metric states remain distinct. Null token metrics must not be coerced to zero.
+- When component token observations exist for a model invocation, those component observations define token burn for that invocation and a same-invocation `total` observation is excluded from token burn.
+- The moving average is a trailing arithmetic average over the current bucket and the previous `N - 1` buckets. Buckets with `tokenBurn=null` are excluded. Dense zero-burn buckets with `tokenBurn=0` are included.
+
+Response bucket fields:
+
+| Field | Meaning |
+| --- | --- |
+| `customerOrganizationSlug` | Tenant slug only, not a tenant identifier or credential |
+| `environment` | `dv`, `qa`, `pp`, or `pd` |
+| `region` | Azure region slug |
+| `bucketDateUtc` | UTC day in `YYYY-MM-DD` format |
+| `period` | `day` |
+| `tokenBurn` | Aggregate token burn, zero for dense empty days, or null when only unavailable or not applicable token observations exist |
+| `metricStatus` | Aggregate token metric state |
+| `metricConfidence` | Aggregate confidence state |
+| `movingAverageTokenBurn` | Trailing arithmetic moving average, or null when the window has no numeric buckets |
+| `movingAverageWindowDays` | Window used for the trailing moving average |
+| `isDenseZeroBurn` | True only for generated days with no accepted token observations |
+| `calculatedAtUtc` | Bucket calculation time |
+
 ## Dashboard Variables
 
 Dashboards use these variables:

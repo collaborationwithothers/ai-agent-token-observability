@@ -173,6 +173,8 @@ Grafana may link to Product Dashboard routes for authorized investigation.
 Rules:
 
 - Grafana links must not bypass Product API authorization.
+- Grafana drilldown filters are validated by `GET /api/v1/grafana/drilldown?route=/overview|/sessions&...` before Product Dashboard uses them.
+- The drilldown gate authorizes `/overview` with `OverviewRead` and `/sessions` with Product API session-read rules.
 - Product Dashboard remains responsible for session, repository, harness, model, hotspot, recommendation, content review, and governance views.
 - Product Dashboard may link to Grafana aggregate panels through the native Azure Managed Grafana endpoint.
 - The first release does not require a `grafana.tokenobs.consultwithcloud.com` vanity hostname.

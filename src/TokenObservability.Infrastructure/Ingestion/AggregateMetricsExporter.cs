@@ -40,6 +40,11 @@ public sealed class AggregateMetricsExporter(
             .SingleOrDefault(candidate => StringComparer.Ordinal.Equals(candidate.AgentSessionId, agentSessionId))
             ?? throw new InvalidOperationException("Agent session was not found.");
         var observations = await tenantMetadataStore.ListTokenObservationsAsync(customerOrganizationId, session.AgentSessionId);
+        var telemetryEnvelopes = await tenantMetadataStore.ListTelemetryEnvelopesAsync(customerOrganizationId);
+        var sessionEnvelopeIds = session.SourceTelemetryEnvelopeIds.ToHashSet(StringComparer.Ordinal);
+        var sessionEnvelopes = telemetryEnvelopes
+            .Where(envelope => sessionEnvelopeIds.Contains(envelope.TelemetryEnvelopeId))
+            .ToArray();
         var exportObservations = sourceTelemetryEnvelopeId is null
             ? observations
             : observations
@@ -51,7 +56,17 @@ public sealed class AggregateMetricsExporter(
             StringComparer.Ordinal.Equals(
                 session.SourceTelemetryEnvelopeIds.FirstOrDefault(),
                 sourceTelemetryEnvelopeId);
-        var pointExports = BuildAggregateMetricPoints(organization, session, exportObservations, includeSessionStarted);
+        var exportEnvelopes = sourceTelemetryEnvelopeId is null
+            ? sessionEnvelopes
+            : sessionEnvelopes
+                .Where(envelope => StringComparer.Ordinal.Equals(envelope.TelemetryEnvelopeId, sourceTelemetryEnvelopeId))
+                .ToArray();
+        var pointExports = BuildAggregateMetricPoints(
+            organization,
+            session,
+            exportObservations,
+            exportEnvelopes,
+            includeSessionStarted);
         var sinkPoints = pointExports.Select(static pointExport => pointExport.Point).ToArray();
 
         try
@@ -108,10 +123,50 @@ public sealed class AggregateMetricsExporter(
         }
     }
 
+    public async Task<IReadOnlyList<AggregateTokenTimelineBucket>> BuildDailyTokenTimelineAsync(
+        CustomerOrganizationId customerOrganizationId,
+        AggregateTokenTimelineQuery query,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateTokenTimelineQuery(query);
+
+        var organization = await tenantMetadataStore.FindCustomerOrganizationAsync(customerOrganizationId)
+            ?? throw new InvalidOperationException("Customer organization was not found.");
+        var sessions = await tenantMetadataStore.ListAgentSessionsAsync(customerOrganizationId);
+        var calculatedAtUtc = DateTimeOffset.UtcNow;
+        var observationsBySessionId = new Dictionary<string, IReadOnlyList<TokenObservationRecord>>(StringComparer.Ordinal);
+
+        foreach (var session in sessions)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            observationsBySessionId[session.AgentSessionId] = await tenantMetadataStore.ListTokenObservationsAsync(
+                customerOrganizationId,
+                session.AgentSessionId);
+        }
+
+        var buckets = new List<AggregateTokenTimelineBucket>();
+
+        for (var date = query.StartDateUtc; date <= query.EndDateUtc; date = date.AddDays(1))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var dayObservations = sessions
+                .Where(session => SessionStartedOnDate(session, date))
+                .SelectMany(session => observationsBySessionId[session.AgentSessionId])
+                .ToArray();
+            buckets.Add(CreateTimelineBucket(organization, query, date, dayObservations, calculatedAtUtc));
+        }
+
+        var bucketsWithMovingAverage = ApplyMovingAverage(buckets, query.MovingAverageWindowDays);
+        await tenantMetadataStore.RecordAggregateTokenTimelineBucketsAsync(customerOrganizationId, bucketsWithMovingAverage);
+
+        return bucketsWithMovingAverage;
+    }
+
     private IReadOnlyList<AggregateMetricPointExport> BuildAggregateMetricPoints(
         CustomerOrganization organization,
         AgentSessionRecord session,
         IReadOnlyList<TokenObservationRecord> observations,
+        IReadOnlyList<TelemetryEnvelopeRecord> telemetryEnvelopes,
         bool includeSessionStarted)
     {
         var exportedAtUtc = DateTimeOffset.UtcNow;
@@ -134,6 +189,7 @@ public sealed class AggregateMetricsExporter(
 
         var model = session.ModelNames.Count > 0 ? session.ModelNames[0] : "unknown";
         var modelProvider = ToModelProvider(model);
+        AddModelOperationPoints(points, commonLabels, session, telemetryEnvelopes, model, modelProvider, exportedAtUtc);
         var componentInvocationKeys = observations
             .Where(static observation =>
                 observation.Value is not null &&
@@ -181,6 +237,198 @@ public sealed class AggregateMetricsExporter(
         }
 
         return points;
+    }
+
+    private static void AddModelOperationPoints(
+        List<AggregateMetricPointExport> points,
+        IReadOnlyDictionary<string, string> commonLabels,
+        AgentSessionRecord session,
+        IReadOnlyList<TelemetryEnvelopeRecord> telemetryEnvelopes,
+        string model,
+        string modelProvider,
+        DateTimeOffset exportedAtUtc)
+    {
+        var modelInvocationCount = telemetryEnvelopes
+            .Where(static envelope => !string.IsNullOrWhiteSpace(envelope.ModelName))
+            .Select(static envelope => envelope.TelemetryEnvelopeId)
+            .Distinct(StringComparer.Ordinal)
+            .Count();
+
+        if (modelInvocationCount > 0)
+        {
+            points.Add(CreatePoint(
+                session.AgentSessionId,
+                "tokenobs_model_invocations_total",
+                modelInvocationCount,
+                "invocations",
+                AddLabels(commonLabels, new Dictionary<string, string>
+                {
+                    ["harness"] = ToMetricHarness(session.Harness),
+                    ["model_provider"] = modelProvider,
+                    ["model"] = model,
+                    ["result"] = "accepted"
+                }),
+                exportedAtUtc));
+        }
+
+        var turnCount = telemetryEnvelopes
+            .Where(static envelope => !string.IsNullOrWhiteSpace(envelope.TurnIdHash))
+            .Select(static envelope => envelope.TurnIdHash!)
+            .Distinct(StringComparer.Ordinal)
+            .Count();
+
+        if (turnCount > 0)
+        {
+            points.Add(CreatePoint(
+                session.AgentSessionId,
+                "tokenobs_turns_total",
+                turnCount,
+                "turns",
+                AddLabels(commonLabels, new Dictionary<string, string>
+                {
+                    ["harness"] = ToMetricHarness(session.Harness),
+                    ["result"] = "accepted"
+                }),
+                exportedAtUtc));
+        }
+    }
+
+    private AggregateTokenTimelineBucket CreateTimelineBucket(
+        CustomerOrganization organization,
+        AggregateTokenTimelineQuery query,
+        DateOnly bucketDateUtc,
+        IReadOnlyList<TokenObservationRecord> observations,
+        DateTimeOffset calculatedAtUtc)
+    {
+        if (observations.Count == 0)
+        {
+            return new AggregateTokenTimelineBucket(
+                organization.CustomerOrganizationId,
+                organization.Slug,
+                NormalizeEnvironment(options.Environment),
+                organization.DataResidencyRegion,
+                bucketDateUtc,
+                Period: "day",
+                TokenBurn: 0,
+                TokenMetricStatus.NotApplicable,
+                TokenMetricConfidence.Unavailable,
+                MovingAverageTokenBurn: null,
+                query.MovingAverageWindowDays,
+                IsDenseZeroBurn: true,
+                calculatedAtUtc);
+        }
+
+        var effectiveObservations = SelectEffectiveTokenBurnObservations(observations).ToArray();
+        var numericValues = effectiveObservations
+            .Where(static observation => observation.Value.HasValue)
+            .Select(static observation => observation.Value!.Value)
+            .ToArray();
+        var tokenBurn = numericValues.Length == 0 ? (long?)null : numericValues.Sum();
+
+        return new AggregateTokenTimelineBucket(
+            organization.CustomerOrganizationId,
+            organization.Slug,
+            NormalizeEnvironment(options.Environment),
+            organization.DataResidencyRegion,
+            bucketDateUtc,
+            Period: "day",
+            tokenBurn,
+            AggregateMetricStatus(effectiveObservations),
+            AggregateMetricConfidence(effectiveObservations),
+            MovingAverageTokenBurn: null,
+            query.MovingAverageWindowDays,
+            IsDenseZeroBurn: false,
+            calculatedAtUtc);
+    }
+
+    private static IReadOnlyList<AggregateTokenTimelineBucket> ApplyMovingAverage(
+        IReadOnlyList<AggregateTokenTimelineBucket> buckets,
+        int movingAverageWindowDays)
+    {
+        var result = new List<AggregateTokenTimelineBucket>(buckets.Count);
+
+        for (var index = 0; index < buckets.Count; index++)
+        {
+            var windowStart = Math.Max(0, index - movingAverageWindowDays + 1);
+            var numericValues = buckets
+                .Skip(windowStart)
+                .Take(index - windowStart + 1)
+                .Where(static bucket => bucket.TokenBurn.HasValue)
+                .Select(static bucket => bucket.TokenBurn!.Value)
+                .ToArray();
+            var movingAverage = numericValues.Length == 0 ? (double?)null : numericValues.Average();
+            result.Add(buckets[index] with { MovingAverageTokenBurn = movingAverage });
+        }
+
+        return result;
+    }
+
+    private static IEnumerable<TokenObservationRecord> SelectEffectiveTokenBurnObservations(
+        IReadOnlyList<TokenObservationRecord> observations)
+    {
+        var componentInvocationKeys = observations
+            .Where(static observation =>
+                observation.Value is not null &&
+                observation.MetricName is not TokenMetricName.TotalTokens)
+            .Select(static observation => observation.ModelInvocationId ?? string.Empty)
+            .ToHashSet(StringComparer.Ordinal);
+
+        foreach (var observation in observations)
+        {
+            if (observation.MetricName == TokenMetricName.TotalTokens &&
+                componentInvocationKeys.Contains(observation.ModelInvocationId ?? string.Empty))
+            {
+                continue;
+            }
+
+            yield return observation;
+        }
+    }
+
+    private static TokenMetricStatus AggregateMetricStatus(IReadOnlyList<TokenObservationRecord> observations)
+    {
+        var statuses = observations
+            .Select(static observation => observation.MetricStatus)
+            .Distinct()
+            .ToArray();
+
+        return statuses.Length == 1 ? statuses[0] : TokenMetricStatus.Mixed;
+    }
+
+    private static TokenMetricConfidence AggregateMetricConfidence(IReadOnlyList<TokenObservationRecord> observations)
+    {
+        return observations
+            .Select(static observation => observation.MetricConfidence)
+            .DefaultIfEmpty(TokenMetricConfidence.Unavailable)
+            .MaxBy(static confidence => confidence switch
+            {
+                TokenMetricConfidence.Unavailable => 4,
+                TokenMetricConfidence.LlmInferred => 3,
+                TokenMetricConfidence.Estimated => 2,
+                TokenMetricConfidence.Deterministic => 1,
+                TokenMetricConfidence.Observed => 0,
+                _ => 4
+            });
+    }
+
+    private static bool SessionStartedOnDate(AgentSessionRecord session, DateOnly bucketDateUtc)
+    {
+        var startedAtUtc = (session.StartedAtUtc ?? session.CreatedAtUtc).ToUniversalTime();
+
+        return DateOnly.FromDateTime(startedAtUtc.DateTime) == bucketDateUtc;
+    }
+
+    private static void ValidateTokenTimelineQuery(AggregateTokenTimelineQuery query)
+    {
+        if (query.EndDateUtc < query.StartDateUtc)
+        {
+            throw new ArgumentException("Aggregate token timeline end date must be on or after start date.", nameof(query));
+        }
+
+        if (query.MovingAverageWindowDays is < 1 or > 90)
+        {
+            throw new ArgumentException("Moving average window must be between 1 and 90 days.", nameof(query));
+        }
     }
 
     private static void AddMetricStatePoint(
