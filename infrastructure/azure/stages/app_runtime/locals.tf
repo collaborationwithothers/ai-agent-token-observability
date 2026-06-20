@@ -13,12 +13,41 @@ locals {
     terraform_stage            = local.stage_name
   })
 
-  app_runtime_resource_group_name    = coalesce(var.app_runtime_resource_group_name, "rg-to-${var.environment}-${var.azure_region}-${var.customer_organization_slug}-app")
-  container_app_environment_name     = coalesce(var.container_app_environment_name, "${local.name_prefix}-env")
-  container_app_diagnostic_targets   = merge({ environment = azurerm_container_app_environment.this.id }, { for key, app in azurerm_container_app.services : key => app.id }, { for key, job in module.container_app_jobs : key => job.resource_id })
-  diagnostic_settings_enabled        = var.log_analytics_workspace_id != null
-  log_analytics_environment_required = var.container_app_environment_logs_destination == "log-analytics"
-  acr_pull_role_assignments_enabled  = var.container_registry_server != null && var.container_registry_id != null
+  app_runtime_resource_group_name     = coalesce(var.app_runtime_resource_group_name, "rg-to-${var.environment}-${var.azure_region}-${var.customer_organization_slug}-app")
+  container_app_environment_name      = coalesce(var.container_app_environment_name, "${local.name_prefix}-env")
+  container_app_diagnostic_targets    = merge({ environment = azurerm_container_app_environment.this.id }, { for key, app in azurerm_container_app.services : key => app.id }, { for key, job in module.container_app_jobs : key => job.resource_id })
+  container_apps_diagnostic_contract  = var.diagnostic_destinations["container_apps"]
+  container_jobs_diagnostic_contract  = var.diagnostic_destinations["container_app_jobs"]
+  runtime_log_analytics_workspace_id  = coalesce(var.log_analytics_workspace_id, local.container_apps_diagnostic_contract.log_analytics_workspace_resource_id)
+  diagnostic_settings_enabled         = local.runtime_log_analytics_workspace_id != null
+  log_analytics_environment_required  = var.container_app_environment_logs_destination == "log-analytics"
+  acr_pull_role_assignments_enabled   = var.container_registry_server != null && var.container_registry_id != null
+  container_app_environment_subnet_id = coalesce(var.container_app_environment_infrastructure_subnet_id, try(var.network_subnet_ids["container_apps_infrastructure"], null))
+  primary_database_name               = try(var.data_platform_configuration_contract.postgresql_database_names["product_metadata"], null)
+
+  data_platform_environment = {
+    TOKENOBSERVABILITY_POSTGRESQL_SERVER_FQDN              = var.data_platform_configuration_contract.postgresql_server_fqdn
+    TOKENOBSERVABILITY_POSTGRESQL_DATABASE_NAME            = local.primary_database_name
+    TOKENOBSERVABILITY_STORAGE_ACCOUNT_NAME                = var.data_platform_configuration_contract.storage_account_name
+    TOKENOBSERVABILITY_CAPTURED_CONTENT_CONTAINER_NAME     = var.data_platform_configuration_contract.captured_content_storage_contract.captured_content_container_name
+    TOKENOBSERVABILITY_CONTENT_REVIEW_CONTAINER_NAME       = var.data_platform_configuration_contract.captured_content_storage_contract.content_review_container_name
+    TOKENOBSERVABILITY_OPERATIONAL_ARTIFACT_CONTAINER_NAME = var.data_platform_configuration_contract.operational_storage_contract.operational_container_name
+  }
+
+  ai_services_environment = {
+    TOKENOBSERVABILITY_AI_SERVICES_ENDPOINT             = var.ai_services_configuration_contract.endpoint
+    TOKENOBSERVABILITY_AI_SERVICES_ACCOUNT_NAME         = var.ai_services_configuration_contract.account_name
+    TOKENOBSERVABILITY_RECOMMENDATION_MODEL_ALIASES     = join(",", var.ai_services_configuration_contract.recommendation_model_deployment_aliases)
+    TOKENOBSERVABILITY_LANGUAGE_PII_ENDPOINT            = var.language_pii_detection_contract.endpoint
+    TOKENOBSERVABILITY_CONTENT_SAFETY_ENDPOINT          = var.content_safety_contract.endpoint
+    TOKENOBSERVABILITY_RECOMMENDATION_DEPLOYMENT_COUNT  = tostring(length(var.recommendation_model_deployment_contracts))
+    TOKENOBSERVABILITY_AI_PUBLIC_NETWORK_ACCESS_ENABLED = tostring(var.ai_services_configuration_contract.public_network_access_enabled)
+  }
+
+  upstream_contract_environment = {
+    for key, value in merge(local.data_platform_environment, local.ai_services_environment) : key => value
+    if value != null && value != ""
+  }
 
   long_running_container_apps = {
     product_dashboard = {
@@ -84,7 +113,7 @@ locals {
 
   container_app_environment = {
     for app_key, app in local.long_running_container_apps :
-    app_key => merge(app.environment, lookup(var.container_app_additional_environment, app_key, {}))
+    app_key => merge(app.environment, local.upstream_contract_environment, lookup(var.container_app_additional_environment, app_key, {}))
   }
 
   shared_job_environment = {
@@ -218,6 +247,7 @@ locals {
     for job_key, job in local.container_app_jobs :
     job_key => merge(
       local.shared_job_environment,
+      local.upstream_contract_environment,
       job.environment,
       lookup(var.container_app_job_additional_environment, job_key, {}),
       {

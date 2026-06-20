@@ -31,6 +31,19 @@ if [[ "${1:-}" == "--self-test" ]]; then
     fi
   done < <(find "$ROOT_DIR/tests/workflow-guardrails/unsafe" -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 | sort -z)
 
+  while IFS= read -r -d '' fixture; do
+    if TERRAFORM_STAGE_DEPLOY_HELPER_PATH="$fixture" "$0" "$ROOT_DIR/tests/workflow-guardrails/safe" >/tmp/workflow-guardrail-fixture.log 2>&1; then
+      echo "unsafe helper fixture unexpectedly passed: $fixture" >&2
+      failed=1
+    elif ! grep -q "Terraform stage summary helper must not include" /tmp/workflow-guardrail-fixture.log; then
+      echo "unsafe helper fixture failed for the wrong reason: $fixture" >&2
+      cat /tmp/workflow-guardrail-fixture.log >&2
+      failed=1
+    else
+      echo "unsafe helper fixture failed as expected: ${fixture#$ROOT_DIR/}"
+    fi
+  done < <(find "$ROOT_DIR/tests/workflow-guardrails/unsafe-helpers" -type f -name '*.sh' -print0 | sort -z)
+
   exit "$failed"
 fi
 
@@ -146,12 +159,42 @@ def workflow_files(paths: list[str]) -> list[pathlib.Path]:
 
 
 def terraform_stage_deploy_helper_errors() -> list[str]:
-    helper_path = pathlib.Path(os.environ["VALIDATOR_ROOT_DIR"]) / "scripts/terraform-stage-deploy.sh"
+    helper_path = pathlib.Path(
+        os.environ.get(
+            "TERRAFORM_STAGE_DEPLOY_HELPER_PATH",
+            str(pathlib.Path(os.environ["VALIDATOR_ROOT_DIR"]) / "scripts/terraform-stage-deploy.sh"),
+        )
+    )
     if not helper_path.exists():
         return [f"missing Terraform stage deploy helper: {helper_path}"]
 
     content = helper_path.read_text(encoding="utf-8")
     errors: list[str] = []
+    summary_match = re.search(
+        r"append_stage_summary\(\) \{(?P<body>.*?)(?=^})",
+        content,
+        re.MULTILINE | re.DOTALL,
+    )
+    if summary_match is None:
+        errors.append("missing append_stage_summary helper")
+    else:
+        summary_body = summary_match.group("body")
+        allowed_summary_patterns = {
+            "Stage": r"Stage",
+            "Workspace": r"Workspace",
+            "Commit SHA": r"Commit SHA",
+            "ACR image publish run ID": r"ACR image publish run ID",
+            "Result": r"Result",
+        }
+        for name, pattern in allowed_summary_patterns.items():
+            if re.search(pattern, summary_body, re.IGNORECASE) is None:
+                errors.append(f"append_stage_summary missing sanitized field: {name}")
+        if re.search(
+            r"container_app_fqdns|container_app_environment_id|private_endpoint|secret|password|token|PLAN_TEXT|terraform\s+show|resource_id",
+            summary_body,
+            re.IGNORECASE,
+        ):
+            errors.append("Terraform stage summary helper must not include raw origin, private endpoint, raw Terraform output, resource IDs, or secret-like details")
     for function_name in ["terraform_output_json", "terraform_output_raw"]:
         match = re.search(
             rf"{function_name}\(\) \{{(?P<body>.*?)(?=^}})",
@@ -170,6 +213,39 @@ def terraform_stage_deploy_helper_errors() -> list[str]:
         errors.append("terraform-stage-deploy helper must require APP_RUNTIME_IMAGES_TFVARS_PATH for app_runtime")
     if re.search(r"app_runtime\).*?-var-file=\$\{APP_RUNTIME_IMAGES_TFVARS_PATH\}", content, re.DOTALL) is None:
         errors.append("terraform-stage-deploy helper must pass APP_RUNTIME_IMAGES_TFVARS_PATH as an app_runtime var-file")
+    required_patterns = {
+        "central workspace guard": r"assert_stage_output_workspace\(\)",
+        "retained public DNS workspace exception": r'RETAINED_PUBLIC_DNS_WORKSPACE="pd_eastus2_internal"',
+        "same-workspace refusal": r"Refusing to read .* expected \$\{TF_WORKSPACE\}",
+        "default workspace refusal": r"Refusing to read .* default Terraform workspace",
+        "missing JSON output failure": r"Required output .* is missing or null",
+        "missing raw output failure": r"Required output .* is missing or empty",
+        "foundation ACR ID output": r'terraform_output_raw foundation "\$\{TF_WORKSPACE\}" container_registry_id',
+        "foundation ACR login server output": r'terraform_output_raw foundation "\$\{TF_WORKSPACE\}" container_registry_login_server',
+        "ACR artifact registry match": r"artifact_container_registry_server.*container_registry_login_server|container_registry_login_server.*artifact_container_registry_server",
+        "network subnet output": r'terraform_output_json network_private_data_plane "\$\{TF_WORKSPACE\}" subnet_ids',
+        "observability diagnostic output": r'terraform_output_json observability_foundation "\$\{TF_WORKSPACE\}" diagnostic_destinations',
+        "data platform contract output": r"data_platform_configuration_contract",
+        "AI services contract output": r"ai_services_configuration_contract",
+        "app runtime network var": r"-var=network_subnet_ids=",
+        "app runtime diagnostics var": r"-var=diagnostic_destinations=",
+        "app runtime data contract var": r"-var=data_platform_configuration_contract=",
+        "app runtime AI contract var": r"-var=ai_services_configuration_contract=",
+        "managed Grafana aggregate metrics var": r"-var=metrics_data_source_identifiers=",
+        "edge app FQDN output": r'terraform_output_json app_runtime "\$\{TF_WORKSPACE\}" container_app_fqdns',
+        "edge ACA environment ID output": r'terraform_output_raw app_runtime "\$\{TF_WORKSPACE\}" container_app_environment_id',
+        "edge ACA public access output": r'terraform_output_raw app_runtime "\$\{TF_WORKSPACE\}" container_app_environment_public_network_access',
+        "edge retained public DNS output": r'terraform_output_json public_dns "\$\{RETAINED_PUBLIC_DNS_WORKSPACE\}" product_dns_zone',
+        "edge diagnostics var": r"-var=diagnostic_destinations=",
+        "edge environment ID var": r"-var=container_app_environment_id=",
+        "stage summary helper": r"append_stage_summary\(\)",
+        "summary commit SHA": r"Commit SHA",
+        "summary result": r"Result",
+        "summary ACR run ID": r"ACR image publish run ID",
+    }
+    for name, pattern in required_patterns.items():
+        if re.search(pattern, content, re.IGNORECASE | re.MULTILINE | re.DOTALL) is None:
+            errors.append(f"terraform-stage-deploy helper missing {name}")
     return errors
 
 
@@ -457,6 +533,11 @@ def terraform_plan_required_errors(content: str) -> list[str]:
             errors.append(f"missing {name}")
     if re.search(r"terraform\s+-chdir=.*apply\s+-input=false(?:\s|$)(?!.*PLAN_FILE)", content, re.IGNORECASE):
         errors.append("Terraform apply must use an approved saved plan file")
+    for index, line in enumerate(content.splitlines(), start=1):
+        if "GITHUB_STEP_SUMMARY" not in line:
+            continue
+        if re.search(r"container_app_fqdns|container_app_environment_id|private_endpoint|secret|password|token", line, re.IGNORECASE):
+            errors.append(f"Terraform workflow summary line {index} must not include raw origin, private endpoint, or secret-like details")
     forbidden_download_inputs = {
         "run-id": r"(?m)^\s*run-id\s*:",
         "repository": r"(?m)^\s*repository\s*:",

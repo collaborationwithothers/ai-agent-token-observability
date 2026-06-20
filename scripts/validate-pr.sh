@@ -212,8 +212,11 @@ run_full_gate() {
   run_step "terraform AI services validation" scripts/validate-terraform-ai-services.sh
   run_step "terraform app runtime validation" scripts/validate-terraform-app-runtime.sh
   run_step "terraform managed Grafana validation" scripts/validate-terraform-managed-grafana.sh
+  run_step "terraform app runtime stage check" scripts/terraform-stage-check.sh app_runtime
   run_step "terraform AI services stage check" scripts/terraform-stage-check.sh ai_services
+  run_step "terraform edge stage check" scripts/terraform-stage-check.sh edge
   run_step "terraform managed Grafana stage check" scripts/terraform-stage-check.sh managed_grafana
+  run_step "terraform workflow guardrail self-test" scripts/validate-terraform-workflow-guardrails.sh --self-test
   run_step "terraform workflow guardrail validation" scripts/validate-terraform-workflow-guardrails.sh
   run_step "edge origin workflow validation" scripts/validate-edge-origin-workflow.sh
   run_step "git diff whitespace check" git diff --check

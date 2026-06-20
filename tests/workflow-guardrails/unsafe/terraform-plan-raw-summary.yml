@@ -1,0 +1,92 @@
+name: Unsafe Terraform Deploy Fixture
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        options:
+          - dv
+      azure_region:
+        required: true
+        type: choice
+        options:
+          - eastus2
+      customer_organization_slug:
+        required: false
+        default: internal
+        type: string
+      terraform_stage:
+        required: false
+        type: string
+      acr_publish_run_id:
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+jobs:
+  select:
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        github.repository == 'collaborationwithothers/ai-agent-token-observability' &&
+        github.actor == 'haripraghash' &&
+        github.ref == 'refs/heads/main'
+      }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    outputs:
+      deployment_scope: ${{ steps.guardrails.outputs.deployment_scope }}
+      terraform_workspace: ${{ steps.guardrails.outputs.terraform_workspace }}
+      deploy_foundation: ${{ steps.guardrails.outputs.deploy_foundation }}
+      deploy_app_runtime: ${{ steps.guardrails.outputs.deploy_app_runtime }}
+      acr_publish_run_id: ${{ steps.guardrails.outputs.acr_publish_run_id }}
+    steps:
+      - name: Validate guardrails before privileged steps
+        id: guardrails
+        env:
+          REQUIRED_REPOSITORY: collaborationwithothers/ai-agent-token-observability
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_REGION: ${{ inputs.azure_region }}
+          CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
+          TERRAFORM_STAGE_INPUT: ${{ inputs.terraform_stage }}
+          ACR_PUBLISH_RUN_ID_INPUT: ${{ inputs.acr_publish_run_id }}
+        run: |
+          set -euo pipefail
+          ENVIRONMENT_STAGE_ORDER="foundation network_private_data_plane observability_foundation data_platform ai_services app_runtime managed_grafana edge"
+          EXCLUDED_SHARED_STAGES="public_dns"
+          test "${GITHUB_REPOSITORY}" = "${REQUIRED_REPOSITORY}"
+          test "${GITHUB_EVENT_NAME}" = "workflow_dispatch"
+          test "${GITHUB_ACTOR}" = "haripraghash"
+          test "${GITHUB_REF}" = "refs/heads/main"
+          case "${GITHUB_REF_NAME}:${ENVIRONMENT}" in main:dv) ;; *) exit 1 ;; esac
+          TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
+          test "${TF_WORKSPACE}" != "default"
+          echo "deployment_scope=stage" >> "${GITHUB_OUTPUT}"
+          echo "terraform_workspace=${TF_WORKSPACE}" >> "${GITHUB_OUTPUT}"
+          echo "deploy_foundation=false" >> "${GITHUB_OUTPUT}"
+          echo "deploy_app_runtime=true" >> "${GITHUB_OUTPUT}"
+          echo "acr_publish_run_id=${ACR_PUBLISH_RUN_ID_INPUT}" >> "${GITHUB_OUTPUT}"
+          echo "container_app_environment_id=/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/managedEnvironments/env" >> "${GITHUB_STEP_SUMMARY}"
+
+  plan-app-runtime:
+    needs: [select]
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
+    environment:
+      name: terraform-apply
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - run: TERRAFORM_STAGE="app_runtime" bash scripts/terraform-stage-deploy.sh plan

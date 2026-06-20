@@ -13,6 +13,21 @@ resource "azurerm_resource_group" "app_runtime" {
       condition     = var.container_registry_server == null || var.container_registry_id != null
       error_message = "container_registry_id is required when container_registry_server is supplied so Container Apps identities can receive AcrPull."
     }
+
+    precondition {
+      condition     = contains(keys(var.network_subnet_ids), "container_apps_infrastructure")
+      error_message = "network_subnet_ids must include container_apps_infrastructure from network_private_data_plane."
+    }
+
+    precondition {
+      condition     = local.container_apps_diagnostic_contract.consumer_stage == local.stage_name && local.container_jobs_diagnostic_contract.consumer_stage == local.stage_name
+      error_message = "diagnostic_destinations must include app_runtime contracts for container_apps and container_app_jobs."
+    }
+
+    precondition {
+      condition     = local.primary_database_name != null
+      error_message = "data_platform_configuration_contract.postgresql_database_names must include product_metadata."
+    }
   }
 }
 
@@ -21,10 +36,10 @@ resource "azurerm_container_app_environment" "this" {
   location                           = azurerm_resource_group.app_runtime.location
   resource_group_name                = azurerm_resource_group.app_runtime.name
   logs_destination                   = var.container_app_environment_logs_destination
-  log_analytics_workspace_id         = local.log_analytics_environment_required ? var.log_analytics_workspace_id : null
-  infrastructure_subnet_id           = var.container_app_environment_infrastructure_subnet_id
+  log_analytics_workspace_id         = local.log_analytics_environment_required ? local.runtime_log_analytics_workspace_id : null
+  infrastructure_subnet_id           = local.container_app_environment_subnet_id
   public_network_access              = var.container_app_environment_public_network_access
-  zone_redundancy_enabled            = var.container_app_environment_infrastructure_subnet_id == null ? null : var.enable_zone_redundancy
+  zone_redundancy_enabled            = local.container_app_environment_subnet_id == null ? null : var.enable_zone_redundancy
   infrastructure_resource_group_name = "rg-${local.name_prefix}-aca-infra"
   tags                               = local.common_tags
 
@@ -40,12 +55,12 @@ resource "azurerm_container_app_environment" "this" {
     }
 
     precondition {
-      condition     = !local.log_analytics_environment_required || var.log_analytics_workspace_id != null
+      condition     = !local.log_analytics_environment_required || local.runtime_log_analytics_workspace_id != null
       error_message = "log_analytics_workspace_id is required when container_app_environment_logs_destination is log-analytics."
     }
 
     precondition {
-      condition     = !var.enable_zone_redundancy || var.container_app_environment_infrastructure_subnet_id != null
+      condition     = !var.enable_zone_redundancy || local.container_app_environment_subnet_id != null
       error_message = "container_app_environment_infrastructure_subnet_id is required when enable_zone_redundancy is true."
     }
 
@@ -260,8 +275,8 @@ resource "azurerm_monitor_diagnostic_setting" "container_apps" {
 
   name                           = "${local.name_prefix}-${each.key}-diag"
   target_resource_id             = each.value
-  log_analytics_workspace_id     = var.log_analytics_workspace_id
-  log_analytics_destination_type = "Dedicated"
+  log_analytics_workspace_id     = local.runtime_log_analytics_workspace_id
+  log_analytics_destination_type = local.container_apps_diagnostic_contract.destination_type
 
   enabled_log {
     category_group = "allLogs"

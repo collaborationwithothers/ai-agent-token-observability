@@ -330,4 +330,7 @@ Rules:
 - Do not use remote state to couple app configuration that belongs in Key Vault or product metadata.
 - Every remote state data source must state the stage it reads from.
 - Every remote state data source must use the same workspace unless a documented shared-platform exception applies.
+- The documented shared-platform exception is `edge` reading retained `public_dns.product_dns_zone` from `pd_eastus2_internal`.
+- Downstream stages may consume only non-secret deploy contracts from remote state, such as resource identifiers, diagnostic destinations, DNS zone references, subnet IDs, service FQDNs, and product-owned configuration references.
+- Remote state must not pass credentials, secret values, raw content, raw logs, prompt text, command output, tool results, or private endpoint implementation details.
 - Cross-region remote state reads are forbidden unless the stage documents a target-state multi-region dependency.

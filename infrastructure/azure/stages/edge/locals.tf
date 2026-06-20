@@ -13,6 +13,7 @@ locals {
     terraform_stage            = local.stage_name
   })
 
-  edge_resource_group_name = coalesce(var.edge_resource_group_name, "rg-to-${var.environment}-${var.azure_region}-${var.customer_organization_slug}-edge")
-  waf_policy_mode          = coalesce(var.waf_policy_mode, contains(["pp", "pd"], var.environment) ? "Prevention" : "Detection")
+  edge_resource_group_name       = coalesce(var.edge_resource_group_name, "rg-to-${var.environment}-${var.azure_region}-${var.customer_organization_slug}-edge")
+  waf_policy_mode                = coalesce(var.waf_policy_mode, contains(["pp", "pd"], var.environment) ? "Prevention" : "Detection")
+  front_door_diagnostic_contract = var.diagnostic_destinations["front_door"]
 }

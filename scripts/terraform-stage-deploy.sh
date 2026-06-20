@@ -77,6 +77,26 @@ STAGE_DIR="${ROOT_DIR}/infrastructure/azure/stages/${TERRAFORM_STAGE}"
 PLAN_STAGE_DIR="${PLAN_ARTIFACT_DIR}/${TERRAFORM_STAGE}"
 PLAN_FILE="${PLAN_STAGE_DIR}/${TERRAFORM_STAGE}-${TF_WORKSPACE}.tfplan"
 PLAN_TEXT="${PLAN_STAGE_DIR}/${TERRAFORM_STAGE}-${TF_WORKSPACE}.txt"
+RETAINED_PUBLIC_DNS_WORKSPACE="pd_eastus2_internal"
+
+assert_stage_output_workspace() {
+  local terraform_stage="$1"
+  local terraform_workspace="$2"
+
+  if [[ "${terraform_stage}" == "public_dns" && "${terraform_workspace}" == "${RETAINED_PUBLIC_DNS_WORKSPACE}" ]]; then
+    return 0
+  fi
+
+  if [[ "${terraform_workspace}" != "${TF_WORKSPACE}" ]]; then
+    echo "Refusing to read ${terraform_stage} output from workspace ${terraform_workspace}; expected ${TF_WORKSPACE}." >&2
+    exit 1
+  fi
+
+  if [[ "${terraform_workspace}" == "default" ]]; then
+    echo "Refusing to read ${terraform_stage} output from the default Terraform workspace." >&2
+    exit 1
+  fi
+}
 
 init_stage() {
   local terraform_stage="$1"
@@ -109,18 +129,32 @@ terraform_output_json() {
   local terraform_stage="$1"
   local terraform_workspace="$2"
   local output_name="$3"
+  local output_value
 
+  assert_stage_output_workspace "${terraform_stage}" "${terraform_workspace}"
   init_stage "${terraform_stage}" "${terraform_workspace}" false >&2
-  terraform -chdir="${ROOT_DIR}/infrastructure/azure/stages/${terraform_stage}" output -json "${output_name}"
+  output_value="$(terraform -chdir="${ROOT_DIR}/infrastructure/azure/stages/${terraform_stage}" output -json "${output_name}")"
+  if [[ -z "${output_value}" ]] || ! jq -e 'type != "null"' <<<"${output_value}" >/dev/null; then
+    echo "Required output ${terraform_stage}.${output_name} is missing or null in workspace ${terraform_workspace}." >&2
+    exit 1
+  fi
+  printf '%s\n' "${output_value}"
 }
 
 terraform_output_raw() {
   local terraform_stage="$1"
   local terraform_workspace="$2"
   local output_name="$3"
+  local output_value
 
+  assert_stage_output_workspace "${terraform_stage}" "${terraform_workspace}"
   init_stage "${terraform_stage}" "${terraform_workspace}" false >&2
-  terraform -chdir="${ROOT_DIR}/infrastructure/azure/stages/${terraform_stage}" output -raw "${output_name}"
+  output_value="$(terraform -chdir="${ROOT_DIR}/infrastructure/azure/stages/${terraform_stage}" output -raw "${output_name}")"
+  if [[ -z "${output_value}" ]]; then
+    echo "Required output ${terraform_stage}.${output_name} is missing or empty in workspace ${terraform_workspace}." >&2
+    exit 1
+  fi
+  printf '%s\n' "${output_value}"
 }
 
 common_var_args() {
@@ -131,6 +165,26 @@ common_var_args() {
     "-var=terraform_workspace_name=${TF_WORKSPACE}" \
     "-var=resource_instance=core" \
     "-var=tags={environment=\"${ENVIRONMENT}\",region=\"${AZURE_REGION}\",product=\"token-observability\",owner=\"platform\",data_classification=\"internal\",managed_by=\"terraform\"}"
+}
+
+append_stage_summary() {
+  local action="$1"
+  local result="$2"
+
+  if [[ -z "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    return 0
+  fi
+
+  {
+    printf '## Terraform %s Result\n\n' "${action}"
+    printf -- '- Stage: `%s`\n' "${TERRAFORM_STAGE}"
+    printf -- '- Workspace: `%s`\n' "${TF_WORKSPACE}"
+    printf -- '- Commit SHA: `%s`\n' "${GITHUB_SHA:-unknown}"
+    if [[ -n "${ACR_PUBLISH_RUN_ID:-}" && "${TERRAFORM_STAGE}" == "app_runtime" ]]; then
+      printf -- '- ACR image publish run ID: `%s`\n' "${ACR_PUBLISH_RUN_ID}"
+    fi
+    printf -- '- Result: `%s`\n' "${result}"
+  } >> "${GITHUB_STEP_SUMMARY}"
 }
 
 case "${mode}" in
@@ -171,8 +225,81 @@ case "${mode}" in
           exit 1
         fi
         container_registry_id="$(terraform_output_raw foundation "${TF_WORKSPACE}" container_registry_id)"
+        container_registry_login_server="$(terraform_output_raw foundation "${TF_WORKSPACE}" container_registry_login_server)"
+        artifact_container_registry_server="$(jq -er '.container_registry_server' "${APP_RUNTIME_IMAGES_TFVARS_PATH}")"
+        if [[ "${artifact_container_registry_server}" != "${container_registry_login_server}" ]]; then
+          echo "App runtime image artifact registry ${artifact_container_registry_server} does not match foundation output ${container_registry_login_server}." >&2
+          exit 1
+        fi
+        network_subnet_ids="$(terraform_output_json network_private_data_plane "${TF_WORKSPACE}" subnet_ids)"
+        diagnostic_destinations="$(terraform_output_json observability_foundation "${TF_WORKSPACE}" diagnostic_destinations)"
+        data_platform_configuration_contract="$(
+          jq -nc \
+            --arg postgresql_server_fqdn "$(terraform_output_raw data_platform "${TF_WORKSPACE}" postgresql_server_fqdn)" \
+            --arg storage_account_name "$(terraform_output_raw data_platform "${TF_WORKSPACE}" storage_account_name)" \
+            --argjson postgresql_database_names "$(terraform_output_json data_platform "${TF_WORKSPACE}" postgresql_database_names)" \
+            --argjson storage_container_names "$(terraform_output_json data_platform "${TF_WORKSPACE}" storage_container_names)" \
+            --argjson captured_content_storage_contract "$(terraform_output_json data_platform "${TF_WORKSPACE}" captured_content_storage_contract)" \
+            --argjson operational_storage_contract "$(terraform_output_json data_platform "${TF_WORKSPACE}" operational_storage_contract)" \
+            --argjson storage_lifecycle_contract "$(terraform_output_json data_platform "${TF_WORKSPACE}" storage_lifecycle_contract)" \
+            '{
+              postgresql_server_fqdn: $postgresql_server_fqdn,
+              postgresql_database_names: $postgresql_database_names,
+              storage_account_name: $storage_account_name,
+              storage_container_names: $storage_container_names,
+              captured_content_storage_contract: $captured_content_storage_contract,
+              operational_storage_contract: $operational_storage_contract,
+              storage_lifecycle_contract: $storage_lifecycle_contract
+            }'
+        )"
+        ai_services_configuration_contract="$(
+          terraform_output_json ai_services "${TF_WORKSPACE}" ai_services_configuration_contract \
+            | jq -c 'del(.private_endpoint_ids)'
+        )"
+        recommendation_model_deployment_contracts="$(terraform_output_json ai_services "${TF_WORKSPACE}" recommendation_model_deployment_contracts)"
+        language_pii_detection_contract="$(terraform_output_json ai_services "${TF_WORKSPACE}" language_pii_detection_contract)"
+        content_safety_contract="$(terraform_output_json ai_services "${TF_WORKSPACE}" content_safety_contract)"
+        if ! jq -e '
+          .container_apps.consumer_stage == "app_runtime" and
+          .container_app_jobs.consumer_stage == "app_runtime" and
+          (.container_apps.log_analytics_workspace_resource_id | type == "string" and length > 0) and
+          (.container_app_jobs.log_analytics_workspace_resource_id | type == "string" and length > 0)
+        ' <<<"${diagnostic_destinations}" >/dev/null; then
+          echo "observability_foundation.diagnostic_destinations must include container_apps and container_app_jobs contracts for app_runtime." >&2
+          exit 1
+        fi
+        if ! jq -e '
+          (.container_apps_infrastructure | type == "string" and length > 0)
+        ' <<<"${network_subnet_ids}" >/dev/null; then
+          echo "network_private_data_plane.subnet_ids must include container_apps_infrastructure for app_runtime." >&2
+          exit 1
+        fi
+        if ! jq -e '
+          (.postgresql_server_fqdn | type == "string" and length > 0) and
+          (.postgresql_database_names.product_metadata | type == "string" and length > 0) and
+          (.storage_account_name | type == "string" and length > 0) and
+          (.captured_content_storage_contract.redaction_required_before_storage == true)
+        ' <<<"${data_platform_configuration_contract}" >/dev/null; then
+          echo "data_platform outputs must include non-secret runtime configuration contracts for app_runtime." >&2
+          exit 1
+        fi
+        if ! jq -e '
+          (.endpoint | type == "string" and length > 0) and
+          (.recommendation_model_deployment_aliases | type == "array")
+        ' <<<"${ai_services_configuration_contract}" >/dev/null; then
+          echo "ai_services output must include a non-secret AI services configuration contract for app_runtime." >&2
+          exit 1
+        fi
         var_args+=("-var=container_registry_id=${container_registry_id}")
         var_args+=("-var-file=${APP_RUNTIME_IMAGES_TFVARS_PATH}")
+        var_args+=("-var=container_registry_server=${container_registry_login_server}")
+        var_args+=("-var=network_subnet_ids=${network_subnet_ids}")
+        var_args+=("-var=diagnostic_destinations=${diagnostic_destinations}")
+        var_args+=("-var=data_platform_configuration_contract=${data_platform_configuration_contract}")
+        var_args+=("-var=ai_services_configuration_contract=${ai_services_configuration_contract}")
+        var_args+=("-var=recommendation_model_deployment_contracts=${recommendation_model_deployment_contracts}")
+        var_args+=("-var=language_pii_detection_contract=${language_pii_detection_contract}")
+        var_args+=("-var=content_safety_contract=${content_safety_contract}")
         ;;
       managed_grafana)
         observability_resource_group_name="$(terraform_output_raw observability_foundation "${TF_WORKSPACE}" observability_resource_group_name)"
@@ -196,8 +323,40 @@ case "${mode}" in
         ;;
       edge)
         app_runtime_container_app_fqdns="$(terraform_output_json app_runtime "${TF_WORKSPACE}" container_app_fqdns)"
-        public_dns_zone="$(terraform_output_json public_dns pd_eastus2_internal product_dns_zone)"
+        app_runtime_container_app_environment_id="$(terraform_output_raw app_runtime "${TF_WORKSPACE}" container_app_environment_id)"
+        app_runtime_container_app_environment_public_network_access="$(terraform_output_raw app_runtime "${TF_WORKSPACE}" container_app_environment_public_network_access)"
+        diagnostic_destinations="$(terraform_output_json observability_foundation "${TF_WORKSPACE}" diagnostic_destinations)"
+        public_dns_zone="$(terraform_output_json public_dns "${RETAINED_PUBLIC_DNS_WORKSPACE}" product_dns_zone)"
+        edge_log_analytics_workspace_id="$(jq -er '.front_door.log_analytics_workspace_resource_id' <<<"${diagnostic_destinations}")"
+        if ! jq -e '
+          has("product_dashboard") and
+          has("product_api") and
+          has("product_ingestion_endpoint") and
+          all(.[]; type == "string" and length > 0)
+        ' <<<"${app_runtime_container_app_fqdns}" >/dev/null; then
+          echo "app_runtime.container_app_fqdns must include product_dashboard, product_api, and product_ingestion_endpoint for edge." >&2
+          exit 1
+        fi
+        if ! jq -e '
+          .front_door.consumer_stage == "edge" and
+          (.front_door.log_analytics_workspace_resource_id | type == "string" and length > 0)
+        ' <<<"${diagnostic_destinations}" >/dev/null; then
+          echo "observability_foundation.diagnostic_destinations must include front_door for edge." >&2
+          exit 1
+        fi
+        if ! jq -e '
+          .manage_records == true and
+          .name == "tokenobs.consultwithcloud.com" and
+          (.resource_group_name | type == "string" and length > 0)
+        ' <<<"${public_dns_zone}" >/dev/null; then
+          echo "public_dns.product_dns_zone must be the retained delegated tokenobs.consultwithcloud.com zone for edge." >&2
+          exit 1
+        fi
         var_args+=("-var=container_app_fqdns=${app_runtime_container_app_fqdns}")
+        var_args+=("-var=container_app_environment_id=${app_runtime_container_app_environment_id}")
+        var_args+=("-var=container_app_environment_public_network_access=${app_runtime_container_app_environment_public_network_access}")
+        var_args+=("-var=diagnostic_destinations=${diagnostic_destinations}")
+        var_args+=("-var=log_analytics_workspace_id=${edge_log_analytics_workspace_id}")
         var_args+=("-var=azure_dns_zone=${public_dns_zone}")
         ;;
     esac
@@ -205,10 +364,12 @@ case "${mode}" in
     init_stage "${TERRAFORM_STAGE}" "${TF_WORKSPACE}" true
     terraform -chdir="${STAGE_DIR}" plan -input=false -out="${PLAN_FILE}" "${var_args[@]}"
     terraform -chdir="${STAGE_DIR}" show -no-color "${PLAN_FILE}" > "${PLAN_TEXT}"
+    append_stage_summary "plan" "planned"
     ;;
   apply)
     test -f "${PLAN_FILE}"
     init_stage "${TERRAFORM_STAGE}" "${TF_WORKSPACE}" false
     terraform -chdir="${STAGE_DIR}" apply -input=false "${PLAN_FILE}"
+    append_stage_summary "apply" "applied"
     ;;
 esac
