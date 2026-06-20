@@ -13,17 +13,22 @@ locals {
     terraform_stage            = local.stage_name
   })
 
-  app_runtime_resource_group_name     = coalesce(var.app_runtime_resource_group_name, "rg-to-${var.environment}-${var.azure_region}-${var.customer_organization_slug}-app")
-  container_app_environment_name      = coalesce(var.container_app_environment_name, "${local.name_prefix}-env")
-  container_app_diagnostic_targets    = merge({ environment = azurerm_container_app_environment.this.id }, { for key, app in azurerm_container_app.services : key => app.id }, { for key, job in module.container_app_jobs : key => job.resource_id })
-  container_apps_diagnostic_contract  = var.diagnostic_destinations["container_apps"]
-  container_jobs_diagnostic_contract  = var.diagnostic_destinations["container_app_jobs"]
-  runtime_log_analytics_workspace_id  = coalesce(var.log_analytics_workspace_id, local.container_apps_diagnostic_contract.log_analytics_workspace_resource_id)
-  diagnostic_settings_enabled         = local.runtime_log_analytics_workspace_id != null
-  log_analytics_environment_required  = var.container_app_environment_logs_destination == "log-analytics"
-  acr_pull_role_assignments_enabled   = var.container_registry_server != null && var.container_registry_id != null
-  container_app_environment_subnet_id = coalesce(var.container_app_environment_infrastructure_subnet_id, try(var.network_subnet_ids["container_apps_infrastructure"], null))
-  primary_database_name               = try(var.data_platform_configuration_contract.postgresql_database_names["product_metadata"], null)
+  app_runtime_resource_group_name = coalesce(var.app_runtime_resource_group_name, "rg-to-${var.environment}-${var.azure_region}-${var.customer_organization_slug}-app")
+  container_app_environment_name  = coalesce(var.container_app_environment_name, "${local.name_prefix}-env")
+  container_app_environment_diagnostic_targets = {
+    environment = azurerm_container_app_environment.this.id
+  }
+  container_app_service_diagnostic_targets  = { for key, app in azurerm_container_app.services : key => app.id }
+  container_app_job_diagnostic_targets      = { for key, job in module.container_app_jobs : key => job.resource_id }
+  container_apps_diagnostic_contract        = var.diagnostic_destinations["container_apps"]
+  container_jobs_diagnostic_contract        = var.diagnostic_destinations["container_app_jobs"]
+  container_apps_log_analytics_workspace_id = coalesce(var.log_analytics_workspace_id, local.container_apps_diagnostic_contract.log_analytics_workspace_resource_id)
+  container_jobs_log_analytics_workspace_id = coalesce(var.log_analytics_workspace_id, local.container_jobs_diagnostic_contract.log_analytics_workspace_resource_id)
+  diagnostic_settings_enabled               = local.container_apps_log_analytics_workspace_id != null && local.container_jobs_log_analytics_workspace_id != null
+  log_analytics_environment_required        = var.container_app_environment_logs_destination == "log-analytics"
+  acr_pull_role_assignments_enabled         = var.container_registry_server != null && var.container_registry_id != null
+  container_app_environment_subnet_id       = var.container_app_environment_infrastructure_subnet_id
+  primary_database_name                     = try(var.data_platform_configuration_contract.postgresql_database_names["product_metadata"], null)
 
   data_platform_environment = {
     TOKENOBSERVABILITY_POSTGRESQL_SERVER_FQDN              = var.data_platform_configuration_contract.postgresql_server_fqdn

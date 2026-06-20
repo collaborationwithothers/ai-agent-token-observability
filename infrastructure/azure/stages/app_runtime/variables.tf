@@ -135,7 +135,7 @@ variable "container_app_environment_public_network_access" {
 }
 
 variable "container_app_environment_infrastructure_subnet_id" {
-  description = "Optional explicit infrastructure subnet ID for workload-profile Container Apps environment networking and zone redundancy. When null, network_subnet_ids.container_apps_infrastructure is used."
+  description = "Optional explicit infrastructure subnet ID for workload-profile Container Apps environment networking and zone redundancy. Leave null for the current public-origin path; setting this on an existing environment forces replacement."
   type        = string
   default     = null
 }

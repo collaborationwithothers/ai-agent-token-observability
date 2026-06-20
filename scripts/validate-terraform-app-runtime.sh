@@ -44,6 +44,17 @@ required_stage_patterns = {
     "job registry uses user-assigned identity": r"identity\s*=\s*azurerm_user_assigned_identity\.jobs\[each\.key\]\.id",
     "job secret references use user-assigned identity": r"identity\s*=\s*azurerm_user_assigned_identity\.jobs\[job_key\]\.id",
     "job identity output principal ID": r"container_app_job_identities[\s\S]*principal_id\s*=\s*identity\.principal_id",
+    "explicit ACA infrastructure subnet opt-in": r"container_app_environment_subnet_id\s*=\s*var\.container_app_environment_infrastructure_subnet_id",
+    "conditional ACA infrastructure resource group": r'infrastructure_resource_group_name\s*=\s*local\.container_app_environment_subnet_id\s*==\s*null\s*\?\s*null\s*:\s*"rg-\$\{local\.name_prefix\}-aca-infra"',
+    "environment diagnostic target local": r"container_app_environment_diagnostic_targets\s*=\s*\{[^}]*environment\s*=\s*azurerm_container_app_environment\.this\.id",
+    "service diagnostic target local": r"container_app_service_diagnostic_targets\s*=\s*\{",
+    "job diagnostic target local": r"container_app_job_diagnostic_targets\s*=\s*\{",
+    "environment diagnostic setting": r'resource\s+"azurerm_monitor_diagnostic_setting"\s+"container_apps"',
+    "environment diagnostic allLogs": r'resource\s+"azurerm_monitor_diagnostic_setting"\s+"container_apps"[\s\S]*category_group\s*=\s*"allLogs"',
+    "service diagnostic setting": r'resource\s+"azurerm_monitor_diagnostic_setting"\s+"container_app_services"',
+    "service diagnostic AllMetrics": r'resource\s+"azurerm_monitor_diagnostic_setting"\s+"container_app_services"[\s\S]*category\s*=\s*"AllMetrics"',
+    "job diagnostic setting": r'resource\s+"azurerm_monitor_diagnostic_setting"\s+"container_app_jobs"',
+    "job diagnostic AllMetrics": r'resource\s+"azurerm_monitor_diagnostic_setting"\s+"container_app_jobs"[\s\S]*category\s*=\s*"AllMetrics"',
 }
 
 for name, pattern in required_stage_patterns.items():
@@ -55,6 +66,22 @@ if re.search(r"container_registry_identity\s*=\s*\"System\"", stage_content):
 
 if re.search(r"system_assigned\s*=\s*true", stage_content):
     errors.append("app_runtime jobs must not use system-assigned identity for ACR pulls")
+
+if re.search(
+    r"container_app_environment_subnet_id\s*=\s*coalesce\([^)]*network_subnet_ids",
+    stage_content,
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
+):
+    errors.append("app_runtime must not implicitly attach the ACA environment to network_subnet_ids.container_apps_infrastructure")
+
+for resource_name in ["container_app_services", "container_app_jobs"]:
+    workload_diagnostics = re.search(
+        rf'resource\s+"azurerm_monitor_diagnostic_setting"\s+"{resource_name}"\s+\{{(?P<body>.*?)\n\}}',
+        stage_content,
+        re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    )
+    if workload_diagnostics and re.search(r"enabled_log|category_group\s*=\s*\"allLogs\"", workload_diagnostics.group("body"), re.IGNORECASE):
+        errors.append("Container App and Container Apps Job diagnostic settings must not configure allLogs; workloads support AllMetrics only.")
 
 required_helper_patterns = {
     "foundation ACR ID output lookup": r'terraform_output_raw\s+foundation\s+"\$\{TF_WORKSPACE\}"\s+container_registry_id',
@@ -70,6 +97,10 @@ required_readme_terms = [
     "AcrPull",
     "container_registry_id",
     "user-assigned managed identities",
+    "does not automatically attach the Container Apps environment",
+    "Set `container_app_environment_infrastructure_subnet_id` only in a deliberate origin isolation hardening slice",
+    "environment-level diagnostic setting collects `allLogs` and `AllMetrics`",
+    "Container App and Container Apps Job resource diagnostic settings collect `AllMetrics` only",
 ]
 
 for term in required_readme_terms:
