@@ -29,6 +29,21 @@ resource "azurerm_resource_group" "edge" {
       error_message = "pp and pd edge deployments must use WAF Prevention mode."
     }
 
+    precondition {
+      condition     = can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.App/managedEnvironments/[^/]+$", var.container_app_environment_id))
+      error_message = "container_app_environment_id must be supplied from app_runtime output."
+    }
+
+    precondition {
+      condition     = contains(["Enabled", "Disabled"], var.container_app_environment_public_network_access)
+      error_message = "container_app_environment_public_network_access must be supplied from app_runtime output."
+    }
+
+    precondition {
+      condition     = local.front_door_diagnostic_contract.consumer_stage == local.stage_name
+      error_message = "diagnostic_destinations must include the front_door contract for edge."
+    }
+
   }
 }
 
@@ -45,5 +60,5 @@ module "front_door_edge" {
   public_ingress_hostnames   = var.public_ingress_hostnames
   container_app_fqdns        = var.container_app_fqdns
   azure_dns_zone             = var.azure_dns_zone
-  log_analytics_workspace_id = var.log_analytics_workspace_id
+  log_analytics_workspace_id = coalesce(var.log_analytics_workspace_id, local.front_door_diagnostic_contract.log_analytics_workspace_resource_id)
 }

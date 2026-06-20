@@ -135,7 +135,7 @@ variable "container_app_environment_public_network_access" {
 }
 
 variable "container_app_environment_infrastructure_subnet_id" {
-  description = "Optional infrastructure subnet ID for workload-profile Container Apps environment networking and zone redundancy."
+  description = "Optional explicit infrastructure subnet ID for workload-profile Container Apps environment networking and zone redundancy. When null, network_subnet_ids.container_apps_infrastructure is used."
   type        = string
   default     = null
 }
@@ -234,6 +234,131 @@ variable "container_registry_id" {
     condition     = var.container_registry_id == null || can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft[.]ContainerRegistry/registries/[^/]+$", var.container_registry_id))
     error_message = "container_registry_id must be an Azure Container Registry resource ID when supplied."
   }
+}
+
+variable "ai_services_configuration_contract" {
+  description = "Non-secret AI service configuration contract from ai_services."
+  type = object({
+    account_resource_id                     = string
+    account_name                            = string
+    endpoint                                = string
+    managed_identity_principal_id           = string
+    recommendation_model_deployment_aliases = list(string)
+    public_network_access_enabled           = bool
+    diagnostics_workspace_resource_id       = string
+  })
+}
+
+variable "content_safety_contract" {
+  description = "Non-secret Azure AI Content Safety configuration contract from ai_services."
+  type = object({
+    account_resource_id           = string
+    endpoint                      = string
+    prompt_shields_required       = bool
+    protected_material_checks     = bool
+    groundedness_checks_available = bool
+    redaction_engine              = bool
+    local_auth_enabled            = bool
+    authentication                = string
+  })
+}
+
+variable "data_platform_configuration_contract" {
+  description = "Non-secret data platform configuration contract for app runtime and jobs."
+  type = object({
+    postgresql_server_fqdn    = string
+    postgresql_database_names = map(string)
+    storage_account_name      = string
+    storage_container_names   = map(string)
+    captured_content_storage_contract = object({
+      storage_account_resource_id       = string
+      captured_content_container_name   = string
+      content_review_container_name     = string
+      captured_content_prefix_template  = string
+      content_review_prefix_template    = string
+      retention_days                    = number
+      redaction_required_before_storage = bool
+      public_access                     = string
+    })
+    operational_storage_contract = object({
+      storage_account_resource_id = string
+      operational_container_name  = string
+      restore_drill_prefix        = string
+      lifecycle_validation_prefix = string
+      retention_days              = number
+      public_access               = string
+    })
+    storage_lifecycle_contract = object({
+      captured_content_retention_days      = number
+      operational_artifacts_retention_days = number
+      blob_delete_retention_days           = number
+      container_delete_retention_days      = number
+      point_in_time_restore_days           = number
+    })
+  })
+}
+
+variable "diagnostic_destinations" {
+  description = "Non-secret diagnostic destination contracts from observability_foundation."
+  type = map(object({
+    log_analytics_workspace_resource_id = optional(string)
+    application_insights_resource_id    = optional(string)
+    destination_type                    = string
+    expected_log_groups                 = optional(list(string))
+    expected_log_categories             = optional(list(string))
+    expected_metric_categories          = list(string)
+    consumer_stage                      = string
+  }))
+
+  validation {
+    condition = (
+      can(var.diagnostic_destinations["container_apps"]) &&
+      can(var.diagnostic_destinations["container_app_jobs"]) &&
+      var.diagnostic_destinations["container_apps"].consumer_stage == "app_runtime" &&
+      var.diagnostic_destinations["container_app_jobs"].consumer_stage == "app_runtime"
+    )
+    error_message = "diagnostic_destinations must include container_apps and container_app_jobs contracts for app_runtime."
+  }
+}
+
+variable "language_pii_detection_contract" {
+  description = "Non-secret Azure AI Language PII detection configuration contract from ai_services."
+  type = object({
+    account_resource_id        = string
+    endpoint                   = string
+    required_before_storage    = bool
+    stable_categories_required = bool
+    preview_categories_enabled = bool
+    local_auth_enabled         = bool
+    authentication             = string
+  })
+}
+
+variable "network_subnet_ids" {
+  description = "Subnet resource IDs from network_private_data_plane by stable downstream contract key."
+  type        = map(string)
+
+  validation {
+    condition = (
+      can(var.network_subnet_ids["container_apps_infrastructure"]) &&
+      can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.Network/virtualNetworks/[^/]+/subnets/[^/]+$", var.network_subnet_ids["container_apps_infrastructure"]))
+    )
+    error_message = "network_subnet_ids must include container_apps_infrastructure as an Azure subnet resource ID."
+  }
+}
+
+variable "recommendation_model_deployment_contracts" {
+  description = "Non-secret recommendation model deployment contracts from ai_services."
+  type = map(object({
+    deployment_alias            = string
+    account_resource_id         = string
+    account_endpoint            = string
+    deployment_resource_id      = optional(string)
+    provider                    = string
+    region                      = string
+    structured_outputs_required = bool
+    content_filtering_enabled   = bool
+  }))
 }
 
 variable "container_app_additional_environment" {

@@ -193,6 +193,48 @@ variable "container_app_fqdns" {
   type        = map(string)
 }
 
+variable "container_app_environment_id" {
+  description = "Azure Container Apps environment ID from app_runtime output."
+  type        = string
+
+  validation {
+    condition     = can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.App/managedEnvironments/[^/]+$", var.container_app_environment_id))
+    error_message = "container_app_environment_id must be an Azure Container Apps managed environment resource ID."
+  }
+}
+
+variable "container_app_environment_public_network_access" {
+  description = "Configured Container Apps environment public network access from app_runtime output. Direct-origin blocking remains deferred until the origin isolation hardening slice is reintroduced."
+  type        = string
+
+  validation {
+    condition     = contains(["Enabled", "Disabled"], var.container_app_environment_public_network_access)
+    error_message = "container_app_environment_public_network_access must be Enabled or Disabled."
+  }
+}
+
+variable "diagnostic_destinations" {
+  description = "Non-secret diagnostic destination contracts from observability_foundation."
+  type = map(object({
+    log_analytics_workspace_resource_id = optional(string)
+    application_insights_resource_id    = optional(string)
+    destination_type                    = string
+    expected_log_groups                 = optional(list(string))
+    expected_log_categories             = optional(list(string))
+    expected_metric_categories          = list(string)
+    consumer_stage                      = string
+  }))
+
+  validation {
+    condition = (
+      can(var.diagnostic_destinations["front_door"]) &&
+      var.diagnostic_destinations["front_door"].consumer_stage == "edge" &&
+      var.diagnostic_destinations["front_door"].log_analytics_workspace_resource_id != null
+    )
+    error_message = "diagnostic_destinations must include front_door for edge with a Log Analytics workspace resource ID."
+  }
+}
+
 variable "log_analytics_workspace_id" {
   description = "Log Analytics workspace ID used for Front Door access, health probe, WAF logs, and metrics."
   type        = string

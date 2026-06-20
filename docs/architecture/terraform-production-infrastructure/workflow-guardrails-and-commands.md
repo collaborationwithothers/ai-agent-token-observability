@@ -72,6 +72,11 @@ Rules:
 - `public_dns` must be planned and applied separately through `.github/workflows/terraform-public-dns.yml` as retained shared infrastructure before `edge` depends on its delegated Azure DNS zone output.
 - The retained public DNS workflow must use the single owner workspace `pd_eastus2_internal`, require the protected `terraform-public-dns-apply` environment before applying the saved plan artifact, emit the manual Cloudflare NS records from `cloudflare_delegation_ns_records`, and provide a `verify_delegation` operation that compares public NS records with `product_dns_zone_name_servers`.
 - `app_runtime` plans must use the digest-pinned `app-runtime-images.auto.tfvars.json` artifact produced by the selected ACR Image Publish run. Do not pass artifact names, mutable `latest` tags, or `example.azurecr.io` placeholder images into Terraform deploy.
+- The deploy helper must read required upstream outputs centrally and fail closed before planning if an output is missing, null, empty, malformed, read from the `default` workspace, or read from a workspace other than the selected environment workspace.
+- The only normal deploy cross-workspace exception is `edge` reading retained `public_dns.product_dns_zone` from `pd_eastus2_internal`.
+- `app_runtime` consumes same-workspace non-secret contracts from `foundation`, `network_private_data_plane`, `observability_foundation`, `data_platform`, and `ai_services`, plus the selected digest-pinned image artifact.
+- `edge` consumes same-workspace `app_runtime` origin evidence, same-workspace observability diagnostics, and the retained public DNS zone. It must not implement deferred Container Apps direct-origin blocking or Front Door Private Link origin isolation in this workflow contract.
+- Normal deploy workflow summaries are sanitized and may include only the stage, workspace, commit SHA, selected ACR publish run ID when applicable, and result.
 
 Guardrail validator:
 
@@ -83,6 +88,7 @@ Guardrail validator:
 - The validator must fail if `terraform apply -auto-approve` appears in deployment-capable workflows.
 - The validator must fail if the normal Terraform deploy workflow can apply without the `terraform-apply` environment, without downloading the saved plan artifact, or with `public_dns` in normal target stages.
 - The validator must fail if the normal Terraform deploy workflow can plan `app_runtime` without ACR publish run validation, accepts image artifact names or commit SHAs as dispatch input, uses mutable `latest`, or allows placeholder app runtime images.
+- The validator must fail if cross-stage output wiring reads environment stage outputs from the wrong workspace, allows the `default` workspace, omits retained `public_dns` handling for `edge`, omits the app runtime image digest artifact requirement, or writes raw Terraform output, ACA FQDNs, private endpoint details, or secret-like values to workflow summaries.
 - The validator must fail if the retained public DNS workflow can target non-`pd_eastus2_internal` scope, manage Cloudflare API/provider state, handle certificate material, omit public NS verification, or plan a public DNS destroy.
 - The validator must have tests with unsafe workflow fixtures.
 

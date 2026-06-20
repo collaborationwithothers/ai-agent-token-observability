@@ -32,23 +32,22 @@ Remote backend example: `backend.azurerm.tf.example`
 Local validation:
 
 ```bash
-terraform init -backend=false
-terraform validate
-terraform workspace select dv_eastus2_internal || terraform workspace new dv_eastus2_internal
-terraform plan -input=false -lock=false \
-  -var-file=app-runtime-images.auto.tfvars.json \
-  -var="environment=dv" \
-  -var="azure_region=eastus2" \
-  -var="customer_organization_slug=internal" \
-  -var="terraform_workspace_name=dv_eastus2_internal" \
-  -var="resource_instance=core" \
-  -var="container_registry_id=/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-to-dv-eastus2-internal-foundation/providers/Microsoft.ContainerRegistry/registries/todveastus2internalcoreacr" \
-  -var='tags={environment="dv",region="eastus2",product="token-observability",owner="platform",data_classification="internal",managed_by="terraform"}'
+scripts/terraform-stage-check.sh app_runtime
+scripts/validate-terraform-app-runtime.sh
 ```
 
 Use `tfswitch 1.14.7` locally when the system `terraform` binary is older than the stage `required_version`.
 
-The stage intentionally uses Container App user-assigned managed identities and secret references rather than hardcoded secret values. Supply digest-pinned ACR image names, `container_registry_id`, optional Log Analytics workspace ID, and Key Vault secret IDs through environment-specific workflow inputs or variable files.
+The guarded deploy helper supplies the stage from upstream non-secret outputs before planning:
+
+- `foundation`: `container_registry_id` and `container_registry_login_server`.
+- `network_private_data_plane`: `subnet_ids.container_apps_infrastructure`.
+- `observability_foundation`: `diagnostic_destinations`.
+- `data_platform`: PostgreSQL, storage, captured-content, operational-storage, and lifecycle references.
+- `ai_services`: AI service, recommendation model deployment, language PII detection, and content safety references.
+- A selected ACR Image Publish artifact through `APP_RUNTIME_IMAGES_TFVARS_PATH`.
+
+The stage intentionally uses Container App user-assigned managed identities and secret references rather than hardcoded secret values. Upstream outputs must not carry credentials, raw content, prompts, command output, tool results, logs, or private endpoint implementation details.
 
 Origin evidence:
 

@@ -18,29 +18,20 @@ Local validation:
 cd infrastructure/azure
 tfswitch 1.14.7
 terraform fmt -recursive
-cd stages/edge
-terraform init -backend=false
-terraform validate
-terraform plan -input=false -lock=false \
-  -var="environment=dv" \
-  -var="azure_region=eastus2" \
-  -var="customer_organization_slug=internal" \
-  -var="terraform_workspace_name=dv_eastus2_internal" \
-  -var="resource_instance=core" \
-  -var='tags={environment="dv",region="eastus2",product="token-observability",owner="platform",data_classification="internal",managed_by="terraform"}' \
-  -var='container_app_fqdns={product_dashboard="dashboard.example.azurecontainerapps.io",product_api="api.example.azurecontainerapps.io",product_ingestion_endpoint="ingest.example.azurecontainerapps.io"}' \
-  -var='azure_dns_zone={id="/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-to-shared-public-dns/providers/Microsoft.Network/dnsZones/tokenobs.consultwithcloud.com",name="tokenobs.consultwithcloud.com",resource_group_name="rg-to-shared-public-dns",manage_records=true}' \
-  -var='log_analytics_workspace_id=/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-to-dv-eastus2-internal-observability/providers/Microsoft.OperationalInsights/workspaces/to-dv-core-law'
+cd ../..
+scripts/terraform-stage-check.sh edge
 ```
 
 Guarded plan workflow path:
 
 1. Initialize the `edge` stage with the non-production remote backend config.
 2. Select the workspace named `{environment}_{azureRegion}_{customerOrganizationSlug}`.
-3. Pass `container_app_fqdns` from the `app_runtime` stage output.
-4. Pass `azure_dns_zone` from the retained `public_dns` stage output `product_dns_zone`. Set `manage_records=true` to let Terraform create Front Door TXT validation records and CNAME records for `app`, `api`, and `ingest`.
-5. Pass `log_analytics_workspace_id` from the `observability_foundation` stage output.
+3. Pass `container_app_fqdns`, `container_app_environment_id`, and `container_app_environment_public_network_access` from the same-workspace `app_runtime` stage output.
+4. Pass `diagnostic_destinations` from the same-workspace `observability_foundation` stage output.
+5. Pass `azure_dns_zone` from the retained `public_dns` stage output `product_dns_zone` in the owner workspace `pd_eastus2_internal`. Set `manage_records=true` to let Terraform create Front Door TXT validation records and CNAME records for `app`, `api`, and `ingest`.
 6. Run `terraform validate` before `terraform plan`.
+
+Workflow summaries for this stage must stay sanitized. They can include the stage, workspace, commit SHA, and result, but must not print Container Apps FQDNs, private endpoint details, secrets, raw Terraform output, or diagnostic resource IDs.
 
 Managed certificate and DNS workflow:
 

@@ -727,6 +727,7 @@ jobs:
           TF_WORKSPACE: ${{ needs.select.outputs.terraform_workspace }}
           PLAN_ARTIFACT_DIR: ${{ runner.temp }}/terraform-plans
           APP_RUNTIME_IMAGES_TFVARS_PATH: ${{ runner.temp }}/app-runtime-images/app-runtime-images.auto.tfvars.json
+          ACR_PUBLISH_RUN_ID: ${{ needs.validate-app-runtime-images.outputs.acr_publish_run_id }}
           TF_STATE_RESOURCE_GROUP_NAME: ${{ vars.TF_STATE_RESOURCE_GROUP_NAME }}
           TF_STATE_STORAGE_ACCOUNT_NAME: ${{ vars.TF_STATE_STORAGE_ACCOUNT_NAME }}
           TF_STATE_CONTAINER_NAME: ${{ vars.TF_STATE_CONTAINER_NAME }}
