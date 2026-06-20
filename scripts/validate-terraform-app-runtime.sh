@@ -45,7 +45,7 @@ required_stage_patterns = {
     "job secret references use user-assigned identity": r"identity\s*=\s*azurerm_user_assigned_identity\.jobs\[job_key\]\.id",
     "job identity output principal ID": r"container_app_job_identities[\s\S]*principal_id\s*=\s*identity\.principal_id",
     "explicit ACA infrastructure subnet opt-in": r"container_app_environment_subnet_id\s*=\s*var\.container_app_environment_infrastructure_subnet_id",
-    "conditional ACA infrastructure resource group": r'infrastructure_resource_group_name\s*=\s*local\.container_app_environment_subnet_id\s*==\s*null\s*\?\s*null\s*:\s*"rg-\$\{local\.name_prefix\}-aca-infra"',
+    "stable ACA infrastructure resource group": r'infrastructure_resource_group_name\s*=\s*"rg-\$\{local\.name_prefix\}-aca-infra"',
     "environment diagnostic target local": r"container_app_environment_diagnostic_targets\s*=\s*\{[^}]*environment\s*=\s*azurerm_container_app_environment\.this\.id",
     "service diagnostic target local": r"container_app_service_diagnostic_targets\s*=\s*\{",
     "job diagnostic target local": r"container_app_job_diagnostic_targets\s*=\s*\{",
@@ -73,6 +73,13 @@ if re.search(
     re.IGNORECASE | re.MULTILINE | re.DOTALL,
 ):
     errors.append("app_runtime must not implicitly attach the ACA environment to network_subnet_ids.container_apps_infrastructure")
+
+if re.search(
+    r"infrastructure_resource_group_name\s*=.*container_app_environment_subnet_id\s*==\s*null\s*\?\s*null",
+    stage_content,
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
+):
+    errors.append("app_runtime must preserve the stable ACA infrastructure_resource_group_name in the default public-origin path")
 
 for resource_name in ["container_app_services", "container_app_jobs"]:
     workload_diagnostics = re.search(

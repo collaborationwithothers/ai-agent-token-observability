@@ -40,7 +40,7 @@ resource "azurerm_container_app_environment" "this" {
   infrastructure_subnet_id           = local.container_app_environment_subnet_id
   public_network_access              = var.container_app_environment_public_network_access
   zone_redundancy_enabled            = local.container_app_environment_subnet_id == null ? null : var.enable_zone_redundancy
-  infrastructure_resource_group_name = local.container_app_environment_subnet_id == null ? null : "rg-${local.name_prefix}-aca-infra"
+  infrastructure_resource_group_name = "rg-${local.name_prefix}-aca-infra"
   tags                               = local.common_tags
 
   workload_profile {
