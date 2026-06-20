@@ -200,7 +200,7 @@ Grafana roles must not mirror Product Dashboard roles such as ProductOwner, Engi
 
 Production Grafana is human Viewer-only by default. Production Admin access is limited to a small break-glass or platform operations group, and routine production dashboard changes must flow through versioned dashboard JSON and Terraform. Human Grafana Editor assignments are allowed in `dv` and `qa`; `pp` or `pd` Editor assignments require an explicit exception.
 
-Grafana role mappings are configured with environment-scoped Terraform variables:
+Grafana role mappings are configured with environment-scoped Terraform variables and applied by the `managed_grafana` stage as workspace-scoped Azure Managed Grafana role assignments:
 
 | Variable | Role |
 | --- | --- |
@@ -208,7 +208,7 @@ Grafana role mappings are configured with environment-scoped Terraform variables
 | `grafana_editor_group_object_id` | Grafana Editor |
 | `grafana_viewer_group_object_id` | Grafana Viewer |
 
-The variables must contain Microsoft Entra group object IDs, not display names. Object IDs are not secrets, but they are authorization-sensitive configuration. In `pp` and `pd`, `grafana_editor_group_object_id` must be null or empty unless `allow_production_grafana_editors = true` and the apply receives the required workflow approval.
+The variables must contain Microsoft Entra group object IDs, not display names. Object IDs are not secrets, but they are authorization-sensitive configuration. In `pp` and `pd`, `grafana_editor_group_object_id` must be null or empty unless `allow_production_grafana_editors = true` and the apply receives the required workflow approval. Grafana RBAC grants aggregate dashboard access only; it must not authorize Product API routes or duplicate Product Dashboard role names.
 
 Session drill-down belongs in the Product Dashboard, where product authorization can enforce Customer Organization, role, scope, content policy, and audit rules.
 

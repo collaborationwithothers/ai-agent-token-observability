@@ -21,6 +21,27 @@ public sealed class ProductApiAuthorizationContextTests
     private static readonly DateTimeOffset Now = new(2026, 6, 15, 12, 0, 0, TimeSpan.Zero);
 
     [Fact]
+    public void ProductAuthorizationRolesDoNotIncludeGrafanaRoleNames()
+    {
+        var productRoleNames = Enum.GetNames<ProductRole>();
+
+        foreach (var grafanaRoleName in new[]
+        {
+            "Grafana Admin",
+            "Grafana Editor",
+            "Grafana Viewer",
+            "Grafana Limited Viewer",
+            "GrafanaAdmin",
+            "GrafanaEditor",
+            "GrafanaViewer",
+            "GrafanaLimitedViewer",
+        })
+        {
+            Assert.DoesNotContain(grafanaRoleName, productRoleNames);
+        }
+    }
+
+    [Fact]
     public async Task CurrentUserRouteReturnsResolvedAuthorizationContext()
     {
         var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));

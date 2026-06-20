@@ -139,6 +139,18 @@ required_stage_patterns = {
     "first release dashboard resources": r'resource\s+"grafana_dashboard"\s+"first_release"',
     "dashboard artifact local": r'grafana_dashboard_artifacts\s*=\s*\{',
     "dashboard file config": r'config_json\s*=\s*file\(each\.value\.path\)',
+    "Grafana admin group variable": r'variable\s+"grafana_admin_group_object_id"',
+    "Grafana editor group variable": r'variable\s+"grafana_editor_group_object_id"',
+    "Grafana viewer group variable": r'variable\s+"grafana_viewer_group_object_id"',
+    "production editor exception variable": r'variable\s+"allow_production_grafana_editors"',
+    "Grafana RBAC guard": r'resource\s+"terraform_data"\s+"grafana_rbac_guard"',
+    "production editor precondition": r'production_editor_role_blocked',
+    "Grafana workspace RBAC assignments": r'resource\s+"azurerm_role_assignment"\s+"grafana_workspace_rbac"',
+    "Grafana Admin role": r'role_definition_name\s*=\s*"Grafana Admin"',
+    "Grafana Editor role": r'role_definition_name\s*=\s*"Grafana Editor"',
+    "Grafana Viewer role": r'role_definition_name\s*=\s*"Grafana Viewer"',
+    "Grafana role assignments use groups": r'principal_type\s*=\s*"Group"',
+    "Grafana role assignment scope": r'scope\s*=\s*module\.managed_grafana\.resource_id',
 }
 
 required_module_patterns = {
@@ -190,6 +202,8 @@ forbidden_tf_patterns = {
     "service account tokens": r'(service_account_token|grafana_service_account|api_key\s*=|api_key_enabled\s*=\s*true)',
     "custom hostname": r'(custom_hostname|custom_domain|vanity|grafana\.tokenobs)',
     "raw telemetry sources": r'(trace_log_data_source_identifiers|operational_traces_logs|raw_session|raw_content|raw_logs|developer_ranking)',
+    "Grafana Limited Viewer role": r'"Grafana Limited Viewer"',
+    "Product API authorization coupling": r'(ProductOwner|EngineeringLead|Developer|SecurityReviewer|PlatformAdmin|ReadOnlyViewer|ProductAuthorizationAction|product_api_role|product_dashboard_role)',
 }
 
 combined_tf = f"{stage_content}\n{module_content}"
@@ -201,6 +215,18 @@ grafana_resource_matches = set(re.findall(r'resource\s+"(grafana_[^"]+)"', combi
 unexpected_grafana_resources = grafana_resource_matches - {"grafana_folder", "grafana_dashboard"}
 if unexpected_grafana_resources:
     errors.append(f"managed_grafana Terraform contains unsupported Grafana resources: {sorted(unexpected_grafana_resources)}")
+
+workspace_rbac_match = re.search(
+    r'resource\s+"azurerm_role_assignment"\s+"grafana_workspace_rbac"\s+\{(?P<body>.*?)\n\}',
+    stage_content,
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
+if workspace_rbac_match:
+    workspace_rbac_body = workspace_rbac_match.group("body")
+    if re.search(r'principal_type\s*=\s*"(User|ServicePrincipal)"', workspace_rbac_body, re.IGNORECASE):
+        errors.append("Grafana workspace RBAC assignments must target Microsoft Entra groups only")
+    if re.search(r'skip_service_principal_aad_check', workspace_rbac_body, re.IGNORECASE):
+        errors.append("Grafana workspace RBAC assignments must not use service principal AAD check bypasses")
 
 if not dashboard_dir.exists():
     errors.append("missing infrastructure/grafana/dashboards directory")
@@ -281,6 +307,14 @@ required_readme_terms = [
     "Azure Monitor workspace integration",
     "Monitoring Data Reader",
     "Repo-Versioned Dashboard Deployment",
+    "Grafana RBAC Boundary",
+    "Grafana Admin",
+    "Grafana Editor",
+    "Grafana Viewer",
+    "allow_production_grafana_editors",
+    "Grafana RBAC grants aggregate dashboard access only",
+    "does not authorize Product API routes",
+    "Individual ranking and punitive dashboard use are out of scope.",
     "Provider And AVM Choice",
     "No AzAPI workaround is required",
     "Do not add .NET, xUnit, or C# tests for Terraform behavior.",
