@@ -657,6 +657,236 @@ public sealed class ProductApiAuthorizationContextTests
     }
 
     [Fact]
+    public async Task TokenHotspotStorePreservesEvidenceBoundariesAndTenantIsolation()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var contoso = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var fabrikam = await CreateTenantAsync(store, "fabrikam", "fabrikam-tenant");
+        var contosoCredential = await IssueCredentialAsync(store, contoso, "profile-contoso-codex");
+        var fabrikamCredential = await IssueCredentialAsync(store, fabrikam, "profile-fabrikam-codex");
+        var contosoSession = await SeedTokenSessionAsync(
+            store,
+            contosoCredential.Credential,
+            "contoso-hotspot-session",
+            Now,
+            [(TokenMetricName.InputTokens, 120_000, TokenMetricStatus.Observed, TokenMetricConfidence.Observed, null)]);
+        var fabrikamSession = await SeedTokenSessionAsync(
+            store,
+            fabrikamCredential.Credential,
+            "fabrikam-hotspot-session",
+            Now,
+            [(TokenMetricName.InputTokens, 90_000, TokenMetricStatus.Observed, TokenMetricConfidence.Observed, null)]);
+
+        var confirmed = await store.RecordTokenHotspotAsync(new CreateTokenHotspotRecordRequest(
+            contoso.Organization.CustomerOrganizationId,
+            contosoSession.AgentSessionId,
+            TokenHotspotType.LargeContext,
+            TokenHotspotFindingState.Confirmed,
+            TokenHotspotAttributionType.Direct,
+            TokenHotspotConfidence.High,
+            TokenMetricStatus.Observed,
+            TokenMetricConfidence.Observed,
+            PromptCacheEvidenceState.NotApplicable,
+            ModelName: "gpt-5",
+            EvidenceSummary: "Input tokens exceeded configured threshold using observed token evidence.",
+            EvidenceReferenceIds: [contosoSession.AgentSessionId],
+            TokenBurnScore: 0.91,
+            EstimatedCostImpact: null));
+        await store.RecordTokenHotspotAsync(new CreateTokenHotspotRecordRequest(
+            fabrikam.Organization.CustomerOrganizationId,
+            fabrikamSession.AgentSessionId,
+            TokenHotspotType.PromptCacheBreakage,
+            TokenHotspotFindingState.CandidateLlmInferred,
+            TokenHotspotAttributionType.LlmInferred,
+            TokenHotspotConfidence.Low,
+            TokenMetricStatus.Estimated,
+            TokenMetricConfidence.LlmInferred,
+            PromptCacheEvidenceState.InferredCandidate,
+            ModelName: "gpt-5",
+            EvidenceSummary: "Candidate cache breakage inferred from explicit cache evidence gaps.",
+            EvidenceReferenceIds: [fabrikamSession.AgentSessionId],
+            TokenBurnScore: null,
+            EstimatedCostImpact: null));
+        await store.RecordTokenHotspotAsync(new CreateTokenHotspotRecordRequest(
+            contoso.Organization.CustomerOrganizationId,
+            contosoSession.AgentSessionId,
+            TokenHotspotType.PromptCacheBreakage,
+            TokenHotspotFindingState.CandidateCorrelated,
+            TokenHotspotAttributionType.Correlated,
+            TokenHotspotConfidence.Medium,
+            TokenMetricStatus.Unavailable,
+            TokenMetricConfidence.Unavailable,
+            PromptCacheEvidenceState.Unavailable,
+            ModelName: "gpt-5",
+            EvidenceSummary: "Cache cause is unknown because cache evidence was unavailable.",
+            EvidenceReferenceIds: [contosoSession.AgentSessionId],
+            TokenBurnScore: null,
+            EstimatedCostImpact: null));
+        await store.RecordTokenHotspotAsync(new CreateTokenHotspotRecordRequest(
+            contoso.Organization.CustomerOrganizationId,
+            contosoSession.AgentSessionId,
+            TokenHotspotType.PromptCacheBreakage,
+            TokenHotspotFindingState.CandidateCorrelated,
+            TokenHotspotAttributionType.Correlated,
+            TokenHotspotConfidence.High,
+            TokenMetricStatus.Observed,
+            TokenMetricConfidence.Observed,
+            PromptCacheEvidenceState.KnownReason,
+            ModelName: "gpt-5",
+            EvidenceSummary: "Stable prefix changed based on observed cache evidence.",
+            EvidenceReferenceIds: [contosoSession.AgentSessionId],
+            TokenBurnScore: null,
+            EstimatedCostImpact: null));
+
+        var contosoHotspots = await store.ListTokenHotspotsAsync(
+            contoso.Organization.CustomerOrganizationId,
+            contosoSession.AgentSessionId);
+        Assert.Equal(3, contosoHotspots.Count);
+        var hotspot = Assert.Single(contosoHotspots, candidate => candidate.HotspotType == TokenHotspotType.LargeContext);
+        Assert.Equal(confirmed.TokenHotspotId, hotspot.TokenHotspotId);
+        Assert.Equal("codex-cli", hotspot.Harness);
+        Assert.Equal("gpt-5", hotspot.ModelName);
+        Assert.Equal(TokenMetricStatus.Observed, hotspot.MetricStatus);
+        Assert.Equal(TokenHotspotFindingState.Confirmed, hotspot.FindingState);
+        Assert.Equal(TokenHotspotAttributionType.Direct, hotspot.AttributionType);
+        Assert.Equal(TokenHotspotConfidence.High, hotspot.Confidence);
+        Assert.Equal(PromptCacheEvidenceState.NotApplicable, hotspot.PromptCacheEvidenceState);
+        Assert.DoesNotContain("fabrikam", hotspot.EvidenceSummary, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(contosoHotspots, candidate => candidate.PromptCacheEvidenceState == PromptCacheEvidenceState.Unavailable);
+        Assert.Contains(contosoHotspots, candidate => candidate.PromptCacheEvidenceState == PromptCacheEvidenceState.KnownReason);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => store.RecordTokenHotspotAsync(new CreateTokenHotspotRecordRequest(
+            contoso.Organization.CustomerOrganizationId,
+            contosoSession.AgentSessionId,
+            TokenHotspotType.PromptCacheBreakage,
+            TokenHotspotFindingState.Confirmed,
+            TokenHotspotAttributionType.LlmInferred,
+            TokenHotspotConfidence.Medium,
+            TokenMetricStatus.Estimated,
+            TokenMetricConfidence.LlmInferred,
+            PromptCacheEvidenceState.InferredCandidate,
+            ModelName: "gpt-5",
+            EvidenceSummary: "LLM says this is confirmed.",
+            EvidenceReferenceIds: [contosoSession.AgentSessionId],
+            TokenBurnScore: null,
+            EstimatedCostImpact: null)));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.RecordTokenHotspotAsync(new CreateTokenHotspotRecordRequest(
+            contoso.Organization.CustomerOrganizationId,
+            contosoSession.AgentSessionId,
+            TokenHotspotType.LargeContext,
+            TokenHotspotFindingState.Confirmed,
+            TokenHotspotAttributionType.Direct,
+            TokenHotspotConfidence.Medium,
+            TokenMetricStatus.Estimated,
+            TokenMetricConfidence.LlmInferred,
+            PromptCacheEvidenceState.NotApplicable,
+            ModelName: "gpt-5",
+            EvidenceSummary: "Input tokens exceeded configured threshold using estimated token evidence.",
+            EvidenceReferenceIds: [contosoSession.AgentSessionId],
+            TokenBurnScore: null,
+            EstimatedCostImpact: null)));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.RecordTokenHotspotAsync(new CreateTokenHotspotRecordRequest(
+            contoso.Organization.CustomerOrganizationId,
+            contosoSession.AgentSessionId,
+            TokenHotspotType.PromptCacheBreakage,
+            TokenHotspotFindingState.CandidateLlmInferred,
+            TokenHotspotAttributionType.LlmInferred,
+            TokenHotspotConfidence.Low,
+            TokenMetricStatus.Estimated,
+            TokenMetricConfidence.LlmInferred,
+            PromptCacheEvidenceState.InferredCandidate,
+            ModelName: "gpt-5",
+            EvidenceSummary: "The user made an obvious error.",
+            EvidenceReferenceIds: [contosoSession.AgentSessionId],
+            TokenBurnScore: null,
+            EstimatedCostImpact: null)));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.RecordTokenHotspotAsync(new CreateTokenHotspotRecordRequest(
+            contoso.Organization.CustomerOrganizationId,
+            contosoSession.AgentSessionId,
+            TokenHotspotType.PromptCacheBreakage,
+            TokenHotspotFindingState.CandidateLlmInferred,
+            TokenHotspotAttributionType.LlmInferred,
+            TokenHotspotConfidence.Low,
+            TokenMetricStatus.Estimated,
+            TokenMetricConfidence.LlmInferred,
+            PromptCacheEvidenceState.InferredCandidate,
+            ModelName: "gpt-5",
+            EvidenceSummary: "Candidate cache breakage inferred from supplied evidence.",
+            EvidenceReferenceIds: [],
+            TokenBurnScore: null,
+            EstimatedCostImpact: null)));
+    }
+
+    [Fact]
+    public async Task SessionsRouteReturnsSafeTokenHotspotsWithoutPeopleRanking()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var adminClaims = CreateClaims(subject: "admin-subject", groupObjectIds: ["entra-admin-group"]);
+        var admin = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            adminClaims);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            admin.ProductUserId,
+            "entra-admin-group",
+            ProductRole.PlatformAdmin);
+        var credential = await IssueCredentialAsync(store, seed, "profile-contoso-codex");
+        var session = await SeedTokenSessionAsync(
+            store,
+            credential.Credential,
+            "api-hotspot-session",
+            Now,
+            [(TokenMetricName.CachedInputTokens, null, TokenMetricStatus.Unavailable, TokenMetricConfidence.Unavailable, null)]);
+        await store.RecordTokenHotspotAsync(new CreateTokenHotspotRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            TokenHotspotType.PromptCacheBreakage,
+            TokenHotspotFindingState.CandidateCorrelated,
+            TokenHotspotAttributionType.Correlated,
+            TokenHotspotConfidence.Medium,
+            TokenMetricStatus.Unavailable,
+            TokenMetricConfidence.Unavailable,
+            PromptCacheEvidenceState.Unknown,
+            ModelName: "gpt-5",
+            EvidenceSummary: "Cache cause is unknown because provider cache fields were unavailable.",
+            EvidenceReferenceIds: [session.AgentSessionId],
+            TokenBurnScore: null,
+            EstimatedCostImpact: null));
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+        using var request = CreateAuthorizedRequest(HttpMethod.Get, "/api/v1/sessions", "contoso", adminClaims);
+
+        using var response = await client.SendAsync(request);
+
+        response.EnsureSuccessStatusCode();
+        using var body = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
+        var sessionJson = Assert.Single(body.RootElement.GetProperty("items").EnumerateArray());
+        var tokenHotspot = Assert.Single(sessionJson.GetProperty("tokenHotspots").EnumerateArray());
+        Assert.Equal("prompt_cache_breakage", tokenHotspot.GetProperty("hotspotType").GetString());
+        Assert.Equal("candidate_correlated", tokenHotspot.GetProperty("findingState").GetString());
+        Assert.Equal("correlated", tokenHotspot.GetProperty("attributionType").GetString());
+        Assert.Equal("medium", tokenHotspot.GetProperty("confidence").GetString());
+        Assert.Equal("unavailable", tokenHotspot.GetProperty("metricStatus").GetString());
+        Assert.Equal("unavailable", tokenHotspot.GetProperty("metricConfidence").GetString());
+        Assert.Equal("unknown", tokenHotspot.GetProperty("promptCacheEvidenceState").GetString());
+        Assert.Equal("codex-cli", tokenHotspot.GetProperty("harness").GetString());
+        Assert.Equal("gpt-5", tokenHotspot.GetProperty("modelName").GetString());
+        Assert.Contains("unknown", tokenHotspot.GetProperty("evidenceSummary").GetString(), StringComparison.OrdinalIgnoreCase);
+        Assert.False(tokenHotspot.TryGetProperty("productUserId", out _));
+        Assert.False(tokenHotspot.TryGetProperty("developerRank", out _));
+        var json = body.RootElement.ToString();
+        Assert.DoesNotContain("raw_prompt", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("prompt_text", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("command_output", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("tool_result", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("blame", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ranking", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task SessionsRouteAllowsDeveloperSelfViewWithoutCrossUserLeakage()
     {
         var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
@@ -1719,7 +1949,7 @@ public sealed class ProductApiAuthorizationContextTests
             envelope.TelemetryEnvelopeId));
     }
 
-    private static async Task SeedTokenSessionAsync(
+    private static async Task<AgentSessionRecord> SeedTokenSessionAsync(
         InMemoryTenantMetadataStore store,
         ScopedIngestionCredential credential,
         string providerSessionId,
@@ -1807,6 +2037,8 @@ public sealed class ProductApiAuthorizationContextTests
                 observation.Value.HasValue ? TokenObservationSourceKind.CodexEvent : TokenObservationSourceKind.Missing,
                 envelope.TelemetryEnvelopeId));
         }
+
+        return session;
     }
 
     private static string CreatePricingOverrideJson(decimal pricePerMillionTokens = 0.75m)

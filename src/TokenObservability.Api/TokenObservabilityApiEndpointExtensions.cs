@@ -282,6 +282,9 @@ internal static class TokenObservabilityApiEndpointExtensions
             var observations = await tenantMetadataStore.ListTokenObservationsAsync(
                 customerOrganizationId,
                 session.AgentSessionId);
+            var tokenHotspots = await tenantMetadataStore.ListTokenHotspotsAsync(
+                customerOrganizationId,
+                session.AgentSessionId);
 
             items.Add(new
             {
@@ -309,6 +312,24 @@ internal static class TokenObservabilityApiEndpointExtensions
                     sourceKind = ToWireSourceKind(observation.SourceKind),
                     sourceTelemetryEnvelopeId = observation.SourceTelemetryEnvelopeId?.ToString(),
                     createdAtUtc = observation.CreatedAtUtc
+                }).ToArray(),
+                tokenHotspots = tokenHotspots.Select(static hotspot => new
+                {
+                    tokenHotspotId = hotspot.TokenHotspotId.ToString(),
+                    hotspotType = ToWireHotspotType(hotspot.HotspotType),
+                    findingState = ToWireHotspotFindingState(hotspot.FindingState),
+                    attributionType = ToWireHotspotAttributionType(hotspot.AttributionType),
+                    confidence = ToWireHotspotConfidence(hotspot.Confidence),
+                    metricStatus = ToWireMetricStatus(hotspot.MetricStatus),
+                    metricConfidence = ToWireMetricConfidence(hotspot.MetricConfidence),
+                    promptCacheEvidenceState = ToWirePromptCacheEvidenceState(hotspot.PromptCacheEvidenceState),
+                    harness = hotspot.Harness,
+                    modelName = hotspot.ModelName,
+                    evidenceSummary = hotspot.EvidenceSummary,
+                    evidenceReferenceIds = hotspot.EvidenceReferenceIds,
+                    tokenBurnScore = hotspot.TokenBurnScore,
+                    estimatedCostImpact = hotspot.EstimatedCostImpact,
+                    createdAtUtc = hotspot.CreatedAtUtc
                 }).ToArray()
             });
         }
@@ -1116,6 +1137,73 @@ internal static class TokenObservabilityApiEndpointExtensions
             TokenObservationSourceKind.Estimator => "estimator",
             TokenObservationSourceKind.Missing => "missing",
             _ => throw new ArgumentOutOfRangeException(nameof(sourceKind), sourceKind, null)
+        };
+    }
+
+    private static string ToWireHotspotType(TokenHotspotType hotspotType)
+    {
+        return hotspotType switch
+        {
+            TokenHotspotType.PromptCacheBreakage => "prompt_cache_breakage",
+            TokenHotspotType.LargeContext => "large_context",
+            TokenHotspotType.ToolLoop => "tool_loop",
+            TokenHotspotType.ModelRetry => "model_retry",
+            TokenHotspotType.RepoContextBloat => "repo_context_bloat",
+            TokenHotspotType.GeneratedArtifactBloat => "generated_artifact_bloat",
+            TokenHotspotType.ExpensiveModelChoice => "expensive_model_choice",
+            TokenHotspotType.ErrorRework => "error_rework",
+            TokenHotspotType.Unknown => "unknown",
+            _ => throw new ArgumentOutOfRangeException(nameof(hotspotType), hotspotType, null)
+        };
+    }
+
+    private static string ToWireHotspotFindingState(TokenHotspotFindingState findingState)
+    {
+        return findingState switch
+        {
+            TokenHotspotFindingState.Confirmed => "confirmed",
+            TokenHotspotFindingState.CandidateLlmInferred => "candidate_llm_inferred",
+            TokenHotspotFindingState.CandidateCorrelated => "candidate_correlated",
+            TokenHotspotFindingState.Rejected => "rejected",
+            TokenHotspotFindingState.Superseded => "superseded",
+            _ => throw new ArgumentOutOfRangeException(nameof(findingState), findingState, null)
+        };
+    }
+
+    private static string ToWireHotspotAttributionType(TokenHotspotAttributionType attributionType)
+    {
+        return attributionType switch
+        {
+            TokenHotspotAttributionType.Direct => "direct",
+            TokenHotspotAttributionType.Correlated => "correlated",
+            TokenHotspotAttributionType.LlmInferred => "llm_inferred",
+            TokenHotspotAttributionType.Unavailable => "unavailable",
+            _ => throw new ArgumentOutOfRangeException(nameof(attributionType), attributionType, null)
+        };
+    }
+
+    private static string ToWireHotspotConfidence(TokenHotspotConfidence confidence)
+    {
+        return confidence switch
+        {
+            TokenHotspotConfidence.High => "high",
+            TokenHotspotConfidence.Medium => "medium",
+            TokenHotspotConfidence.Low => "low",
+            TokenHotspotConfidence.Unavailable => "unavailable",
+            _ => throw new ArgumentOutOfRangeException(nameof(confidence), confidence, null)
+        };
+    }
+
+    private static string ToWirePromptCacheEvidenceState(PromptCacheEvidenceState evidenceState)
+    {
+        return evidenceState switch
+        {
+            PromptCacheEvidenceState.KnownReason => "known_reason",
+            PromptCacheEvidenceState.InferredCandidate => "inferred_candidate",
+            PromptCacheEvidenceState.Unknown => "unknown",
+            PromptCacheEvidenceState.Unavailable => "unavailable",
+            PromptCacheEvidenceState.NotApplicable => "not_applicable",
+            _ => throw new ArgumentOutOfRangeException(nameof(evidenceState), evidenceState, null)
         };
     }
 

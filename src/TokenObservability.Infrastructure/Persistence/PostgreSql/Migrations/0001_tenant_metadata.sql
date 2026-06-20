@@ -444,6 +444,78 @@ CREATE TABLE IF NOT EXISTS product_api_idempotency (
     )
 );
 
+CREATE TABLE IF NOT EXISTS token_hotspot (
+    token_hotspot_id uuid PRIMARY KEY,
+    customer_organization_id uuid NOT NULL,
+    agent_session_id text NOT NULL,
+    harness text NOT NULL,
+    model_name text NULL,
+    hotspot_type text NOT NULL,
+    finding_state text NOT NULL,
+    attribution_type text NOT NULL,
+    confidence text NOT NULL,
+    metric_status text NOT NULL,
+    metric_confidence text NOT NULL,
+    prompt_cache_evidence_state text NOT NULL,
+    evidence_summary text NOT NULL,
+    evidence_refs_json jsonb NOT NULL,
+    detection_key text NULL,
+    token_burn_score double precision NULL,
+    estimated_cost_impact numeric NULL,
+    created_at_utc timestamptz NOT NULL,
+    CONSTRAINT fk_token_hotspot_agent_session FOREIGN KEY (customer_organization_id, agent_session_id) REFERENCES agent_session (customer_organization_id, agent_session_id),
+    CONSTRAINT ck_token_hotspot_harness CHECK (harness IN ('codex-cli')),
+    CONSTRAINT ck_token_hotspot_type CHECK (hotspot_type IN ('prompt_cache_breakage', 'large_context', 'tool_loop', 'model_retry', 'repo_context_bloat', 'generated_artifact_bloat', 'expensive_model_choice', 'error_rework', 'unknown')),
+    CONSTRAINT ck_token_hotspot_finding_state CHECK (finding_state IN ('confirmed', 'candidate_llm_inferred', 'candidate_correlated', 'rejected', 'superseded')),
+    CONSTRAINT ck_token_hotspot_attribution_type CHECK (attribution_type IN ('direct', 'correlated', 'llm_inferred', 'unavailable')),
+    CONSTRAINT ck_token_hotspot_confidence CHECK (confidence IN ('high', 'medium', 'low', 'unavailable')),
+    CONSTRAINT ck_token_hotspot_metric_status CHECK (metric_status IN ('observed', 'derived', 'estimated', 'unavailable', 'not_applicable', 'mixed')),
+    CONSTRAINT ck_token_hotspot_metric_confidence CHECK (metric_confidence IN ('observed', 'deterministic', 'estimated', 'llm_inferred', 'unavailable')),
+    CONSTRAINT ck_token_hotspot_prompt_cache_evidence_state CHECK (prompt_cache_evidence_state IN ('known_reason', 'inferred_candidate', 'unknown', 'unavailable', 'not_applicable')),
+    CONSTRAINT ck_token_hotspot_metric_quality CHECK (
+        metric_status NOT IN ('unavailable', 'not_applicable')
+        OR metric_confidence = 'unavailable'
+    ),
+    CONSTRAINT ck_token_hotspot_prompt_cache_scope CHECK (
+        (hotspot_type = 'prompt_cache_breakage' AND prompt_cache_evidence_state <> 'not_applicable')
+        OR (hotspot_type <> 'prompt_cache_breakage' AND prompt_cache_evidence_state = 'not_applicable')
+    ),
+    CONSTRAINT ck_token_hotspot_llm_candidate_boundary CHECK (
+        (finding_state = 'candidate_llm_inferred' AND attribution_type = 'llm_inferred')
+        OR (finding_state <> 'candidate_llm_inferred' AND attribution_type <> 'llm_inferred')
+    ),
+    CONSTRAINT ck_token_hotspot_confirmed_authority CHECK (
+        finding_state <> 'confirmed'
+        OR attribution_type <> 'llm_inferred'
+    ),
+    CONSTRAINT ck_token_hotspot_confirmed_metric_authority CHECK (
+        finding_state <> 'confirmed'
+        OR metric_confidence NOT IN ('llm_inferred', 'unavailable')
+    ),
+    CONSTRAINT ck_token_hotspot_evidence_summary CHECK (
+        length(evidence_summary) BETWEEN 1 AND 512
+    ),
+    CONSTRAINT ck_token_hotspot_evidence_refs_json CHECK (
+        jsonb_typeof(evidence_refs_json) = 'array'
+        AND jsonb_array_length(evidence_refs_json) BETWEEN 1 AND 32
+    ),
+    CONSTRAINT ck_token_hotspot_detection_key CHECK (
+        detection_key IS NULL
+        OR (
+            length(detection_key) BETWEEN 1 AND 128
+            AND detection_key ~ '^[A-Za-z0-9_:/.-]+$'
+        )
+    ),
+    CONSTRAINT ck_token_hotspot_token_burn_score CHECK (
+        token_burn_score IS NULL
+        OR token_burn_score BETWEEN 0 AND 1
+    ),
+    CONSTRAINT ck_token_hotspot_estimated_cost_impact CHECK (
+        estimated_cost_impact IS NULL
+        OR estimated_cost_impact >= 0
+    )
+);
+
 CREATE TABLE IF NOT EXISTS aggregate_metric_point (
     aggregate_metric_point_id uuid PRIMARY KEY,
     customer_organization_id uuid NOT NULL,
@@ -532,6 +604,13 @@ CREATE INDEX IF NOT EXISTS ix_cost_estimate_customer_mix
 
 CREATE INDEX IF NOT EXISTS ix_product_api_idempotency_expiry
     ON product_api_idempotency (expires_at_utc);
+
+CREATE INDEX IF NOT EXISTS ix_token_hotspot_session_state
+    ON token_hotspot (customer_organization_id, agent_session_id, finding_state, created_at_utc);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_token_hotspot_customer_detection_key
+    ON token_hotspot (customer_organization_id, detection_key)
+    WHERE detection_key IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS ix_aggregate_metric_point_customer_exported
     ON aggregate_metric_point (customer_organization_id, exported_at_utc DESC);

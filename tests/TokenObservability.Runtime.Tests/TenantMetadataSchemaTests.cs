@@ -293,6 +293,84 @@ public sealed class TenantMetadataSchemaTests
     }
 
     [Fact]
+    public void PostgreSqlTenantMetadataMigrationPersistsTokenHotspotEvidenceBoundaries()
+    {
+        var root = FindRepositoryRoot();
+        var migrationPath = Path.Combine(
+            root,
+            "src",
+            "TokenObservability.Infrastructure",
+            "Persistence",
+            "PostgreSql",
+            "Migrations",
+            "0001_tenant_metadata.sql");
+
+        var migration = File.ReadAllText(migrationPath);
+
+        Assert.Contains("CREATE TABLE IF NOT EXISTS token_hotspot", migration);
+        Assert.Contains("token_hotspot_id uuid PRIMARY KEY", migration);
+        Assert.Contains("customer_organization_id uuid NOT NULL", migration);
+        Assert.Contains("agent_session_id text NOT NULL", migration);
+        Assert.Contains("harness text NOT NULL", migration);
+        Assert.Contains("model_name text NULL", migration);
+        Assert.Contains("hotspot_type text NOT NULL", migration);
+        Assert.Contains("finding_state text NOT NULL", migration);
+        Assert.Contains("attribution_type text NOT NULL", migration);
+        Assert.Contains("confidence text NOT NULL", migration);
+        Assert.Contains("metric_status text NOT NULL", migration);
+        Assert.Contains("metric_confidence text NOT NULL", migration);
+        Assert.Contains("prompt_cache_evidence_state text NOT NULL", migration);
+        Assert.Contains("evidence_summary text NOT NULL", migration);
+        Assert.Contains("evidence_refs_json jsonb NOT NULL", migration);
+        Assert.Contains("detection_key text NULL", migration);
+        Assert.Contains("CONSTRAINT fk_token_hotspot_agent_session FOREIGN KEY (customer_organization_id, agent_session_id) REFERENCES agent_session (customer_organization_id, agent_session_id)", migration);
+        Assert.Contains("CONSTRAINT ck_token_hotspot_type CHECK", migration);
+        Assert.Contains("'prompt_cache_breakage'", migration);
+        Assert.Contains("'large_context'", migration);
+        Assert.Contains("'tool_loop'", migration);
+        Assert.Contains("'model_retry'", migration);
+        Assert.Contains("'repo_context_bloat'", migration);
+        Assert.Contains("'generated_artifact_bloat'", migration);
+        Assert.Contains("'expensive_model_choice'", migration);
+        Assert.Contains("'error_rework'", migration);
+        Assert.Contains("'unknown'", migration);
+        Assert.Contains("CONSTRAINT ck_token_hotspot_finding_state CHECK", migration);
+        Assert.Contains("'confirmed'", migration);
+        Assert.Contains("'candidate_llm_inferred'", migration);
+        Assert.Contains("'candidate_correlated'", migration);
+        Assert.Contains("'rejected'", migration);
+        Assert.Contains("'superseded'", migration);
+        Assert.Contains("CONSTRAINT ck_token_hotspot_attribution_type CHECK", migration);
+        Assert.Contains("'direct'", migration);
+        Assert.Contains("'correlated'", migration);
+        Assert.Contains("'llm_inferred'", migration);
+        Assert.Contains("'unavailable'", migration);
+        Assert.Contains("CONSTRAINT ck_token_hotspot_prompt_cache_evidence_state CHECK", migration);
+        Assert.Contains("'known_reason'", migration);
+        Assert.Contains("'inferred_candidate'", migration);
+        Assert.Contains("'unknown'", migration);
+        Assert.Contains("'unavailable'", migration);
+        Assert.Contains("'not_applicable'", migration);
+        Assert.Contains("CONSTRAINT ck_token_hotspot_llm_candidate_boundary", migration);
+        Assert.Contains("CONSTRAINT ck_token_hotspot_confirmed_authority", migration);
+        Assert.Contains("CONSTRAINT ck_token_hotspot_confirmed_metric_authority", migration);
+        Assert.Contains("CONSTRAINT ck_token_hotspot_evidence_refs_json", migration);
+        Assert.Contains("CONSTRAINT ck_token_hotspot_detection_key", migration);
+        Assert.Contains("ix_token_hotspot_session_state", migration);
+        Assert.Contains("ux_token_hotspot_customer_detection_key", migration);
+
+        var hotspotSection = migration[migration.IndexOf(
+            "CREATE TABLE IF NOT EXISTS token_hotspot",
+            StringComparison.Ordinal)..];
+        Assert.DoesNotContain("raw_prompt", hotspotSection, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("prompt_text", hotspotSection, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("code_content", hotspotSection, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("command_output", hotspotSection, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("tool_result", hotspotSection, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("developer_rank", hotspotSection, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void PostgreSqlTenantMetadataMigrationPersistsAggregateMetricExportShape()
     {
         var root = FindRepositoryRoot();
