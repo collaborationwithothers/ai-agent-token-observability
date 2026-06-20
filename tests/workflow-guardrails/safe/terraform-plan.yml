@@ -28,6 +28,13 @@ on:
       acr_publish_run_id:
         required: false
         type: string
+      apply_mode:
+        required: true
+        default: auto
+        type: choice
+        options:
+          - auto
+          - reviewed
 
 permissions:
   actions: read
@@ -52,6 +59,7 @@ jobs:
       deploy_foundation: ${{ steps.guardrails.outputs.deploy_foundation }}
       deploy_app_runtime: ${{ steps.guardrails.outputs.deploy_app_runtime }}
       acr_publish_run_id: ${{ steps.guardrails.outputs.acr_publish_run_id }}
+      apply_mode: ${{ steps.guardrails.outputs.apply_mode }}
     steps:
       - name: Validate guardrails before privileged steps
         id: guardrails
@@ -62,6 +70,7 @@ jobs:
           CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
           TERRAFORM_STAGE_INPUT: ${{ inputs.terraform_stage }}
           ACR_PUBLISH_RUN_ID_INPUT: ${{ inputs.acr_publish_run_id }}
+          APPLY_MODE: ${{ inputs.apply_mode }}
         run: |
           set -euo pipefail
           ENVIRONMENT_STAGE_ORDER="foundation network_private_data_plane observability_foundation data_platform ai_services app_runtime managed_grafana edge"
@@ -74,6 +83,7 @@ jobs:
           case "${ENVIRONMENT}" in dv|qa|pp|pd) ;; *) exit 1 ;; esac
           case "${AZURE_REGION}" in eastus|eastus2|westeurope) ;; *) exit 1 ;; esac
           case "${CUSTOMER_ORGANIZATION_SLUG}" in *[!a-z0-9-]*|""|-*|*-) exit 1 ;; esac
+          case "${APPLY_MODE}" in auto|reviewed) ;; *) exit 1 ;; esac
           TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
           test "${TF_WORKSPACE}" != "default"
           case "${TERRAFORM_STAGE_INPUT}" in ""|foundation|app_runtime) ;; public_dns) exit 1 ;; *) exit 1 ;; esac
@@ -86,6 +96,7 @@ jobs:
           echo "deploy_foundation=${DEPLOY_FOUNDATION}" >> "${GITHUB_OUTPUT}"
           echo "deploy_app_runtime=${DEPLOY_APP_RUNTIME}" >> "${GITHUB_OUTPUT}"
           echo "acr_publish_run_id=${ACR_PUBLISH_RUN_ID}" >> "${GITHUB_OUTPUT}"
+          echo "apply_mode=${APPLY_MODE}" >> "${GITHUB_OUTPUT}"
           echo "Excluded shared stages: ${EXCLUDED_SHARED_STAGES}" >> "${GITHUB_STEP_SUMMARY}"
 
   validate-app-runtime-images:
@@ -162,14 +173,23 @@ jobs:
           name: terraform-plan-app_runtime-${{ needs.select.outputs.terraform_workspace }}
           path: ${{ runner.temp }}/terraform-plans/app_runtime
 
-  apply-app-runtime:
+  approve-app-runtime-apply:
     needs: [select, plan-app-runtime]
-    if: ${{ needs.plan-app-runtime.result == 'success' }}
+    if: ${{ needs.plan-app-runtime.result == 'success' && needs.select.outputs.apply_mode == 'reviewed' }}
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
     environment:
       name: terraform-apply
+    steps:
+      - run: printf 'Approved reviewed apply for `%s`.\n' "app_runtime" >> "${GITHUB_STEP_SUMMARY}"
+
+  apply-app-runtime:
+    needs: [select, plan-app-runtime, approve-app-runtime-apply]
+    if: ${{ always() && needs.plan-app-runtime.result == 'success' && (needs.select.outputs.apply_mode == 'auto' || needs.approve-app-runtime-apply.result == 'success') }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v5

@@ -36,7 +36,7 @@ resource "azurerm_container_app_environment" "this" {
   location                           = azurerm_resource_group.app_runtime.location
   resource_group_name                = azurerm_resource_group.app_runtime.name
   logs_destination                   = var.container_app_environment_logs_destination
-  log_analytics_workspace_id         = local.log_analytics_environment_required ? local.runtime_log_analytics_workspace_id : null
+  log_analytics_workspace_id         = local.log_analytics_environment_required ? local.container_apps_log_analytics_workspace_id : null
   infrastructure_subnet_id           = local.container_app_environment_subnet_id
   public_network_access              = var.container_app_environment_public_network_access
   zone_redundancy_enabled            = local.container_app_environment_subnet_id == null ? null : var.enable_zone_redundancy
@@ -55,7 +55,7 @@ resource "azurerm_container_app_environment" "this" {
     }
 
     precondition {
-      condition     = !local.log_analytics_environment_required || local.runtime_log_analytics_workspace_id != null
+      condition     = !local.log_analytics_environment_required || local.container_apps_log_analytics_workspace_id != null
       error_message = "log_analytics_workspace_id is required when container_app_environment_logs_destination is log-analytics."
     }
 
@@ -271,16 +271,42 @@ module "container_app_jobs" {
 }
 
 resource "azurerm_monitor_diagnostic_setting" "container_apps" {
-  for_each = local.diagnostic_settings_enabled ? local.container_app_diagnostic_targets : {}
+  for_each = local.diagnostic_settings_enabled ? local.container_app_environment_diagnostic_targets : {}
 
   name                           = "${local.name_prefix}-${each.key}-diag"
   target_resource_id             = each.value
-  log_analytics_workspace_id     = local.runtime_log_analytics_workspace_id
+  log_analytics_workspace_id     = local.container_apps_log_analytics_workspace_id
   log_analytics_destination_type = local.container_apps_diagnostic_contract.destination_type
 
   enabled_log {
     category_group = "allLogs"
   }
+
+  enabled_metric {
+    category = "AllMetrics"
+  }
+}
+
+resource "azurerm_monitor_diagnostic_setting" "container_app_services" {
+  for_each = local.diagnostic_settings_enabled ? local.container_app_service_diagnostic_targets : {}
+
+  name                           = "${local.name_prefix}-${each.key}-diag"
+  target_resource_id             = each.value
+  log_analytics_workspace_id     = local.container_apps_log_analytics_workspace_id
+  log_analytics_destination_type = local.container_apps_diagnostic_contract.destination_type
+
+  enabled_metric {
+    category = "AllMetrics"
+  }
+}
+
+resource "azurerm_monitor_diagnostic_setting" "container_app_jobs" {
+  for_each = local.diagnostic_settings_enabled ? local.container_app_job_diagnostic_targets : {}
+
+  name                           = "${local.name_prefix}-${each.key}-diag"
+  target_resource_id             = each.value
+  log_analytics_workspace_id     = local.container_jobs_log_analytics_workspace_id
+  log_analytics_destination_type = local.container_jobs_diagnostic_contract.destination_type
 
   enabled_metric {
     category = "AllMetrics"

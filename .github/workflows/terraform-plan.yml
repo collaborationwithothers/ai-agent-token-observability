@@ -33,6 +33,14 @@ on:
         description: Optional app_runtime ACR Image Publish run override. Leave blank to use the latest successful matching run.
         required: false
         type: string
+      apply_mode:
+        description: Apply mode. Auto applies saved plans immediately; reviewed waits for terraform-apply approval before each stage apply.
+        required: true
+        default: auto
+        type: choice
+        options:
+          - auto
+          - reviewed
 
 permissions:
   actions: read
@@ -62,6 +70,7 @@ jobs:
       deploy_ai_services: ${{ steps.guardrails.outputs.deploy_ai_services }}
       deploy_app_runtime: ${{ steps.guardrails.outputs.deploy_app_runtime }}
       acr_publish_run_id: ${{ steps.guardrails.outputs.acr_publish_run_id }}
+      apply_mode: ${{ steps.guardrails.outputs.apply_mode }}
       deploy_managed_grafana: ${{ steps.guardrails.outputs.deploy_managed_grafana }}
       deploy_edge: ${{ steps.guardrails.outputs.deploy_edge }}
     steps:
@@ -74,6 +83,7 @@ jobs:
           CUSTOMER_ORGANIZATION_SLUG: ${{ inputs.customer_organization_slug }}
           TERRAFORM_STAGE_INPUT: ${{ inputs.terraform_stage }}
           ACR_PUBLISH_RUN_ID_INPUT: ${{ inputs.acr_publish_run_id }}
+          APPLY_MODE: ${{ inputs.apply_mode }}
         run: |
           set -euo pipefail
 
@@ -88,6 +98,7 @@ jobs:
           case "${ENVIRONMENT}" in dv|qa|pp|pd) ;; *) exit 1 ;; esac
           case "${AZURE_REGION}" in eastus|eastus2|westeurope) ;; *) exit 1 ;; esac
           case "${CUSTOMER_ORGANIZATION_SLUG}" in *[!a-z0-9-]*|""|-*|*-) exit 1 ;; esac
+          case "${APPLY_MODE}" in auto|reviewed) ;; *) exit 1 ;; esac
 
           TF_WORKSPACE="${ENVIRONMENT}_${AZURE_REGION}_${CUSTOMER_ORGANIZATION_SLUG}"
           test "${TF_WORKSPACE}" != "default"
@@ -154,6 +165,7 @@ jobs:
             echo "deploy_ai_services=${DEPLOY_AI_SERVICES}"
             echo "deploy_app_runtime=${DEPLOY_APP_RUNTIME}"
             echo "acr_publish_run_id=${ACR_PUBLISH_RUN_ID}"
+            echo "apply_mode=${APPLY_MODE}"
             echo "deploy_managed_grafana=${DEPLOY_MANAGED_GRAFANA}"
             echo "deploy_edge=${DEPLOY_EDGE}"
           } >> "${GITHUB_OUTPUT}"
@@ -163,6 +175,7 @@ jobs:
             echo
             echo "Workspace: ${TF_WORKSPACE}"
             echo "Deployment scope: ${DEPLOYMENT_SCOPE}"
+            echo "Apply mode: ${APPLY_MODE}"
             echo "Environment stage order: ${ENVIRONMENT_STAGE_ORDER}"
             echo "Excluded shared stages: ${EXCLUDED_SHARED_STAGES}"
             if [[ "${DEPLOY_APP_RUNTIME}" == "true" ]]; then
@@ -346,15 +359,26 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  apply-foundation:
-    name: Apply foundation
+  approve-foundation-apply:
+    name: Review foundation apply
     needs: [select, plan-foundation]
-    if: ${{ needs.plan-foundation.result == 'success' }}
+    if: ${{ needs.plan-foundation.result == 'success' && needs.select.outputs.apply_mode == 'reviewed' }}
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
     environment:
       name: terraform-apply
+    steps:
+      - name: Record reviewed apply approval
+        run: printf 'Approved reviewed apply for `%s`.\n' "foundation" >> "${GITHUB_STEP_SUMMARY}"
+
+  apply-foundation:
+    name: Apply foundation
+    needs: [select, plan-foundation, approve-foundation-apply]
+    if: ${{ always() && needs.plan-foundation.result == 'success' && (needs.select.outputs.apply_mode == 'auto' || needs.approve-foundation-apply.result == 'success') }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v5
@@ -424,15 +448,26 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  apply-network-private-data-plane:
-    name: Apply network_private_data_plane
+  approve-network-private-data-plane-apply:
+    name: Review network_private_data_plane apply
     needs: [select, plan-network-private-data-plane]
-    if: ${{ needs.plan-network-private-data-plane.result == 'success' }}
+    if: ${{ needs.plan-network-private-data-plane.result == 'success' && needs.select.outputs.apply_mode == 'reviewed' }}
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
     environment:
       name: terraform-apply
+    steps:
+      - name: Record reviewed apply approval
+        run: printf 'Approved reviewed apply for `%s`.\n' "network_private_data_plane" >> "${GITHUB_STEP_SUMMARY}"
+
+  apply-network-private-data-plane:
+    name: Apply network_private_data_plane
+    needs: [select, plan-network-private-data-plane, approve-network-private-data-plane-apply]
+    if: ${{ always() && needs.plan-network-private-data-plane.result == 'success' && (needs.select.outputs.apply_mode == 'auto' || needs.approve-network-private-data-plane-apply.result == 'success') }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v5
@@ -502,15 +537,26 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  apply-observability-foundation:
-    name: Apply observability_foundation
+  approve-observability-foundation-apply:
+    name: Review observability_foundation apply
     needs: [select, plan-observability-foundation]
-    if: ${{ needs.plan-observability-foundation.result == 'success' }}
+    if: ${{ needs.plan-observability-foundation.result == 'success' && needs.select.outputs.apply_mode == 'reviewed' }}
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
     environment:
       name: terraform-apply
+    steps:
+      - name: Record reviewed apply approval
+        run: printf 'Approved reviewed apply for `%s`.\n' "observability_foundation" >> "${GITHUB_STEP_SUMMARY}"
+
+  apply-observability-foundation:
+    name: Apply observability_foundation
+    needs: [select, plan-observability-foundation, approve-observability-foundation-apply]
+    if: ${{ always() && needs.plan-observability-foundation.result == 'success' && (needs.select.outputs.apply_mode == 'auto' || needs.approve-observability-foundation-apply.result == 'success') }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v5
@@ -580,15 +626,26 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  apply-data-platform:
-    name: Apply data_platform
+  approve-data-platform-apply:
+    name: Review data_platform apply
     needs: [select, plan-data-platform]
-    if: ${{ needs.plan-data-platform.result == 'success' }}
+    if: ${{ needs.plan-data-platform.result == 'success' && needs.select.outputs.apply_mode == 'reviewed' }}
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
     environment:
       name: terraform-apply
+    steps:
+      - name: Record reviewed apply approval
+        run: printf 'Approved reviewed apply for `%s`.\n' "data_platform" >> "${GITHUB_STEP_SUMMARY}"
+
+  apply-data-platform:
+    name: Apply data_platform
+    needs: [select, plan-data-platform, approve-data-platform-apply]
+    if: ${{ always() && needs.plan-data-platform.result == 'success' && (needs.select.outputs.apply_mode == 'auto' || needs.approve-data-platform-apply.result == 'success') }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v5
@@ -658,15 +715,26 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  apply-ai-services:
-    name: Apply ai_services
+  approve-ai-services-apply:
+    name: Review ai_services apply
     needs: [select, plan-ai-services]
-    if: ${{ needs.plan-ai-services.result == 'success' }}
+    if: ${{ needs.plan-ai-services.result == 'success' && needs.select.outputs.apply_mode == 'reviewed' }}
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
     environment:
       name: terraform-apply
+    steps:
+      - name: Record reviewed apply approval
+        run: printf 'Approved reviewed apply for `%s`.\n' "ai_services" >> "${GITHUB_STEP_SUMMARY}"
+
+  apply-ai-services:
+    name: Apply ai_services
+    needs: [select, plan-ai-services, approve-ai-services-apply]
+    if: ${{ always() && needs.plan-ai-services.result == 'success' && (needs.select.outputs.apply_mode == 'auto' || needs.approve-ai-services-apply.result == 'success') }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v5
@@ -742,15 +810,26 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  apply-app-runtime:
-    name: Apply app_runtime
+  approve-app-runtime-apply:
+    name: Review app_runtime apply
     needs: [select, plan-app-runtime]
-    if: ${{ needs.plan-app-runtime.result == 'success' }}
+    if: ${{ needs.plan-app-runtime.result == 'success' && needs.select.outputs.apply_mode == 'reviewed' }}
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
     environment:
       name: terraform-apply
+    steps:
+      - name: Record reviewed apply approval
+        run: printf 'Approved reviewed apply for `%s`.\n' "app_runtime" >> "${GITHUB_STEP_SUMMARY}"
+
+  apply-app-runtime:
+    name: Apply app_runtime
+    needs: [select, plan-app-runtime, approve-app-runtime-apply]
+    if: ${{ always() && needs.plan-app-runtime.result == 'success' && (needs.select.outputs.apply_mode == 'auto' || needs.approve-app-runtime-apply.result == 'success') }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v5
@@ -820,15 +899,26 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  apply-managed-grafana:
-    name: Apply managed_grafana
+  approve-managed-grafana-apply:
+    name: Review managed_grafana apply
     needs: [select, plan-managed-grafana]
-    if: ${{ needs.plan-managed-grafana.result == 'success' }}
+    if: ${{ needs.plan-managed-grafana.result == 'success' && needs.select.outputs.apply_mode == 'reviewed' }}
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
     environment:
       name: terraform-apply
+    steps:
+      - name: Record reviewed apply approval
+        run: printf 'Approved reviewed apply for `%s`.\n' "managed_grafana" >> "${GITHUB_STEP_SUMMARY}"
+
+  apply-managed-grafana:
+    name: Apply managed_grafana
+    needs: [select, plan-managed-grafana, approve-managed-grafana-apply]
+    if: ${{ always() && needs.plan-managed-grafana.result == 'success' && (needs.select.outputs.apply_mode == 'auto' || needs.approve-managed-grafana-apply.result == 'success') }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v5
@@ -898,15 +988,26 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  apply-edge:
-    name: Apply edge
+  approve-edge-apply:
+    name: Review edge apply
     needs: [select, plan-edge]
-    if: ${{ needs.plan-edge.result == 'success' }}
+    if: ${{ needs.plan-edge.result == 'success' && needs.select.outputs.apply_mode == 'reviewed' }}
     runs-on:
       group: consultwithcloud-azure
       labels: [gh-linux]
     environment:
       name: terraform-apply
+    steps:
+      - name: Record reviewed apply approval
+        run: printf 'Approved reviewed apply for `%s`.\n' "edge" >> "${GITHUB_STEP_SUMMARY}"
+
+  apply-edge:
+    name: Apply edge
+    needs: [select, plan-edge, approve-edge-apply]
+    if: ${{ always() && needs.plan-edge.result == 'success' && (needs.select.outputs.apply_mode == 'auto' || needs.approve-edge-apply.result == 'success') }}
+    runs-on:
+      group: consultwithcloud-azure
+      labels: [gh-linux]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v5

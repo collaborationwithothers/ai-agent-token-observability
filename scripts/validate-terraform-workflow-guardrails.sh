@@ -487,6 +487,16 @@ def is_public_dns_workflow(path: pathlib.Path, content: str) -> bool:
     ) is not None
 
 
+def job_blocks(content: str) -> dict[str, str]:
+    return {
+        match.group("job"): match.group("body")
+        for match in re.finditer(
+            r"(?ms)^  (?P<job>[A-Za-z0-9_-]+):\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            content,
+        )
+    }
+
+
 def terraform_plan_required_errors(content: str) -> list[str]:
     errors: list[str] = []
     dispatch_inputs = dispatch_input_names(content)
@@ -517,6 +527,12 @@ def terraform_plan_required_errors(content: str) -> list[str]:
         "public DNS exclusion": r"public_dns.*retained shared DNS infrastructure|retained public_dns stage is excluded|EXCLUDED_SHARED_STAGES=.*public_dns",
         "derived deployment scope": r"deployment_scope.*GITHUB_OUTPUT|GITHUB_OUTPUT.*deployment_scope|deployment_scope\s*=\s*.*DEPLOYMENT_SCOPE",
         "derived stage selection": r"deploy_foundation.*GITHUB_OUTPUT|GITHUB_OUTPUT.*deploy_foundation|deploy_foundation\s*=\s*.*DEPLOY_FOUNDATION",
+        "apply mode dispatch input": r"apply_mode\s*:.*?default\s*:\s*auto.*?options\s*:.*?-\s*auto.*?-\s*reviewed",
+        "apply mode guardrail input": r"APPLY_MODE\s*:\s*\$\{\{\s*inputs\.apply_mode\s*\}\}",
+        "apply mode validation": r"case\s+\"\$\{APPLY_MODE\}\".*auto\|reviewed",
+        "apply mode output": r"apply_mode.*GITHUB_OUTPUT|GITHUB_OUTPUT.*apply_mode|apply_mode\s*=\s*.*APPLY_MODE",
+        "reviewed apply approval gate": r"approve-[A-Za-z0-9_-]+-apply\s*:.*?needs\.select\.outputs\.apply_mode\s*==\s*'reviewed'.*?name\s*:\s*terraform-apply",
+        "auto apply saved-plan branch": r"needs\.select\.outputs\.apply_mode\s*==\s*'auto'",
         "ACR publish run dispatch input": r"acr_publish_run_id\s*:",
         "ACR publish run output": r"acr_publish_run_id.*GITHUB_OUTPUT|GITHUB_OUTPUT.*acr_publish_run_id|acr_publish_run_id\s*=\s*.*ACR_PUBLISH_RUN_ID",
         "ACR publish commit output": r"acr_publish_commit_sha.*GITHUB_OUTPUT|GITHUB_OUTPUT.*acr_publish_commit_sha|acr_publish_commit_sha\s*=\s*.*ACR_PUBLISH_COMMIT_SHA",
@@ -539,15 +555,46 @@ def terraform_plan_required_errors(content: str) -> list[str]:
         "stage plan script": r"terraform-stage-deploy\.sh\s+plan",
         "plan artifact upload": r"actions/upload-artifact",
         "same-run plan dependency": r"needs\s*:\s*\[\s*select\s*,\s*plan|needs\s*:\s*plan-",
-        "approved apply artifact download": r"actions/download-artifact",
+        "saved plan artifact download": r"actions/download-artifact",
         "terraform apply approval environment": r"(?m)^\s*name\s*:\s*terraform-apply\s*$",
         "saved plan apply": r"terraform-stage-deploy\.sh\s+apply",
     }
     for name, pattern in required_patterns.items():
         if re.search(pattern, content, re.IGNORECASE | re.MULTILINE | re.DOTALL) is None:
             errors.append(f"missing {name}")
+
+    jobs = job_blocks(content)
+    for job_name, body in jobs.items():
+        if "terraform-stage-deploy.sh apply" not in body:
+            continue
+        stage_name = job_name.removeprefix("apply-")
+        approval_job = f"approve-{stage_name}-apply"
+        if re.search(r"(?m)^\s{4}environment\s*:", body):
+            errors.append(f"{job_name} must not wait on terraform-apply directly; use {approval_job} for reviewed mode")
+        if approval_job not in jobs:
+            errors.append(f"{job_name} missing reviewed approval gate job {approval_job}")
+            continue
+        if approval_job not in body:
+            errors.append(f"{job_name} must need reviewed approval gate {approval_job}")
+        if "always()" not in body:
+            errors.append(f"{job_name} must use always() so auto mode can run when {approval_job} is skipped")
+        if "needs.select.outputs.apply_mode == 'auto'" not in body:
+            errors.append(f"{job_name} missing auto apply mode branch")
+        if f"needs.{approval_job}.result == 'success'" not in body:
+            errors.append(f"{job_name} must require {approval_job} success in reviewed mode")
+
+    for job_name, body in jobs.items():
+        if not (job_name.startswith("approve-") and job_name.endswith("-apply")):
+            continue
+        if "needs.select.outputs.apply_mode == 'reviewed'" not in body:
+            errors.append(f"{job_name} must run only in reviewed apply mode")
+        if re.search(r"(?m)^\s{4}environment\s*:\s*\n\s{6}name\s*:\s*terraform-apply\s*$", body) is None:
+            errors.append(f"{job_name} must use the terraform-apply environment")
+        if re.search(r"azure/login|terraform-stage-deploy\.sh|terraform\s+", body, re.IGNORECASE):
+            errors.append(f"{job_name} must be an approval gate only, without Azure login or Terraform execution")
+
     if re.search(r"terraform\s+-chdir=.*apply\s+-input=false(?:\s|$)(?!.*PLAN_FILE)", content, re.IGNORECASE):
-        errors.append("Terraform apply must use an approved saved plan file")
+        errors.append("Terraform apply must use a saved plan file")
     for index, line in enumerate(content.splitlines(), start=1):
         if "GITHUB_STEP_SUMMARY" not in line:
             continue
