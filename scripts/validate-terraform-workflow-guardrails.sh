@@ -242,6 +242,7 @@ def terraform_stage_deploy_helper_errors() -> list[str]:
         "summary commit SHA": r"Commit SHA",
         "summary result": r"Result",
         "summary ACR run ID": r"ACR image publish run ID",
+        "default workspace backend init": r"TF_WORKSPACE=default\s+terraform\s+-chdir=\"\$\{stage_dir\}\"\s+init\s+-input=false",
     }
     for name, pattern in required_patterns.items():
         if re.search(pattern, content, re.IGNORECASE | re.MULTILINE | re.DOTALL) is None:
@@ -316,6 +317,20 @@ def forbidden_command_errors(content: str) -> list[str]:
     for pattern in FORBIDDEN_COMMAND_PATTERNS:
         if re.search(pattern, content, re.IGNORECASE):
             errors.append(f"forbidden command pattern: {pattern}")
+    return errors
+
+
+def backend_init_workspace_errors(content: str) -> list[str]:
+    errors: list[str] = []
+    for match in re.finditer(
+        r"(?m)^(?P<line>\s*(?P<prefix>TF_WORKSPACE=default\s+)?terraform\s+-chdir=.*?\s+init\s+-input=false\s+\\)",
+        content,
+    ):
+        block = match.group("line") + content[match.end() : match.end() + 500]
+        if "-backend-config=" not in block:
+            continue
+        if match.group("prefix") != "TF_WORKSPACE=default ":
+            errors.append("backend Terraform init must run with TF_WORKSPACE=default before selecting the derived workspace")
     return errors
 
 
@@ -611,6 +626,7 @@ def validate_file(path: pathlib.Path) -> list[str]:
     errors: list[str] = []
     errors.extend(forbidden_trigger_errors(content))
     errors.extend(forbidden_command_errors(content))
+    errors.extend(backend_init_workspace_errors(content))
     errors.extend(required_gate_errors(content))
     if is_terraform_plan_workflow(path, content):
         errors.extend(terraform_plan_required_errors(content))

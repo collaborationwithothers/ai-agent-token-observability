@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Issue #63 proves the Terraform authentication path for managing Azure Managed Grafana dashboards before issue #64 deploys repo-versioned dashboard JSON.
+Issue #63 proves the Terraform authentication path used by issue #64 to deploy repo-versioned Azure Managed Grafana dashboard JSON.
 
 The default path is Microsoft Entra bearer token authentication to the Azure Managed Grafana data plane. The service account token fallback path is allowed only if the Entra proof fails for Terraform provider use.
 
@@ -49,7 +49,7 @@ Fallback requirements:
 
 - Keep service accounts and API keys disabled by default until approved for this automation scenario.
 - Store any approved token in Key Vault, never in GitHub repository files, Terraform variables, Terraform outputs, or remote state.
-- Use the least privileged Grafana role that can deploy the dashboard and folder resources required by issue #64.
+- Use the least privileged Grafana role that can deploy the dashboard and folder resources introduced by issue #64.
 - Prefer expiring tokens and rotate them through an explicit manual workflow.
 - Do not enable the fallback in production workflows by default.
 

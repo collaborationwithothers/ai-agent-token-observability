@@ -81,8 +81,8 @@ for name, pattern in forbidden_proof_patterns.items():
 
 managed_grafana_combined = f"{stage_content}\n{module_content}"
 for name, pattern in {
-    "Grafana provider block": r'provider\s+"grafana"',
-    "Grafana provider resources": r'resource\s+"grafana_',
+    "provider auth arguments": r'(?m)^\s*(auth|http_headers|url)\s*=',
+    "unsupported Grafana provider resources": r'resource\s+"grafana_(?!folder|dashboard")',
     "service account tokens": r'(service_account_token|grafana_service_account|api_key\s*=|api_key_enabled\s*=\s*true)',
 }.items():
     if re.search(pattern, managed_grafana_combined, re.IGNORECASE | re.MULTILINE | re.DOTALL):

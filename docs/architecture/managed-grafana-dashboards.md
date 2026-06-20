@@ -80,6 +80,8 @@ All first-release dashboard JSON files are stored under:
 infrastructure/grafana/dashboards/
 ```
 
+Issue #64 deploys these artifacts from Terraform through the `grafana/grafana` provider. Dashboard JSON remains the production source of truth; manual UI-only dashboard changes are not a production deployment path.
+
 Dashboard artifact contract:
 
 | Dashboard | UID | JSON artifact |
@@ -317,7 +319,7 @@ infrastructure/grafana/dashboards/
 
 Rules:
 
-- Dashboard JSON files must be versioned in the repository.
+- Dashboard JSON files must be versioned in the repository under `infrastructure/grafana/dashboards/`.
 - Terraform manages the Azure Managed Grafana workspace.
 - Terraform manages Grafana folders where supported by the Grafana provider.
 - Terraform deploys dashboard JSON through Grafana provider resources where supported.
