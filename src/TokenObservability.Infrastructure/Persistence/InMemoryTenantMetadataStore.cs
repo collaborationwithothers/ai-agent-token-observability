@@ -41,6 +41,18 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
         "tool result"
     ];
 
+    private static readonly string[] UnsupportedHotspotSummaryFragments =
+    [
+        "blame",
+        "ranking",
+        "leaderboard",
+        "wrongness",
+        "user error",
+        "developer error",
+        "obvious error",
+        "fault"
+    ];
+
     private static readonly HashSet<string> AllowedEvidenceMetadataKeys = new(StringComparer.Ordinal)
     {
         "denial_reason",
@@ -86,6 +98,8 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
     private readonly Dictionary<string, PricingBasisRecord> pricingBasisRecords = [];
     private readonly Dictionary<string, CostEstimateRecord> costEstimates = [];
     private readonly Dictionary<ProductApiIdempotencyKey, ProductApiIdempotencyRecord> productApiIdempotencyRecords = [];
+    private readonly Dictionary<TokenHotspotId, TokenHotspotRecord> tokenHotspots = [];
+    private readonly Dictionary<TokenHotspotDetectionKey, TokenHotspotId> tokenHotspotDetectionKeyIndex = [];
     private readonly Dictionary<AggregateMetricPointId, AggregateMetricPointRecord> aggregateMetricPoints = [];
     private readonly List<AggregateTokenTimelineBucket> aggregateTokenTimelineBuckets = [];
     private readonly Dictionary<AggregateMetricExportFailureId, AggregateMetricExportFailureRecord> aggregateMetricExportFailures = [];
@@ -1422,6 +1436,100 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
         }
     }
 
+    public Task<TokenHotspotRecord> RecordTokenHotspotAsync(
+        CreateTokenHotspotRecordRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var agentSessionId = NormalizeRequiredText(request.AgentSessionId, nameof(request.AgentSessionId));
+        var modelName = NormalizeOptionalModelName(request.ModelName, nameof(request.ModelName));
+        var evidenceSummary = NormalizeHotspotEvidenceSummary(request.EvidenceSummary);
+        var evidenceReferenceIds = NormalizeHotspotEvidenceReferences(request.EvidenceReferenceIds);
+        var detectionKey = NormalizeOptionalHotspotDetectionKey(request.DetectionKey);
+        ValidateMetricQuality(request.MetricStatus, request.MetricConfidence);
+        ValidateTokenHotspotAuthority(request);
+
+        if (request.TokenBurnScore is < 0 or > 1)
+        {
+            throw new ArgumentException("Token burn score must be between 0 and 1.", nameof(request));
+        }
+
+        if (request.EstimatedCostImpact < 0)
+        {
+            throw new ArgumentException("Estimated cost impact must not be negative.", nameof(request));
+        }
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+
+            if (detectionKey is not null)
+            {
+                var logicalKey = new TokenHotspotDetectionKey(request.CustomerOrganizationId, detectionKey);
+                if (tokenHotspotDetectionKeyIndex.TryGetValue(logicalKey, out var existingHotspotId) &&
+                    tokenHotspots.TryGetValue(existingHotspotId, out var existingHotspot))
+                {
+                    return Task.FromResult(existingHotspot);
+                }
+            }
+
+            if (!agentSessions.TryGetValue(agentSessionId, out var session) ||
+                session.CustomerOrganizationId != request.CustomerOrganizationId)
+            {
+                throw new InvalidOperationException("Token hotspot session does not belong to the customer organization.");
+            }
+
+            var hotspot = new TokenHotspotRecord(
+                TokenHotspotId.NewId(),
+                request.CustomerOrganizationId,
+                agentSessionId,
+                session.Harness,
+                modelName,
+                request.HotspotType,
+                request.FindingState,
+                request.AttributionType,
+                request.Confidence,
+                request.MetricStatus,
+                request.MetricConfidence,
+                request.PromptCacheEvidenceState,
+                evidenceSummary,
+                evidenceReferenceIds,
+                detectionKey,
+                request.TokenBurnScore,
+                request.EstimatedCostImpact,
+                clock.UtcNow.ToUniversalTime());
+
+            tokenHotspots.Add(hotspot.TokenHotspotId, hotspot);
+            if (detectionKey is not null)
+            {
+                tokenHotspotDetectionKeyIndex.Add(
+                    new TokenHotspotDetectionKey(request.CustomerOrganizationId, detectionKey),
+                    hotspot.TokenHotspotId);
+            }
+
+            return Task.FromResult(hotspot);
+        }
+    }
+
+    public Task<IReadOnlyList<TokenHotspotRecord>> ListTokenHotspotsAsync(
+        CustomerOrganizationId customerOrganizationId,
+        string agentSessionId)
+    {
+        var normalizedAgentSessionId = NormalizeRequiredText(agentSessionId, nameof(agentSessionId));
+
+        lock (gate)
+        {
+            return Task.FromResult<IReadOnlyList<TokenHotspotRecord>>(
+                tokenHotspots.Values
+                    .Where(hotspot =>
+                        hotspot.CustomerOrganizationId == customerOrganizationId &&
+                        StringComparer.Ordinal.Equals(hotspot.AgentSessionId, normalizedAgentSessionId))
+                    .OrderBy(hotspot => hotspot.CreatedAtUtc)
+                    .ThenBy(hotspot => hotspot.TokenHotspotId.ToString(), StringComparer.Ordinal)
+                    .ToArray());
+        }
+    }
+
     public Task<ProductApiIdempotencyReservation> ReserveProductApiIdempotencyRecordAsync(
         ReserveProductApiIdempotencyRecordRequest request)
     {
@@ -1530,6 +1638,7 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
             return Task.FromResult(completed);
         }
     }
+
     public Task<IReadOnlyList<CostEstimateRecord>> ListCostEstimatesAsync(
         CustomerOrganizationId customerOrganizationId)
     {
@@ -2438,6 +2547,106 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
         }
 
         return value.Trim();
+    }
+
+    private static string NormalizeHotspotEvidenceSummary(string value)
+    {
+        var normalized = NormalizeRequiredText(value, nameof(value));
+        if (normalized.Length > 512 ||
+            ContainsSensitiveFragment(normalized) ||
+            UnsupportedHotspotSummaryFragments.Any(fragment => normalized.Contains(fragment, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new ArgumentException("Token hotspot evidence summary must be bounded, non-sensitive, and non-punitive.", nameof(value));
+        }
+
+        return normalized;
+    }
+
+    private static IReadOnlyList<string> NormalizeHotspotEvidenceReferences(IReadOnlyList<string> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+
+        if (values.Count == 0 || values.Count > 32)
+        {
+            throw new ArgumentException("Token hotspots require between 1 and 32 evidence references.", nameof(values));
+        }
+
+        var normalized = values
+            .Select(value => NormalizeRequiredText(value, nameof(values)))
+            .Select(value =>
+            {
+                if (value.Length > 128 ||
+                    !IsSafeResourceId(value) ||
+                    ContainsSensitiveFragment(value))
+                {
+                    throw new ArgumentException("Token hotspot evidence references must be safe identifiers.", nameof(values));
+                }
+
+                return value;
+            })
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        if (normalized.Length != values.Count)
+        {
+            throw new ArgumentException("Token hotspot evidence references must be unique.", nameof(values));
+        }
+
+        return normalized;
+    }
+
+    private static string? NormalizeOptionalHotspotDetectionKey(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var normalized = value.Trim();
+        return normalized.Length <= 128 &&
+            IsSafeResourceId(normalized) &&
+            !ContainsSensitiveFragment(normalized)
+            ? normalized
+            : throw new ArgumentException("Token hotspot detection key must be a bounded safe identifier.", nameof(value));
+    }
+
+    private static void ValidateTokenHotspotAuthority(CreateTokenHotspotRecordRequest request)
+    {
+        if (request.HotspotType != TokenHotspotType.PromptCacheBreakage &&
+            request.PromptCacheEvidenceState != PromptCacheEvidenceState.NotApplicable)
+        {
+            throw new ArgumentException("Only prompt cache breakage hotspots may carry prompt cache evidence states.", nameof(request));
+        }
+
+        if (request.HotspotType == TokenHotspotType.PromptCacheBreakage &&
+            request.PromptCacheEvidenceState == PromptCacheEvidenceState.NotApplicable)
+        {
+            throw new ArgumentException("Prompt cache breakage hotspots require a cache evidence state.", nameof(request));
+        }
+
+        if (request.FindingState == TokenHotspotFindingState.Confirmed &&
+            request.AttributionType == TokenHotspotAttributionType.LlmInferred)
+        {
+            throw new ArgumentException("Confirmed token hotspots must not rely on LLM-inferred attribution.", nameof(request));
+        }
+
+        if (request.FindingState == TokenHotspotFindingState.Confirmed &&
+            request.MetricConfidence is TokenMetricConfidence.LlmInferred or TokenMetricConfidence.Unavailable)
+        {
+            throw new ArgumentException("Confirmed token hotspots require non-LLM metric confidence.", nameof(request));
+        }
+
+        if (request.FindingState == TokenHotspotFindingState.CandidateLlmInferred &&
+            request.AttributionType != TokenHotspotAttributionType.LlmInferred)
+        {
+            throw new ArgumentException("LLM-inferred candidate hotspots must use LLM-inferred attribution.", nameof(request));
+        }
+
+        if (request.AttributionType == TokenHotspotAttributionType.LlmInferred &&
+            request.FindingState != TokenHotspotFindingState.CandidateLlmInferred)
+        {
+            throw new ArgumentException("LLM-inferred attribution is allowed only for candidate hotspots.", nameof(request));
+        }
     }
 
     private void UpsertAgentSessionUnderLock(
@@ -4155,6 +4364,10 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
         ProductUserId ProductUserId,
         string Route,
         string IdempotencyKey);
+
+    private readonly record struct TokenHotspotDetectionKey(
+        CustomerOrganizationId CustomerOrganizationId,
+        string DetectionKey);
 
     private sealed record NormalizedPricingBasisRequest(
         string Harness,
