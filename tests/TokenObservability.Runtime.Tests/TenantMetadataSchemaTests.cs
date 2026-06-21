@@ -133,6 +133,8 @@ public sealed class TenantMetadataSchemaTests
         Assert.Contains("CREATE TABLE IF NOT EXISTS ingestion_rejection", migration);
         Assert.Contains("CREATE TABLE IF NOT EXISTS telemetry_envelope", migration);
         Assert.Contains("CREATE TABLE IF NOT EXISTS agent_session", migration);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS content_reference", migration);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS redaction_review", migration);
         Assert.Contains("customer_organization_id uuid", migration);
         Assert.Contains("identity_tenant_id uuid", migration);
         Assert.Contains("product_user_id uuid", migration);
@@ -159,6 +161,12 @@ public sealed class TenantMetadataSchemaTests
         Assert.Contains("CONSTRAINT fk_telemetry_envelope_scoped_credential FOREIGN KEY (customer_organization_id, scoped_ingestion_credential_id) REFERENCES scoped_ingestion_credential (customer_organization_id, scoped_ingestion_credential_id)", migration);
         Assert.Contains("CONSTRAINT fk_telemetry_envelope_product_user FOREIGN KEY (customer_organization_id, product_user_id) REFERENCES product_user (customer_organization_id, product_user_id)", migration);
         Assert.Contains("CONSTRAINT fk_agent_session_product_user FOREIGN KEY (customer_organization_id, product_user_id) REFERENCES product_user (customer_organization_id, product_user_id)", migration);
+        Assert.Contains("CONSTRAINT fk_content_reference_agent_session FOREIGN KEY (customer_organization_id, agent_session_id) REFERENCES agent_session (customer_organization_id, agent_session_id)", migration);
+        Assert.Contains("CONSTRAINT fk_content_reference_telemetry_envelope FOREIGN KEY (customer_organization_id, telemetry_envelope_id) REFERENCES telemetry_envelope (customer_organization_id, telemetry_envelope_id)", migration);
+        Assert.Contains("CONSTRAINT fk_content_reference_audit_event FOREIGN KEY (customer_organization_id, audit_event_id) REFERENCES governance_audit_event (customer_organization_id, audit_event_id)", migration);
+        Assert.Contains("CONSTRAINT fk_redaction_review_content_reference FOREIGN KEY (customer_organization_id, content_reference_id) REFERENCES content_reference (customer_organization_id, content_reference_id)", migration);
+        Assert.Contains("CONSTRAINT fk_redaction_review_reviewer_product_user FOREIGN KEY (customer_organization_id, reviewer_product_user_id) REFERENCES product_user (customer_organization_id, product_user_id)", migration);
+        Assert.Contains("CONSTRAINT fk_redaction_review_audit_event FOREIGN KEY (customer_organization_id, audit_event_id) REFERENCES governance_audit_event (customer_organization_id, audit_event_id)", migration);
         Assert.Contains("CONSTRAINT ck_ingestion_rejection_link_tenant_shape CHECK", migration);
         Assert.Contains("CONSTRAINT ck_ingestion_rejection_harness_setup_profile_id CHECK", migration);
         Assert.Contains("CONSTRAINT ck_ingestion_rejection_declared_harness CHECK (declared_harness IS NULL OR declared_harness IN ('codex-cli'))", migration);
@@ -167,6 +175,9 @@ public sealed class TenantMetadataSchemaTests
         Assert.Contains("CONSTRAINT ck_telemetry_envelope_signal_type CHECK (signal_type IN ('log', 'trace', 'metric'))", migration);
         Assert.Contains("CONSTRAINT ck_telemetry_envelope_hashes CHECK", migration);
         Assert.Contains("CONSTRAINT ck_agent_session_status CHECK", migration);
+        Assert.Contains("CONSTRAINT ck_content_reference_blob_pointer_state CHECK", migration);
+        Assert.Contains("CONSTRAINT ck_content_reference_capture_state CHECK (capture_state IN ('not_allowed', 'metadata_only', 'captured', 'redaction_failed', 'review_required', 'discarded', 'approved_excerpt'))", migration);
+        Assert.Contains("CONSTRAINT ck_redaction_review_decision CHECK (decision IN ('retry', 'discard', 'approve_excerpt', 'reject_excerpt', 'mark_recommendation_ineligible'))", migration);
         Assert.Contains("evidence_metadata_json jsonb NOT NULL", migration);
         Assert.Contains("routing_decision_json jsonb NOT NULL", migration);
         Assert.Contains("ingestion_version_metadata_json jsonb NOT NULL", migration);
@@ -180,6 +191,10 @@ public sealed class TenantMetadataSchemaTests
         Assert.Contains("ix_ingestion_rejection_reason_received", migration);
         Assert.Contains("ix_telemetry_envelope_customer_received", migration);
         Assert.Contains("ix_agent_session_customer_updated", migration);
+        Assert.Contains("ix_content_reference_customer_session_state", migration);
+        Assert.Contains("ix_content_reference_customer_review_state", migration);
+        Assert.Contains("ix_content_reference_customer_expires", migration);
+        Assert.Contains("ix_redaction_review_customer_content_reference", migration);
         Assert.Contains("created_at_utc timestamptz NOT NULL", migration);
         Assert.Contains("updated_at_utc timestamptz NOT NULL", migration);
         Assert.Contains("UNIQUE (customer_organization_id, identity_tenant_id, external_subject_id)", migration);
@@ -191,6 +206,13 @@ public sealed class TenantMetadataSchemaTests
         Assert.DoesNotContain("local_os", migration, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("git_config", migration, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("local_file_system", migration, StringComparison.OrdinalIgnoreCase);
+
+        var contentReferenceSection = migration.Substring(
+            migration.IndexOf("CREATE TABLE IF NOT EXISTS content_reference", StringComparison.Ordinal),
+            migration.IndexOf("CREATE TABLE IF NOT EXISTS token_observation", StringComparison.Ordinal) -
+            migration.IndexOf("CREATE TABLE IF NOT EXISTS content_reference", StringComparison.Ordinal));
+        Assert.DoesNotContain("approved_excerpt text", contentReferenceSection, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("raw_", contentReferenceSection, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

@@ -322,11 +322,11 @@ public sealed class ContentRedactionPipelineTests
     {
         public string? StoredContent { get; private set; }
 
-        public Task StoreAsync(ContentRedactionDecision decision, CancellationToken cancellationToken)
+        public Task<RedactedContentStorageResult> StoreAsync(ContentRedactionDecision decision, CancellationToken cancellationToken)
         {
             calls.Add("store");
             StoredContent = decision.RedactedText;
-            return Task.CompletedTask;
+            return Task.FromResult(new RedactedContentStorageResult(Stored: true));
         }
     }
 }

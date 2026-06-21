@@ -274,6 +274,63 @@ public sealed class TokenObservabilityJobsCommandTests
     }
 
     [Fact]
+    public async Task RedactContentCommandUsesMetadataOnlyReviewWorkflow()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateContentJobSeedAsync(store, captured: false);
+        using var writer = new StringWriter();
+
+        var exitCode = await TokenObservabilityJobsCommandLine.RunAsync(
+            [
+                "redact-content",
+                "--customer-organization-id",
+                seed.Organization.CustomerOrganizationId.ToString()
+            ],
+            writer,
+            store);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("metadata-only content review work", writer.ToString());
+        Assert.Contains("No raw failed content was read or emitted.", writer.ToString());
+        Assert.DoesNotContain("placeholder", writer.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task RetentionCleanupCommandExpiresCapturedBlobPointersAndKeepsMetadata()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateContentJobSeedAsync(store, captured: true);
+        Assert.NotNull(seed.ContentReference.BlobPointer);
+        using var writer = new StringWriter();
+
+        var exitCode = await TokenObservabilityJobsCommandLine.RunAsync(
+            [
+                "retention-cleanup",
+                "--customer-organization-id",
+                seed.Organization.CustomerOrganizationId.ToString(),
+                "--as-of-utc",
+                Now.AddDays(31).ToString("O"),
+                "--correlation-id",
+                "retention-cleanup-test"
+            ],
+            writer,
+            store);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("Expired 1 captured content reference blob pointer(s).", writer.ToString());
+        var cleaned = await store.FindContentReferenceAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.ContentReference.ContentReferenceId);
+        Assert.NotNull(cleaned);
+        Assert.Null(cleaned.BlobPointer);
+        Assert.Equal(ContentReferenceCaptureState.MetadataOnly, cleaned.CaptureState);
+        Assert.False(cleaned.RecommendationEligible);
+        Assert.Equal(seed.ContentReference.ContentReferenceId, cleaned.ContentReferenceId);
+        var auditEvents = await store.ListGovernanceAuditEventsAsync(seed.Organization.CustomerOrganizationId);
+        Assert.Contains(auditEvents, audit => audit.EvidenceMetadata["operation"] == "content_retention_cleanup");
+    }
+
+    [Fact]
     public async Task GenerateRecommendationsCommandCreatesDeterministicRecommendationRecords()
     {
         var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
@@ -371,6 +428,76 @@ public sealed class TokenObservabilityJobsCommandTests
         Assert.Contains("--agent-session-id", writer.ToString());
     }
 
+    private static async Task<ContentJobSeed> CreateContentJobSeedAsync(
+        InMemoryTenantMetadataStore store,
+        bool captured)
+    {
+        var organization = await store.CreateCustomerOrganizationAsync(
+            new CreateCustomerOrganizationRequest(
+                captured ? "contoso-captured" : "contoso-review",
+                "Contoso",
+                "uksouth",
+                CustomerOrganizationIsolationTier.Shared));
+        var identityTenant = await store.CreateIdentityTenantAsync(
+            organization.CustomerOrganizationId,
+            new CreateIdentityTenantRequest(
+                IdentityTenantProvider.MicrosoftEntra,
+                $"https://sts.windows.net/{organization.Slug}/",
+                organization.Slug,
+                ["api://token-observability"],
+                JwksUri: null,
+                "Contoso Entra ID"));
+        var admin = await store.CreateProductUserAsync(
+            organization.CustomerOrganizationId,
+            identityTenant.IdentityTenantId,
+            new CreateProductUserRequest($"admin-{organization.Slug}", "admin", "admin@example.test"));
+        var developer = await store.CreateProductUserAsync(
+            organization.CustomerOrganizationId,
+            identityTenant.IdentityTenantId,
+            new CreateProductUserRequest($"developer-{organization.Slug}", "developer", "developer@example.test"));
+        var lifecycle = new ScopedIngestionCredentialLifecycleService(store, new StaticTenantMetadataClock(Now));
+        var issued = await lifecycle.CreateAsync(
+            organization.CustomerOrganizationId,
+            new IssueScopedIngestionCredentialRequest(
+                $"profile-{organization.Slug}",
+                developer.ProductUserId,
+                CodingAgentHarness.CodexCli,
+                [new ProductScope(ProductScopeKind.Organization, ScopeId: null)],
+                Now.AddDays(30),
+                admin.ProductUserId,
+                ProductRole.PlatformAdmin,
+                "job-content-credential",
+                $"audit-job-content-credential-{organization.Slug}"));
+        var session = await SeedTokenSessionAsync(store, issued.Credential, $"content-job-{organization.Slug}");
+        var telemetryEnvelopeId = Assert.Single(session.SourceTelemetryEnvelopeIds);
+
+        await store.RecordContentCandidateMetadataAsync(new CreateContentCandidateMetadataRequest(
+            organization.CustomerOrganizationId,
+            PolicyVersionId: "policy-content-v1",
+            issued.Credential.ScopedIngestionCredentialId,
+            issued.Credential.HarnessSetupProfileId,
+            session.AgentSessionId,
+            $"{telemetryEnvelopeId}:otlp.log.body",
+            ContentClass.PromptSnippet,
+            OriginalLength: 32,
+            ContentCapturePolicyDecision.CaptureAllowed,
+            captured ? ContentCandidateEvidenceState.Candidate : ContentCandidateEvidenceState.ReviewRequired,
+            captured ? ContentRedactionStatus.Passed : ContentRedactionStatus.ReviewRequired,
+            ContentRetentionClass.Short,
+            RecommendationUse.Disabled,
+            captured ? ContentRedactionOutcome.Captured : ContentRedactionOutcome.ReviewRequired,
+            RedactionDecisionReason: captured ? "redaction_passed" : "pii_low_confidence",
+            RedactionPipelineVersion: "content-redaction-pipeline-v1",
+            ProductRuleVersion: "product-redaction-rules-v1",
+            RedactedContentHash: captured ? ComputeSha256Hex("redacted content") : null,
+            RedactedContentStored: captured));
+
+        var contentReference = Assert.Single(await store.ListContentReferencesForSessionAsync(
+            organization.CustomerOrganizationId,
+            session.AgentSessionId));
+        return new ContentJobSeed(organization, contentReference);
+    }
+
     private sealed class StubHttpMessageHandler(string content) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -450,4 +577,8 @@ public sealed class TokenObservabilityJobsCommandTests
     {
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
     }
+
+    private sealed record ContentJobSeed(
+        CustomerOrganization Organization,
+        ContentReferenceRecord ContentReference);
 }

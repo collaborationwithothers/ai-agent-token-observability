@@ -1,4 +1,6 @@
 using System.Collections.ObjectModel;
+using System.Security.Cryptography;
+using System.Text;
 using TokenObservability.Domain.Authorization;
 using TokenObservability.Domain.Ingestion;
 using TokenObservability.Domain.Pricing;
@@ -87,7 +89,14 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
         "pricing_basis_version",
         "reason",
         "agent_session_id",
-        "token_hotspot_id"
+        "token_hotspot_id",
+        "content_reference_id",
+        "redaction_review_id",
+        "capture_state",
+        "redaction_status",
+        "retention_class",
+        "review_decision",
+        "recommendation_eligible"
     };
 
     private readonly Dictionary<CustomerOrganizationId, CustomerOrganization> customerOrganizations = [];
@@ -101,6 +110,8 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
     private readonly Dictionary<IngestionRejectionId, IngestionRejectionRecord> ingestionRejections = [];
     private readonly Dictionary<string, TelemetryEnvelopeRecord> telemetryEnvelopes = [];
     private readonly Dictionary<string, ContentCandidateMetadata> contentCandidateMetadata = [];
+    private readonly Dictionary<ContentReferenceId, ContentReferenceRecord> contentReferences = [];
+    private readonly Dictionary<RedactionReviewId, RedactionReviewRecord> redactionReviews = [];
     private readonly Dictionary<CustomerOrganizationId, ContentCapturePolicy> activeContentCapturePolicies = [];
     private readonly Dictionary<TelemetryEnvelopeDedupeLookupKey, string> telemetryEnvelopeDedupeIndex = [];
     private readonly Dictionary<string, AgentSessionRecord> agentSessions = [];
@@ -894,6 +905,12 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
         var productRuleVersion = NormalizeOptionalSafeLabel(
             request.ProductRuleVersion,
             nameof(request.ProductRuleVersion));
+        var redactedContentHash = string.IsNullOrWhiteSpace(request.RedactedContentHash)
+            ? null
+            : NormalizeHash(request.RedactedContentHash, nameof(request.RedactedContentHash));
+        var redactedContentBlobVersion = NormalizeOptionalSafeLabel(
+            request.RedactedContentBlobVersion,
+            nameof(request.RedactedContentBlobVersion));
         var redactionFindings = NormalizeRedactionFindings(request.RedactionFindings);
         RejectSensitiveText(policyVersionId);
         RejectSensitiveText(sessionId);
@@ -932,9 +949,13 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
                 redactionDecisionReason,
                 redactionPipelineVersion,
                 productRuleVersion,
+                redactedContentHash,
+                request.RedactedContentStored,
+                redactedContentBlobVersion,
                 redactionFindings);
 
             contentCandidateMetadata.Add(metadata.ContentCandidateMetadataId, metadata);
+            CreateContentReferenceFromCandidateMetadataUnderLock(metadata, now);
             return Task.FromResult(metadata);
         }
     }
@@ -950,6 +971,213 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
                     .OrderBy(metadata => metadata.CreatedAtUtc)
                     .ThenBy(metadata => metadata.ContentCandidateMetadataId, StringComparer.Ordinal)
                     .ToArray());
+        }
+    }
+
+    public Task<IReadOnlyList<ContentReferenceRecord>> ListContentReferencesForSessionAsync(
+        CustomerOrganizationId customerOrganizationId,
+        string agentSessionId)
+    {
+        var normalizedAgentSessionId = NormalizeRequiredText(agentSessionId, nameof(agentSessionId));
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(customerOrganizationId);
+            return Task.FromResult<IReadOnlyList<ContentReferenceRecord>>(
+                contentReferences.Values
+                    .Where(reference =>
+                        reference.CustomerOrganizationId == customerOrganizationId &&
+                        StringComparer.Ordinal.Equals(reference.AgentSessionId, normalizedAgentSessionId))
+                    .OrderBy(reference => reference.CreatedAtUtc)
+                    .ThenBy(reference => reference.ContentReferenceId.Value)
+                    .ToArray());
+        }
+    }
+
+    public Task<IReadOnlyList<ContentReferenceRecord>> ListContentReviewItemsAsync(
+        CustomerOrganizationId customerOrganizationId,
+        ContentReferenceCaptureState? state = null)
+    {
+        lock (gate)
+        {
+            RequireCustomerOrganization(customerOrganizationId);
+            return Task.FromResult<IReadOnlyList<ContentReferenceRecord>>(
+                contentReferences.Values
+                    .Where(reference =>
+                        reference.CustomerOrganizationId == customerOrganizationId &&
+                        IsContentReviewVisibleState(reference.CaptureState) &&
+                        (state is null || reference.CaptureState == state.Value))
+                    .OrderBy(reference => reference.CreatedAtUtc)
+                    .ThenBy(reference => reference.ContentReferenceId.Value)
+                    .ToArray());
+        }
+    }
+
+    public Task<ContentReferenceRecord?> FindContentReferenceAsync(
+        CustomerOrganizationId customerOrganizationId,
+        ContentReferenceId contentReferenceId)
+    {
+        lock (gate)
+        {
+            RequireCustomerOrganization(customerOrganizationId);
+            return Task.FromResult(
+                contentReferences.TryGetValue(contentReferenceId, out var reference) &&
+                    reference.CustomerOrganizationId == customerOrganizationId
+                    ? reference
+                    : null);
+        }
+    }
+
+    public Task<RedactionReviewRecord> ReviewContentReferenceAsync(ReviewContentReferenceRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        if (request.CustomerOrganizationId == CustomerOrganizationId.Empty)
+        {
+            throw new ArgumentException("Customer organization identifier must not be empty.", nameof(request));
+        }
+
+        if (request.ContentReferenceId == ContentReferenceId.Empty)
+        {
+            throw new ArgumentException("Content reference identifier must not be empty.", nameof(request));
+        }
+
+        if (request.ReviewerProductUserId == ProductUserId.Empty)
+        {
+            throw new ArgumentException("Reviewer product user identifier must not be empty.", nameof(request));
+        }
+
+        var auditEventId = NormalizeRequiredText(request.AuditEventId, nameof(request.AuditEventId));
+        var correlationId = NormalizeRequiredText(request.CorrelationId, nameof(request.CorrelationId));
+        var decisionReason = NormalizeOptionalSafeLabel(request.DecisionReason, nameof(request.DecisionReason));
+        RejectSensitiveText(auditEventId);
+        RejectSensitiveText(correlationId);
+        if (decisionReason is not null)
+        {
+            RejectSensitiveText(decisionReason);
+        }
+
+        var now = clock.UtcNow.ToUniversalTime();
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+            RequireProductUserForCustomerOrganization(request.CustomerOrganizationId, request.ReviewerProductUserId);
+
+            if (!contentReferences.TryGetValue(request.ContentReferenceId, out var existing) ||
+                existing.CustomerOrganizationId != request.CustomerOrganizationId)
+            {
+                throw new InvalidOperationException("Content reference was not found for the customer organization.");
+            }
+
+            if (!IsReviewableState(existing.CaptureState))
+            {
+                throw new InvalidOperationException("Only review-required or redaction-failed content references can be reviewed.");
+            }
+
+            var approvedExcerpt = NormalizeApprovedExcerpt(request);
+            var reviewId = new RedactionReviewId(Guid.NewGuid());
+            var auditEvent = CreateGovernanceAuditEventUnderLock(
+                auditEventId,
+                request.CustomerOrganizationId,
+                request.ReviewerProductUserId,
+                request.EffectiveRole,
+                ProductAuthorizationAction.ContentReviewDecide,
+                ProductScopeKind.ContentReviewQueue.ToString(),
+                request.ContentReferenceId.ToString(),
+                "updated",
+                denialReason: null,
+                correlationId,
+                CreateContentReviewAuditMetadata(
+                    operation: $"content_review_{ToWireRedactionReviewDecision(request.Decision)}",
+                    result: ToWireRedactionReviewDecision(request.Decision),
+                    request.ContentReferenceId,
+                    reviewId,
+                    request.Decision,
+                    existing),
+                now);
+
+            var review = new RedactionReviewRecord(
+                reviewId,
+                request.CustomerOrganizationId,
+                request.ContentReferenceId,
+                request.ReviewerProductUserId,
+                request.Decision,
+                decisionReason,
+                auditEvent.AuditEventId,
+                correlationId,
+                now);
+
+            redactionReviews.Add(reviewId, review);
+            contentReferences[request.ContentReferenceId] = ApplyReviewDecision(existing, request.Decision, approvedExcerpt, now, auditEvent.AuditEventId);
+            return Task.FromResult(review);
+        }
+    }
+
+    public Task<ContentRetentionCleanupResult> CleanupExpiredContentReferencesAsync(
+        CustomerOrganizationId customerOrganizationId,
+        DateTimeOffset asOfUtc,
+        ProductUserId? actorProductUserId,
+        ProductRole? effectiveRole,
+        string correlationId)
+    {
+        var normalizedCorrelationId = NormalizeRequiredText(correlationId, nameof(correlationId));
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(customerOrganizationId);
+            if (actorProductUserId is not null)
+            {
+                RequireProductUserForCustomerOrganization(customerOrganizationId, actorProductUserId.Value);
+            }
+
+            var now = asOfUtc.ToUniversalTime();
+            var expired = contentReferences.Values
+                .Where(reference =>
+                    reference.CustomerOrganizationId == customerOrganizationId &&
+                    reference.ExpiresAtUtc is not null &&
+                    reference.ExpiresAtUtc.Value <= now &&
+                    reference.BlobPointer is not null)
+                .OrderBy(reference => reference.ExpiresAtUtc)
+                .ThenBy(reference => reference.ContentReferenceId.Value)
+                .ToArray();
+
+            foreach (var reference in expired)
+            {
+                CreateGovernanceAuditEventUnderLock(
+                    $"audit-content-retention-{Guid.NewGuid():N}",
+                    customerOrganizationId,
+                    actorProductUserId,
+                    effectiveRole,
+                    ProductAuthorizationAction.ContentReviewDecide,
+                    "content_reference",
+                    reference.ContentReferenceId.ToString(),
+                    "updated",
+                    denialReason: null,
+                    normalizedCorrelationId,
+                    CreateContentReferenceAuditMetadata(
+                        operation: "content_retention_cleanup",
+                        result: "expired",
+                        reference.ContentReferenceId,
+                        reference.CaptureState,
+                        reference.RedactionStatus,
+                        reference.RetentionClass,
+                        reference.RecommendationEligible),
+                    now);
+
+                contentReferences[reference.ContentReferenceId] = reference with
+                {
+                    CaptureState = ContentReferenceCaptureState.MetadataOnly,
+                    BlobPointer = null,
+                    ApprovedExcerpt = null,
+                    RecommendationEligible = false,
+                    UpdatedAtUtc = now
+                };
+            }
+
+            return Task.FromResult(new ContentRetentionCleanupResult(
+                expired.Length,
+                expired.Select(static reference => reference.ContentReferenceId).ToArray()));
         }
     }
 
@@ -3967,6 +4195,397 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
         }
     }
 
+    private void CreateContentReferenceFromCandidateMetadataUnderLock(
+        ContentCandidateMetadata metadata,
+        DateTimeOffset now)
+    {
+        var telemetryEnvelopeId = ExtractTelemetryEnvelopeId(metadata.TelemetryReference);
+        if (!telemetryEnvelopes.TryGetValue(telemetryEnvelopeId, out var envelope) ||
+            envelope.CustomerOrganizationId != metadata.CustomerOrganizationId)
+        {
+            return;
+        }
+
+        if (!agentSessions.Values.Any(session =>
+                session.CustomerOrganizationId == metadata.CustomerOrganizationId &&
+                StringComparer.Ordinal.Equals(session.AgentSessionId, metadata.SessionId)))
+        {
+            return;
+        }
+
+        var contentReferenceId = new ContentReferenceId(Guid.NewGuid());
+        var captureState = ToContentReferenceCaptureState(metadata);
+        var redactionStatus = ToContentReferenceRedactionStatus(metadata);
+        var contentHash = captureState == ContentReferenceCaptureState.Captured ||
+            (metadata.RedactionOutcome == ContentRedactionOutcome.Captured && metadata.RedactionStatus == ContentRedactionStatus.Passed)
+            ? metadata.RedactedContentHash
+            : null;
+        var expiresAtUtc = GetContentReferenceExpiresAtUtc(captureState, metadata.RetentionClass, now);
+        var blobPointer = captureState == ContentReferenceCaptureState.Captured
+            ? BuildCapturedContentBlobPointer(metadata.CustomerOrganizationId, metadata.SessionId, contentReferenceId, now, metadata.RedactedContentBlobVersion)
+            : null;
+        var recommendationEligible = captureState == ContentReferenceCaptureState.Captured &&
+            metadata.RecommendationUse == RecommendationUse.ApprovedEvidence;
+        var auditEventId = $"audit-content-reference-{Guid.NewGuid():N}";
+
+        var auditEvent = CreateGovernanceAuditEventUnderLock(
+            auditEventId,
+            metadata.CustomerOrganizationId,
+            scopedIngestionCredentials.TryGetValue(metadata.ScopedIngestionCredentialId, out var credential)
+                ? credential.ProductUserId
+                : null,
+            effectiveRole: null,
+            ProductAuthorizationAction.TelemetryIngest,
+            "content_reference",
+            contentReferenceId.ToString(),
+            "created",
+            denialReason: null,
+            $"content-reference-{Guid.NewGuid():N}",
+            CreateContentReferenceAuditMetadata(
+                operation: "content_reference_create",
+                result: ToWireContentReferenceCaptureState(captureState),
+                contentReferenceId,
+                captureState,
+                redactionStatus,
+                metadata.RetentionClass,
+                recommendationEligible),
+            now);
+
+        contentReferences.Add(contentReferenceId, new ContentReferenceRecord(
+            contentReferenceId,
+            metadata.CustomerOrganizationId,
+            metadata.SessionId,
+            telemetryEnvelopeId,
+            metadata.ContentClass,
+            captureState,
+            redactionStatus,
+            contentHash,
+            blobPointer,
+            metadata.PolicyVersionId,
+            metadata.RedactionPipelineVersion,
+            metadata.ProductRuleVersion,
+            metadata.RetentionClass,
+            expiresAtUtc,
+            recommendationEligible,
+            auditEvent.AuditEventId,
+            ApprovedExcerpt: null,
+            now,
+            now));
+    }
+
+    private static string ExtractTelemetryEnvelopeId(string telemetryReference)
+    {
+        var separatorIndex = telemetryReference.IndexOf(':', StringComparison.Ordinal);
+        return separatorIndex <= 0 ? telemetryReference : telemetryReference[..separatorIndex];
+    }
+
+    private static ContentReferenceCaptureState ToContentReferenceCaptureState(ContentCandidateMetadata metadata)
+    {
+        if (metadata.RedactionOutcome == ContentRedactionOutcome.Captured &&
+            metadata.RedactionStatus == ContentRedactionStatus.Passed &&
+            metadata.RedactedContentStored)
+        {
+            return ContentReferenceCaptureState.Captured;
+        }
+
+        if (metadata.RedactionOutcome == ContentRedactionOutcome.ReviewRequired ||
+            metadata.RedactionStatus == ContentRedactionStatus.ReviewRequired ||
+            metadata.EvidenceState == ContentCandidateEvidenceState.ReviewRequired)
+        {
+            return ContentReferenceCaptureState.ReviewRequired;
+        }
+
+        if (metadata.RedactionOutcome == ContentRedactionOutcome.RedactionFailed ||
+            metadata.RedactionStatus == ContentRedactionStatus.Failed ||
+            metadata.EvidenceState == ContentCandidateEvidenceState.RedactionFailed)
+        {
+            return ContentReferenceCaptureState.RedactionFailed;
+        }
+
+        if (metadata.PolicyDecision == ContentCapturePolicyDecision.PolicyDenied)
+        {
+            return ContentReferenceCaptureState.NotAllowed;
+        }
+
+        return ContentReferenceCaptureState.MetadataOnly;
+    }
+
+    private static ContentReferenceRedactionStatus ToContentReferenceRedactionStatus(ContentCandidateMetadata metadata)
+    {
+        return metadata.RedactionStatus switch
+        {
+            ContentRedactionStatus.NotRequired => ContentReferenceRedactionStatus.NotRequired,
+            ContentRedactionStatus.Pending => ContentReferenceRedactionStatus.ReviewRequired,
+            ContentRedactionStatus.ReviewRequired => ContentReferenceRedactionStatus.ReviewRequired,
+            ContentRedactionStatus.Failed => ContentReferenceRedactionStatus.Failed,
+            ContentRedactionStatus.Passed => ContentReferenceRedactionStatus.Passed,
+            _ => throw new ArgumentOutOfRangeException(nameof(metadata), metadata.RedactionStatus, null)
+        };
+    }
+
+    private static DateTimeOffset? GetContentReferenceExpiresAtUtc(
+        ContentReferenceCaptureState captureState,
+        ContentRetentionClass retentionClass,
+        DateTimeOffset createdAtUtc)
+    {
+        if (captureState is ContentReferenceCaptureState.Captured or ContentReferenceCaptureState.ApprovedExcerpt)
+        {
+            return createdAtUtc.AddDays(30);
+        }
+
+        if (retentionClass is ContentRetentionClass.Review or ContentRetentionClass.Blocked)
+        {
+            return createdAtUtc.AddDays(180);
+        }
+
+        return null;
+    }
+
+    private static CapturedContentBlobPointer BuildCapturedContentBlobPointer(
+        CustomerOrganizationId customerOrganizationId,
+        string agentSessionId,
+        ContentReferenceId contentReferenceId,
+        DateTimeOffset decisionTimeUtc,
+        string? blobVersion)
+    {
+        var date = decisionTimeUtc.ToUniversalTime();
+        var blobName =
+            $"customer-organization-id={customerOrganizationId}/" +
+            $"yyyy={date:yyyy}/mm={date:MM}/dd={date:dd}/" +
+            $"session-id={agentSessionId}/" +
+            $"content-reference-id={contentReferenceId}/" +
+            "redacted.txt";
+
+        return new CapturedContentBlobPointer(
+            "captured-content",
+            blobName,
+            $"azblob://captured-content/{blobName}",
+            blobVersion);
+    }
+
+    private static CapturedContentBlobPointer BuildApprovedExcerptBlobPointer(
+        CustomerOrganizationId customerOrganizationId,
+        ContentReferenceId contentReferenceId,
+        DateTimeOffset decisionTimeUtc)
+    {
+        var date = decisionTimeUtc.ToUniversalTime();
+        var blobName =
+            $"customer-organization-id={customerOrganizationId}/" +
+            $"yyyy={date:yyyy}/mm={date:MM}/dd={date:dd}/" +
+            $"content-reference-id={contentReferenceId}/" +
+            "approved-excerpt.txt";
+
+        return new CapturedContentBlobPointer(
+            "content-review-artifacts",
+            blobName,
+            $"azblob://content-review-artifacts/{blobName}",
+            BlobVersion: null);
+    }
+
+    private static bool IsContentReviewVisibleState(ContentReferenceCaptureState state)
+    {
+        return state is ContentReferenceCaptureState.ReviewRequired or
+            ContentReferenceCaptureState.RedactionFailed or
+            ContentReferenceCaptureState.Discarded or
+            ContentReferenceCaptureState.ApprovedExcerpt;
+    }
+
+    private static bool IsReviewableState(ContentReferenceCaptureState state)
+    {
+        return state is ContentReferenceCaptureState.ReviewRequired or ContentReferenceCaptureState.RedactionFailed;
+    }
+
+    private static string? NormalizeApprovedExcerpt(ReviewContentReferenceRequest request)
+    {
+        if (request.Decision != RedactionReviewDecision.ApproveExcerpt)
+        {
+            if (!string.IsNullOrWhiteSpace(request.ApprovedExcerpt))
+            {
+                throw new ArgumentException("Approved excerpt is only allowed for approve-excerpt decisions.", nameof(request));
+            }
+
+            return null;
+        }
+
+        var excerpt = NormalizeRequiredText(request.ApprovedExcerpt ?? string.Empty, nameof(request.ApprovedExcerpt));
+        RejectSensitiveText(excerpt);
+        if (Encoding.UTF8.GetByteCount(excerpt) > ContentRedactionLimits.MaxApprovedExcerptUtf8Bytes)
+        {
+            throw new ArgumentException("Approved excerpt exceeds the bounded excerpt size limit.", nameof(request));
+        }
+
+        return excerpt;
+    }
+
+    private static ContentReferenceRecord ApplyReviewDecision(
+        ContentReferenceRecord existing,
+        RedactionReviewDecision decision,
+        string? approvedExcerpt,
+        DateTimeOffset now,
+        string auditEventId)
+    {
+        return decision switch
+        {
+            RedactionReviewDecision.Retry => existing with
+            {
+                AuditEventId = auditEventId,
+                UpdatedAtUtc = now
+            },
+            RedactionReviewDecision.Discard => existing with
+            {
+                CaptureState = ContentReferenceCaptureState.Discarded,
+                RedactionStatus = existing.RedactionStatus,
+                BlobPointer = null,
+                ApprovedExcerpt = null,
+                RecommendationEligible = false,
+                AuditEventId = auditEventId,
+                UpdatedAtUtc = now
+            },
+            RedactionReviewDecision.ApproveExcerpt => existing with
+            {
+                CaptureState = ContentReferenceCaptureState.ApprovedExcerpt,
+                RedactionStatus = ContentReferenceRedactionStatus.ManuallyApproved,
+                ContentHash = ComputeSha256Hex(approvedExcerpt ?? string.Empty),
+                BlobPointer = BuildApprovedExcerptBlobPointer(existing.CustomerOrganizationId, existing.ContentReferenceId, now),
+                ApprovedExcerpt = approvedExcerpt,
+                RecommendationEligible = true,
+                ExpiresAtUtc = now.AddDays(30),
+                AuditEventId = auditEventId,
+                UpdatedAtUtc = now
+            },
+            RedactionReviewDecision.RejectExcerpt => existing with
+            {
+                AuditEventId = auditEventId,
+                UpdatedAtUtc = now
+            },
+            RedactionReviewDecision.MarkRecommendationIneligible => existing with
+            {
+                RecommendationEligible = false,
+                AuditEventId = auditEventId,
+                UpdatedAtUtc = now
+            },
+            _ => throw new ArgumentOutOfRangeException(nameof(decision), decision, null)
+        };
+    }
+
+    private static IReadOnlyDictionary<string, string> CreateContentReferenceAuditMetadata(
+        string operation,
+        string result,
+        ContentReferenceId contentReferenceId,
+        ContentReferenceCaptureState captureState,
+        ContentReferenceRedactionStatus redactionStatus,
+        ContentRetentionClass retentionClass,
+        bool recommendationEligible)
+    {
+        return new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["evidence_kind"] = "ingestion_decision",
+            ["operation"] = operation,
+            ["result"] = result,
+            ["content_reference_id"] = contentReferenceId.ToString(),
+            ["capture_state"] = ToWireContentReferenceCaptureState(captureState),
+            ["redaction_status"] = ToWireContentReferenceRedactionStatus(redactionStatus),
+            ["retention_class"] = ToWireContentRetentionClass(retentionClass),
+            ["recommendation_eligible"] = recommendationEligible ? "true" : "false"
+        };
+    }
+
+    private static IReadOnlyDictionary<string, string> CreateContentReviewAuditMetadata(
+        string operation,
+        string result,
+        ContentReferenceId contentReferenceId,
+        RedactionReviewId redactionReviewId,
+        RedactionReviewDecision decision,
+        ContentReferenceRecord existing)
+    {
+        return new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["evidence_kind"] = "admin_operation",
+            ["operation"] = operation,
+            ["result"] = result,
+            ["content_reference_id"] = contentReferenceId.ToString(),
+            ["redaction_review_id"] = redactionReviewId.ToString(),
+            ["review_decision"] = ToWireRedactionReviewDecision(decision),
+            ["capture_state"] = ToWireContentReferenceCaptureState(existing.CaptureState),
+            ["redaction_status"] = ToWireContentReferenceRedactionStatus(existing.RedactionStatus),
+            ["retention_class"] = ToWireContentRetentionClass(existing.RetentionClass),
+            ["recommendation_eligible"] = existing.RecommendationEligible ? "true" : "false"
+        };
+    }
+
+    public static string ToWireContentReferenceCaptureState(ContentReferenceCaptureState state)
+    {
+        return state switch
+        {
+            ContentReferenceCaptureState.NotAllowed => "not_allowed",
+            ContentReferenceCaptureState.MetadataOnly => "metadata_only",
+            ContentReferenceCaptureState.Captured => "captured",
+            ContentReferenceCaptureState.RedactionFailed => "redaction_failed",
+            ContentReferenceCaptureState.ReviewRequired => "review_required",
+            ContentReferenceCaptureState.Discarded => "discarded",
+            ContentReferenceCaptureState.ApprovedExcerpt => "approved_excerpt",
+            _ => throw new ArgumentOutOfRangeException(nameof(state), state, null)
+        };
+    }
+
+    public static string ToWireContentReferenceRedactionStatus(ContentReferenceRedactionStatus status)
+    {
+        return status switch
+        {
+            ContentReferenceRedactionStatus.NotRequired => "not_required",
+            ContentReferenceRedactionStatus.Passed => "passed",
+            ContentReferenceRedactionStatus.Failed => "failed",
+            ContentReferenceRedactionStatus.ReviewRequired => "review_required",
+            ContentReferenceRedactionStatus.ManuallyApproved => "manually_approved",
+            _ => throw new ArgumentOutOfRangeException(nameof(status), status, null)
+        };
+    }
+
+    public static string ToWireRedactionReviewDecision(RedactionReviewDecision decision)
+    {
+        return decision switch
+        {
+            RedactionReviewDecision.Retry => "retry",
+            RedactionReviewDecision.Discard => "discard",
+            RedactionReviewDecision.ApproveExcerpt => "approve_excerpt",
+            RedactionReviewDecision.RejectExcerpt => "reject_excerpt",
+            RedactionReviewDecision.MarkRecommendationIneligible => "mark_recommendation_ineligible",
+            _ => throw new ArgumentOutOfRangeException(nameof(decision), decision, null)
+        };
+    }
+
+    public static string ToWireContentClass(ContentClass contentClass)
+    {
+        return contentClass switch
+        {
+            ContentClass.PromptSnippet => "prompt_snippet",
+            ContentClass.ToolInputExcerpt => "tool_input_excerpt",
+            ContentClass.ToolOutputExcerpt => "tool_output_excerpt",
+            ContentClass.ModelResponseExcerpt => "model_response_excerpt",
+            ContentClass.CommandSummary => "command_summary",
+            ContentClass.FileContentExcerpt => "file_content_excerpt",
+            ContentClass.MetadataOnly => "metadata_only",
+            _ => throw new ArgumentOutOfRangeException(nameof(contentClass), contentClass, null)
+        };
+    }
+
+    public static string ToWireContentRetentionClass(ContentRetentionClass retentionClass)
+    {
+        return retentionClass switch
+        {
+            ContentRetentionClass.MetadataOnly => "metadata_only",
+            ContentRetentionClass.Short => "short",
+            ContentRetentionClass.Review => "review",
+            ContentRetentionClass.Blocked => "blocked",
+            _ => throw new ArgumentOutOfRangeException(nameof(retentionClass), retentionClass, null)
+        };
+    }
+
+    private static string ComputeSha256Hex(string value)
+    {
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+    }
+
     private static string ToWirePolicyChangeKind(ContentCapturePolicyChangeKind changeKind)
     {
         return changeKind switch
@@ -4324,6 +4943,13 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
             "reason" => IsSafeResourceId(value),
             "agent_session_id" => IsSafeResourceId(value),
             "token_hotspot_id" => IsSafeResourceId(value),
+            "content_reference_id" => Guid.TryParse(value, out var contentReferenceGuid) && contentReferenceGuid != Guid.Empty,
+            "redaction_review_id" => Guid.TryParse(value, out var redactionReviewGuid) && redactionReviewGuid != Guid.Empty,
+            "capture_state" => value is "not_allowed" or "metadata_only" or "captured" or "redaction_failed" or "review_required" or "discarded" or "approved_excerpt",
+            "redaction_status" => value is "not_required" or "passed" or "failed" or "review_required" or "manually_approved",
+            "retention_class" => value is "metadata_only" or "short" or "review" or "blocked",
+            "review_decision" => value is "retry" or "discard" or "approve_excerpt" or "reject_excerpt" or "mark_recommendation_ineligible",
+            "recommendation_eligible" => value is "true" or "false",
             _ => false
         };
 

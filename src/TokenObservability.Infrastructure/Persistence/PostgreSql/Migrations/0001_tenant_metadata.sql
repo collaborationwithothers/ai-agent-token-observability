@@ -288,6 +288,109 @@ CREATE TABLE IF NOT EXISTS agent_session (
     )
 );
 
+CREATE TABLE IF NOT EXISTS content_reference (
+    content_reference_id uuid PRIMARY KEY,
+    customer_organization_id uuid NOT NULL,
+    agent_session_id text NULL,
+    telemetry_envelope_id text NOT NULL,
+    content_class text NOT NULL,
+    capture_state text NOT NULL,
+    redaction_status text NOT NULL,
+    content_hash text NULL,
+    blob_uri text NULL,
+    blob_container text NULL,
+    blob_name text NULL,
+    blob_version text NULL,
+    policy_version_id text NOT NULL,
+    redaction_pipeline_version text NULL,
+    product_rule_version text NULL,
+    retention_class text NOT NULL,
+    expires_at_utc timestamptz NULL,
+    recommendation_eligible boolean NOT NULL,
+    approved_excerpt_hash text NULL,
+    audit_event_id text NOT NULL,
+    created_at_utc timestamptz NOT NULL,
+    updated_at_utc timestamptz NOT NULL,
+    CONSTRAINT fk_content_reference_customer_organization FOREIGN KEY (customer_organization_id) REFERENCES customer_organization (customer_organization_id),
+    CONSTRAINT fk_content_reference_agent_session FOREIGN KEY (customer_organization_id, agent_session_id) REFERENCES agent_session (customer_organization_id, agent_session_id),
+    CONSTRAINT fk_content_reference_telemetry_envelope FOREIGN KEY (customer_organization_id, telemetry_envelope_id) REFERENCES telemetry_envelope (customer_organization_id, telemetry_envelope_id),
+    CONSTRAINT fk_content_reference_audit_event FOREIGN KEY (customer_organization_id, audit_event_id) REFERENCES governance_audit_event (customer_organization_id, audit_event_id),
+    CONSTRAINT uq_content_reference_customer_reference UNIQUE (customer_organization_id, content_reference_id),
+    CONSTRAINT ck_content_reference_content_class CHECK (content_class IN ('prompt_snippet', 'tool_input_excerpt', 'tool_output_excerpt', 'model_response_excerpt', 'command_summary', 'file_content_excerpt', 'metadata_only')),
+    CONSTRAINT ck_content_reference_capture_state CHECK (capture_state IN ('not_allowed', 'metadata_only', 'captured', 'redaction_failed', 'review_required', 'discarded', 'approved_excerpt')),
+    CONSTRAINT ck_content_reference_redaction_status CHECK (redaction_status IN ('not_required', 'passed', 'failed', 'review_required', 'manually_approved')),
+    CONSTRAINT ck_content_reference_retention_class CHECK (retention_class IN ('metadata_only', 'short', 'review', 'blocked')),
+    CONSTRAINT ck_content_reference_hashes CHECK (
+        content_hash IS NULL OR content_hash ~ '^[a-f0-9]{64}$'
+    ),
+    CONSTRAINT ck_content_reference_approved_excerpt_hash CHECK (
+        approved_excerpt_hash IS NULL OR approved_excerpt_hash ~ '^[a-f0-9]{64}$'
+    ),
+    CONSTRAINT ck_content_reference_blob_pointer_state CHECK (
+        (
+            capture_state IN ('captured', 'approved_excerpt')
+            AND blob_uri IS NOT NULL
+            AND blob_container IS NOT NULL
+            AND blob_name IS NOT NULL
+        )
+        OR
+        (
+            capture_state IN ('not_allowed', 'metadata_only', 'redaction_failed', 'review_required', 'discarded')
+            AND blob_uri IS NULL
+            AND blob_container IS NULL
+            AND blob_name IS NULL
+            AND blob_version IS NULL
+        )
+    ),
+    CONSTRAINT ck_content_reference_captured_status CHECK (
+        capture_state <> 'captured' OR redaction_status = 'passed'
+    ),
+    CONSTRAINT ck_content_reference_approved_excerpt_status CHECK (
+        capture_state <> 'approved_excerpt' OR redaction_status = 'manually_approved'
+    ),
+    CONSTRAINT ck_content_reference_retention_deadline CHECK (
+        capture_state NOT IN ('captured', 'approved_excerpt') OR expires_at_utc IS NOT NULL
+    ),
+    CONSTRAINT ck_content_reference_timestamps CHECK (updated_at_utc >= created_at_utc)
+);
+
+CREATE INDEX IF NOT EXISTS ix_content_reference_customer_session_state
+    ON content_reference (customer_organization_id, agent_session_id, capture_state);
+
+CREATE INDEX IF NOT EXISTS ix_content_reference_customer_review_state
+    ON content_reference (customer_organization_id, capture_state, created_at_utc DESC);
+
+CREATE INDEX IF NOT EXISTS ix_content_reference_customer_expires
+    ON content_reference (customer_organization_id, expires_at_utc)
+    WHERE expires_at_utc IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS redaction_review (
+    redaction_review_id uuid PRIMARY KEY,
+    customer_organization_id uuid NOT NULL,
+    content_reference_id uuid NOT NULL,
+    reviewer_product_user_id uuid NOT NULL,
+    decision text NOT NULL,
+    decision_reason text NULL,
+    decided_at_utc timestamptz NOT NULL,
+    audit_event_id text NOT NULL,
+    correlation_id text NOT NULL,
+    CONSTRAINT fk_redaction_review_customer_organization FOREIGN KEY (customer_organization_id) REFERENCES customer_organization (customer_organization_id),
+    CONSTRAINT fk_redaction_review_content_reference FOREIGN KEY (customer_organization_id, content_reference_id) REFERENCES content_reference (customer_organization_id, content_reference_id),
+    CONSTRAINT fk_redaction_review_reviewer_product_user FOREIGN KEY (customer_organization_id, reviewer_product_user_id) REFERENCES product_user (customer_organization_id, product_user_id),
+    CONSTRAINT fk_redaction_review_audit_event FOREIGN KEY (customer_organization_id, audit_event_id) REFERENCES governance_audit_event (customer_organization_id, audit_event_id),
+    CONSTRAINT uq_redaction_review_customer_review UNIQUE (customer_organization_id, redaction_review_id),
+    CONSTRAINT ck_redaction_review_decision CHECK (decision IN ('retry', 'discard', 'approve_excerpt', 'reject_excerpt', 'mark_recommendation_ineligible')),
+    CONSTRAINT ck_redaction_review_decision_reason CHECK (
+        decision_reason IS NULL OR (
+            length(decision_reason) <= 256
+            AND decision_reason !~* '(raw[ _-]?prompt|prompt[ _-]?text|code[ _-]?content|command[ _-]?output|tool[ _-]?result|secret|password|api[ _-]?key|access[ _-]?token)'
+        )
+    )
+);
+
+CREATE INDEX IF NOT EXISTS ix_redaction_review_customer_content_reference
+    ON redaction_review (customer_organization_id, content_reference_id, decided_at_utc DESC);
+
 CREATE TABLE IF NOT EXISTS token_observation (
     token_observation_id uuid PRIMARY KEY,
     customer_organization_id uuid NOT NULL,
