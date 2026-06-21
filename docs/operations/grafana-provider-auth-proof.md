@@ -28,7 +28,7 @@ The script uses `GRAFANA_ENTRA_ACCESS_TOKEN` when supplied. Otherwise it gets a 
 az account get-access-token --resource 6f2d169c-08f3-4a4c-a982-bcaf2d038c45 --query accessToken --output tsv --only-show-errors
 ```
 
-The token is passed to the `grafana/grafana` provider through `GRAFANA_HTTP_HEADERS` as an Authorization bearer header. The Terraform fixture at `infrastructure/azure/proofs/grafana_provider_auth` contains only:
+The token is passed to the `grafana/grafana` provider through `GRAFANA_AUTH` together with `GRAFANA_URL`. The Terraform fixture at `infrastructure/azure/proofs/grafana_provider_auth` contains only:
 
 - An empty `provider "grafana" {}` block.
 - A read-only `data "grafana_folders" "auth_probe" {}` probe.
@@ -82,7 +82,7 @@ Direct API token audience checked: yes | no
 Terraform probe: passed | failed
 Fallback required: yes | no
 Sanitization: no bearer tokens, service account tokens, response bodies, headers, cookies, or Terraform credential output recorded
-Decision for #64: Entra bearer-header provider auth | Key Vault backed service account fallback
+Decision for #64: Entra GRAFANA_AUTH provider auth | Key Vault backed service account fallback
 ```
 
 ## References

@@ -141,18 +141,9 @@ case "$mode" in
 
     (
       set +x
-      export TOKEN_VALUE="$token"
       export GRAFANA_URL="$endpoint"
-      export GRAFANA_HTTP_HEADERS
-      GRAFANA_HTTP_HEADERS="$(python3 - <<'PY'
-import json
-import os
-
-print(json.dumps({"Authorization": "Bearer " + os.environ["TOKEN_VALUE"]}))
-PY
-)"
-      unset TOKEN_VALUE
-      unset GRAFANA_AUTH
+      export GRAFANA_AUTH="$token"
+      unset GRAFANA_HTTP_HEADERS
       clear_terraform_logging_env
       run_probe "entra"
     )

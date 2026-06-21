@@ -249,7 +249,7 @@ managed_grafana_endpoint_from_azure() {
   az grafana show \
     --name "${grafana_workspace_name}" \
     --resource-group "${observability_resource_group_name}" \
-    --query properties.endpoint \
+    --query "endpoint || properties.endpoint" \
     --output tsv \
     --only-show-errors 2>/dev/null || true
 }
@@ -305,17 +305,8 @@ prepare_managed_grafana_provider_env() {
   fi
 
   export GRAFANA_URL="${endpoint}"
-  export TOKEN_VALUE="${token}"
-  export GRAFANA_HTTP_HEADERS
-  GRAFANA_HTTP_HEADERS="$(python3 - <<'PY'
-import json
-import os
-
-print(json.dumps({"Authorization": "Bearer " + os.environ["TOKEN_VALUE"]}))
-PY
-)"
-  unset TOKEN_VALUE
-  unset GRAFANA_AUTH
+  export GRAFANA_AUTH="${token}"
+  unset GRAFANA_HTTP_HEADERS
 }
 
 common_var_args() {
