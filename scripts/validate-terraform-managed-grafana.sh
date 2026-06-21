@@ -283,6 +283,14 @@ for forbidden_output in [
 
 required_helper_patterns = {
     "managed_grafana branch": r'\bmanaged_grafana\)',
+    "Grafana Entra audience": r'GRAFANA_ENTRA_AUDIENCE="6f2d169c-08f3-4a4c-a982-bcaf2d038c45"',
+    "Grafana provider env preparation": r'prepare_managed_grafana_provider_env\(\)',
+    "Grafana endpoint state output": r'terraform\s+-chdir="\$\{STAGE_DIR\}"\s+output\s+-raw\s+grafana_endpoint',
+    "Grafana endpoint Azure fallback": r'az\s+grafana\s+show',
+    "Grafana Entra token acquisition": r'az\s+account\s+get-access-token[\s\S]*--resource\s+"\$\{GRAFANA_ENTRA_AUDIENCE\}"',
+    "Grafana provider bearer headers": r'GRAFANA_HTTP_HEADERS',
+    "Grafana provider auth unset": r'unset\s+GRAFANA_AUTH',
+    "Terraform logging clear": r'clear_terraform_logging_env',
     "required Grafana admin group env": r'require_uuid_env GRAFANA_ADMIN_GROUP_OBJECT_ID',
     "required Grafana viewer group env": r'require_uuid_env GRAFANA_VIEWER_GROUP_OBJECT_ID',
     "optional Grafana editor group env": r'optional_uuid_env GRAFANA_EDITOR_GROUP_OBJECT_ID',
@@ -336,6 +344,8 @@ required_readme_terms = [
     "Grafana Viewer",
     "allow_production_grafana_editors",
     "Grafana RBAC grants aggregate dashboard access only",
+    "process-local provider environment variables",
+    "rerun the managed_grafana stage after the Azure workspace exists",
     "does not authorize Product API routes",
     "Individual ranking and punitive dashboard use are out of scope.",
     "Provider And AVM Choice",

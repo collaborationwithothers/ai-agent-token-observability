@@ -82,6 +82,7 @@ PLAN_STAGE_DIR="${PLAN_ARTIFACT_DIR}/${TERRAFORM_STAGE}"
 PLAN_FILE="${PLAN_STAGE_DIR}/${TERRAFORM_STAGE}-${TF_WORKSPACE}.tfplan"
 PLAN_TEXT="${PLAN_STAGE_DIR}/${TERRAFORM_STAGE}-${TF_WORKSPACE}.txt"
 RETAINED_PUBLIC_DNS_WORKSPACE="pd_eastus2_internal"
+GRAFANA_ENTRA_AUDIENCE="6f2d169c-08f3-4a4c-a982-bcaf2d038c45"
 
 assert_stage_output_workspace() {
   local terraform_stage="$1"
@@ -194,6 +195,127 @@ optional_uuid_env() {
   fi
 
   printf '%s\n' "${value}"
+}
+
+clear_terraform_logging_env() {
+  local name
+
+  while IFS='=' read -r name _; do
+    case "$name" in
+      TF_LOG|TF_LOG_*|TF_ACC_LOG_PATH)
+        unset "$name"
+        ;;
+    esac
+  done < <(env)
+}
+
+managed_grafana_workspace_name() {
+  local azure_region_code
+
+  case "${AZURE_REGION}" in
+    eastus) azure_region_code="eus" ;;
+    eastus2) azure_region_code="eus2" ;;
+    westeurope) azure_region_code="weu" ;;
+    *) azure_region_code="$(printf '%s' "${AZURE_REGION}" | tr -d '-' | cut -c1-6)" ;;
+  esac
+
+  printf 'amg-%s-%s-%s\n' "${ENVIRONMENT}" "${azure_region_code}" "${CUSTOMER_ORGANIZATION_SLUG}"
+}
+
+normalize_grafana_endpoint() {
+  local endpoint="$1"
+
+  endpoint="${endpoint%/}"
+  if [[ -n "${endpoint}" && "${endpoint}" != https://* ]]; then
+    endpoint="https://${endpoint}"
+  fi
+
+  printf '%s\n' "${endpoint}"
+}
+
+managed_grafana_endpoint_from_state() {
+  terraform -chdir="${STAGE_DIR}" output -raw grafana_endpoint 2>/dev/null || true
+}
+
+managed_grafana_endpoint_from_azure() {
+  local observability_resource_group_name="$1"
+  local grafana_workspace_name
+
+  if ! command -v az >/dev/null 2>&1; then
+    return 0
+  fi
+
+  grafana_workspace_name="$(managed_grafana_workspace_name)"
+  az grafana show \
+    --name "${grafana_workspace_name}" \
+    --resource-group "${observability_resource_group_name}" \
+    --query properties.endpoint \
+    --output tsv \
+    --only-show-errors 2>/dev/null || true
+}
+
+prepare_managed_grafana_provider_env() {
+  local observability_resource_group_name="${1:-}"
+  local endpoint
+  local token
+
+  if [[ "${TERRAFORM_STAGE}" != "managed_grafana" ]]; then
+    return 0
+  fi
+
+  clear_terraform_logging_env
+
+  endpoint="${GRAFANA_URL:-}"
+  if [[ -z "${endpoint}" ]]; then
+    endpoint="$(managed_grafana_endpoint_from_state)"
+  fi
+  if [[ -z "${endpoint}" ]]; then
+    if [[ -z "${observability_resource_group_name}" ]]; then
+      observability_resource_group_name="$(terraform_output_raw observability_foundation "${TF_WORKSPACE}" observability_resource_group_name)"
+    fi
+    endpoint="$(managed_grafana_endpoint_from_azure "${observability_resource_group_name}")"
+  fi
+
+  endpoint="$(normalize_grafana_endpoint "${endpoint}")"
+  if [[ -z "${endpoint}" ]]; then
+    echo "Azure Managed Grafana endpoint is not available yet; Grafana provider environment was not configured." >&2
+    echo "If this is the first managed_grafana apply for the workspace, rerun the managed_grafana stage after the Azure workspace exists." >&2
+    return 0
+  fi
+  if [[ ! "${endpoint}" =~ ^https://[^[:space:]]+$ ]]; then
+    echo "Azure Managed Grafana endpoint must be an HTTPS URL without whitespace." >&2
+    exit 1
+  fi
+
+  token="${GRAFANA_ENTRA_ACCESS_TOKEN:-}"
+  if [[ -z "${token}" ]]; then
+    if ! command -v az >/dev/null 2>&1; then
+      echo "Azure CLI is required to acquire the Azure Managed Grafana provider token unless GRAFANA_ENTRA_ACCESS_TOKEN is set." >&2
+      exit 1
+    fi
+    token="$(az account get-access-token \
+      --resource "${GRAFANA_ENTRA_AUDIENCE}" \
+      --query accessToken \
+      --output tsv \
+      --only-show-errors)"
+  fi
+  if [[ -z "${token}" ]]; then
+    echo "Failed to acquire an Azure Managed Grafana Microsoft Entra token." >&2
+    exit 1
+  fi
+
+  export GRAFANA_URL="${endpoint}"
+  export TOKEN_VALUE="${token}"
+  export GRAFANA_HTTP_HEADERS
+  GRAFANA_HTTP_HEADERS="$(python3 - <<'PY'
+import json
+import os
+
+print(json.dumps({"Authorization": "Bearer " + os.environ["TOKEN_VALUE"]}))
+PY
+)"
+  unset TOKEN_VALUE
+  unset GRAFANA_AUTH
 }
 
 common_var_args() {
@@ -376,6 +498,7 @@ case "${mode}" in
         if [[ -n "${grafana_editor_group_object_id}" ]]; then
           var_args+=("-var=grafana_editor_group_object_id=${grafana_editor_group_object_id}")
         fi
+        prepare_managed_grafana_provider_env "${observability_resource_group_name}"
         ;;
       edge)
         app_runtime_container_app_fqdns="$(terraform_output_json app_runtime "${TF_WORKSPACE}" container_app_fqdns)"
@@ -425,6 +548,7 @@ case "${mode}" in
   apply)
     test -f "${PLAN_FILE}"
     init_stage "${TERRAFORM_STAGE}" "${TF_WORKSPACE}" false
+    prepare_managed_grafana_provider_env
     terraform -chdir="${STAGE_DIR}" apply -input=false "${PLAN_FILE}"
     append_stage_summary "apply" "applied"
     ;;

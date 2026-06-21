@@ -32,16 +32,15 @@ resource "azurerm_resource_group" "app_runtime" {
 }
 
 resource "azurerm_container_app_environment" "this" {
-  name                               = local.container_app_environment_name
-  location                           = azurerm_resource_group.app_runtime.location
-  resource_group_name                = azurerm_resource_group.app_runtime.name
-  logs_destination                   = var.container_app_environment_logs_destination
-  log_analytics_workspace_id         = local.log_analytics_environment_required ? local.container_apps_log_analytics_workspace_id : null
-  infrastructure_subnet_id           = local.container_app_environment_subnet_id
-  public_network_access              = var.container_app_environment_public_network_access
-  zone_redundancy_enabled            = local.container_app_environment_subnet_id == null ? null : var.enable_zone_redundancy
-  infrastructure_resource_group_name = "rg-${local.name_prefix}-aca-infra"
-  tags                               = local.common_tags
+  name                       = local.container_app_environment_name
+  location                   = azurerm_resource_group.app_runtime.location
+  resource_group_name        = azurerm_resource_group.app_runtime.name
+  logs_destination           = var.container_app_environment_logs_destination
+  log_analytics_workspace_id = local.log_analytics_environment_required ? local.container_apps_log_analytics_workspace_id : null
+  infrastructure_subnet_id   = local.container_app_environment_subnet_id
+  public_network_access      = var.container_app_environment_public_network_access
+  zone_redundancy_enabled    = local.container_app_environment_subnet_id == null ? null : var.enable_zone_redundancy
+  tags                       = local.common_tags
 
   workload_profile {
     name                  = "Consumption"
