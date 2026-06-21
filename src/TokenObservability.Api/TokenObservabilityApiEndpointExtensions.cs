@@ -27,6 +27,28 @@ internal static class TokenObservabilityApiEndpointExtensions
 
     public static void MapTokenObservabilityApiEndpoints(this WebApplication app)
     {
+        app.Use(async (httpContext, next) =>
+        {
+            try
+            {
+                await next(httpContext);
+            }
+            catch (NotSupportedException ex) when (IsUnsupportedProductMetadataStoreSurface(ex))
+            {
+                if (httpContext.Response.HasStarted)
+                {
+                    throw;
+                }
+
+                httpContext.Response.Clear();
+                await CreateProblem(
+                    httpContext,
+                    "The configured metadata store does not support this Product API surface.",
+                    StatusCodes.Status501NotImplemented,
+                    "metadata_store_not_supported").ExecuteAsync(httpContext);
+            }
+        });
+
         app.MapGet("/healthz", GetHealth);
         app.MapGet("/readyz", GetReadiness);
 
@@ -50,6 +72,7 @@ internal static class TokenObservabilityApiEndpointExtensions
         api.MapPost("/pricing/basis", CreatePricingBasisOverride);
         api.MapPost("/pricing/basis/{pricingBasisId}/approve", ApprovePricingBasis);
         api.MapPost("/pricing/basis/{pricingBasisId}/reject", RejectPricingBasis);
+        api.MapPost("/pricing/basis/{pricingBasisId}/supersede", SupersedePricingBasis);
         api.MapGet("/grafana/drilldown", GetGrafanaDrilldown);
         api.MapGet("/sessions", GetSessions);
         api.MapGet("/sessions/{sessionId}/content-references", GetSessionContentReferences);
@@ -71,6 +94,11 @@ internal static class TokenObservabilityApiEndpointExtensions
             service = "token-observability-api",
             status = "healthy"
         });
+    }
+
+    private static bool IsUnsupportedProductMetadataStoreSurface(NotSupportedException exception)
+    {
+        return exception.Message.Contains("PostgreSQL tenant metadata runtime support", StringComparison.Ordinal);
     }
 
     private static IResult GetReadiness(IOptions<TokenObservabilityApiReadinessOptions> options)
@@ -162,7 +190,7 @@ internal static class TokenObservabilityApiEndpointExtensions
     private static async Task<IResult> GetAuditEvents(
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore,
+        ITenantMetadataStore tenantMetadataStore,
         IProductApiIdempotencyStore idempotencyStore)
     {
         var resolution = await authorizationContextResolver.ResolveAsync(
@@ -204,7 +232,7 @@ internal static class TokenObservabilityApiEndpointExtensions
     private static async Task<IResult> GetIngestionRejections(
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore,
+        ITenantMetadataStore tenantMetadataStore,
         IProductApiIdempotencyStore idempotencyStore)
     {
         var resolution = await authorizationContextResolver.ResolveAsync(
@@ -247,7 +275,7 @@ internal static class TokenObservabilityApiEndpointExtensions
     private static async Task<IResult> GetSessions(
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore)
+        ITenantMetadataStore tenantMetadataStore)
     {
         var scopedResolution = await authorizationContextResolver.ResolveAsync(
             httpContext,
@@ -357,7 +385,7 @@ internal static class TokenObservabilityApiEndpointExtensions
         string sessionId,
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore)
+        ITenantMetadataStore tenantMetadataStore)
     {
         var resolution = await authorizationContextResolver.ResolveAsync(
             httpContext,
@@ -396,7 +424,7 @@ internal static class TokenObservabilityApiEndpointExtensions
     private static async Task<IResult> GetContentReviewItems(
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore)
+        ITenantMetadataStore tenantMetadataStore)
     {
         var resolution = await ResolveContentReviewAuthorizationAsync(
             httpContext,
@@ -440,7 +468,7 @@ internal static class TokenObservabilityApiEndpointExtensions
         string contentReferenceId,
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore)
+        ITenantMetadataStore tenantMetadataStore)
     {
         var parsedContentReferenceId = ParseContentReferenceId(contentReferenceId);
         if (parsedContentReferenceId is null)
@@ -473,7 +501,7 @@ internal static class TokenObservabilityApiEndpointExtensions
         string contentReferenceId,
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore,
+        ITenantMetadataStore tenantMetadataStore,
         IProductApiIdempotencyStore idempotencyStore)
     {
         return ReviewContentReference(
@@ -489,7 +517,7 @@ internal static class TokenObservabilityApiEndpointExtensions
         string contentReferenceId,
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore,
+        ITenantMetadataStore tenantMetadataStore,
         IProductApiIdempotencyStore idempotencyStore)
     {
         return ReviewContentReference(
@@ -505,7 +533,7 @@ internal static class TokenObservabilityApiEndpointExtensions
         string contentReferenceId,
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore,
+        ITenantMetadataStore tenantMetadataStore,
         IProductApiIdempotencyStore idempotencyStore)
     {
         return ReviewContentReference(
@@ -521,7 +549,7 @@ internal static class TokenObservabilityApiEndpointExtensions
         string contentReferenceId,
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore,
+        ITenantMetadataStore tenantMetadataStore,
         IProductApiIdempotencyStore idempotencyStore)
     {
         return ReviewContentReference(
@@ -537,7 +565,7 @@ internal static class TokenObservabilityApiEndpointExtensions
         string contentReferenceId,
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore,
+        ITenantMetadataStore tenantMetadataStore,
         IProductApiIdempotencyStore idempotencyStore,
         RedactionReviewDecision decision)
     {
@@ -629,7 +657,7 @@ internal static class TokenObservabilityApiEndpointExtensions
         string sessionId,
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore)
+        ITenantMetadataStore tenantMetadataStore)
     {
         var resolution = await ResolveRecommendationAuthorizationAsync(
             httpContext,
@@ -669,7 +697,7 @@ internal static class TokenObservabilityApiEndpointExtensions
         string recommendationId,
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore)
+        ITenantMetadataStore tenantMetadataStore)
     {
         if (!Guid.TryParse(recommendationId, out var parsedRecommendationId) || parsedRecommendationId == Guid.Empty)
         {
@@ -712,7 +740,7 @@ internal static class TokenObservabilityApiEndpointExtensions
     private static async Task<IResult> CreateRecommendationRegenerationRequest(
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore,
+        ITenantMetadataStore tenantMetadataStore,
         IProductApiIdempotencyStore idempotencyStore)
     {
         if (!HasIdempotencyKey(httpContext))
@@ -804,7 +832,7 @@ internal static class TokenObservabilityApiEndpointExtensions
     private static async Task<IResult> GetOverview(
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore)
+        ITenantMetadataStore tenantMetadataStore)
     {
         var resolution = await authorizationContextResolver.ResolveAsync(
             httpContext,
@@ -841,7 +869,7 @@ internal static class TokenObservabilityApiEndpointExtensions
     private static async Task<IResult> GetPricingBasis(
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore)
+        ITenantMetadataStore tenantMetadataStore)
     {
         var resolution = await authorizationContextResolver.ResolveAsync(
             httpContext,
@@ -867,7 +895,7 @@ internal static class TokenObservabilityApiEndpointExtensions
     private static async Task<IResult> CreatePricingBasisOverride(
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore,
+        ITenantMetadataStore tenantMetadataStore,
         IProductApiIdempotencyStore idempotencyStore)
     {
         if (!HasIdempotencyKey(httpContext))
@@ -949,7 +977,7 @@ internal static class TokenObservabilityApiEndpointExtensions
         string pricingBasisId,
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore,
+        ITenantMetadataStore tenantMetadataStore,
         IProductApiIdempotencyStore idempotencyStore)
     {
         return await ReviewPricingBasis(
@@ -965,7 +993,7 @@ internal static class TokenObservabilityApiEndpointExtensions
         string pricingBasisId,
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore,
+        ITenantMetadataStore tenantMetadataStore,
         IProductApiIdempotencyStore idempotencyStore)
     {
         return await ReviewPricingBasis(
@@ -977,13 +1005,29 @@ internal static class TokenObservabilityApiEndpointExtensions
             approve: false);
     }
 
+    private static async Task<IResult> SupersedePricingBasis(
+        string pricingBasisId,
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        ITenantMetadataStore tenantMetadataStore,
+        IProductApiIdempotencyStore idempotencyStore)
+    {
+        return await ReviewPricingBasis(
+            pricingBasisId,
+            httpContext,
+            authorizationContextResolver,
+            tenantMetadataStore,
+            idempotencyStore,
+            approve: null);
+    }
+
     private static async Task<IResult> ReviewPricingBasis(
         string pricingBasisId,
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore,
+        ITenantMetadataStore tenantMetadataStore,
         IProductApiIdempotencyStore idempotencyStore,
-        bool approve)
+        bool? approve)
     {
         if (!HasIdempotencyKey(httpContext))
         {
@@ -1021,12 +1065,17 @@ internal static class TokenObservabilityApiEndpointExtensions
 
         try
         {
-            var record = approve
+            var record = approve == true
                 ? await tenantMetadataStore.ApprovePricingBasisAsync(
                     request,
                     resolution.Context.ProductUser.ProductUserId,
                     resolution.Context.EffectiveRoles.First())
-                : await tenantMetadataStore.RejectPricingBasisAsync(
+                : approve == false
+                    ? await tenantMetadataStore.RejectPricingBasisAsync(
+                        request,
+                        resolution.Context.ProductUser.ProductUserId,
+                        resolution.Context.EffectiveRoles.First())
+                    : await tenantMetadataStore.SupersedePricingBasisAsync(
                     request,
                     resolution.Context.ProductUser.ProductUserId,
                     resolution.Context.EffectiveRoles.First());
@@ -1053,7 +1102,7 @@ internal static class TokenObservabilityApiEndpointExtensions
     private static async Task<IResult> GetOverviewTokenTimeline(
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
-        InMemoryTenantMetadataStore tenantMetadataStore)
+        ITenantMetadataStore tenantMetadataStore)
     {
         var resolution = await authorizationContextResolver.ResolveAsync(
             httpContext,
@@ -1081,9 +1130,18 @@ internal static class TokenObservabilityApiEndpointExtensions
         var environment = TryReadQuery(httpContext, "environment", out var environmentQuery)
             ? environmentQuery
             : "dv";
+        if (tenantMetadataStore is not InMemoryTenantMetadataStore inMemoryTenantMetadataStore)
+        {
+            return CreateProblem(
+                httpContext,
+                "Token timeline is not available for the configured metadata store.",
+                StatusCodes.Status501NotImplemented,
+                "metadata_store_not_supported");
+        }
+
         var query = new AggregateTokenTimelineQuery(from, to, movingAverageWindowDays);
         var exporter = new AggregateMetricsExporter(
-            tenantMetadataStore,
+            inMemoryTenantMetadataStore,
             new NoopAggregateMetricSink(),
             new AggregateMetricsExportOptions(environment));
 
@@ -1257,7 +1315,7 @@ internal static class TokenObservabilityApiEndpointExtensions
     }
 
     private static async Task<AgentSessionRecord?> FindSessionAsync(
-        InMemoryTenantMetadataStore tenantMetadataStore,
+        ITenantMetadataStore tenantMetadataStore,
         CustomerOrganizationId customerOrganizationId,
         string agentSessionId)
     {
@@ -1273,7 +1331,7 @@ internal static class TokenObservabilityApiEndpointExtensions
     }
 
     private static async Task<AgentSessionRecord?> FindRecommendationTargetSessionAsync(
-        InMemoryTenantMetadataStore tenantMetadataStore,
+        ITenantMetadataStore tenantMetadataStore,
         CustomerOrganizationId customerOrganizationId,
         string? agentSessionId,
         TokenHotspotId? tokenHotspotId)

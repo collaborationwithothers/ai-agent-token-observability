@@ -9,7 +9,7 @@ using TokenObservability.Domain.Tenancy;
 
 namespace TokenObservability.Infrastructure.Persistence;
 
-public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IProductApiIdempotencyStore
+public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : ITenantMetadataStore
 {
     private static readonly string[] SensitiveEvidenceKeyFragments =
     [
@@ -139,6 +139,8 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
     private readonly List<AggregateTokenTimelineBucket> aggregateTokenTimelineBuckets = [];
     private readonly Dictionary<AggregateMetricExportFailureId, AggregateMetricExportFailureRecord> aggregateMetricExportFailures = [];
     private readonly object gate = new();
+
+    public bool CanLoadMissingCustomerOrganizations => true;
 
     public Task<CustomerOrganization> CreateCustomerOrganizationAsync(CreateCustomerOrganizationRequest request)
     {
@@ -1535,6 +1537,73 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
         }
     }
 
+    public Task<PricingBasisRecord> CreatePricingSeedCandidateRecordAsync(
+        CreatePricingBasisRecordRequest request,
+        string correlationId)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        if (request.SourceKind != PricingSourceKind.AutomatedSeed ||
+            request.ReviewState != PricingReviewState.Candidate)
+        {
+            throw new ArgumentException("Pricing seed records must be automated seed candidates.", nameof(request));
+        }
+
+        var normalized = NormalizePricingBasisRequest(request);
+        var now = clock.UtcNow.ToUniversalTime();
+        var normalizedCorrelationId = NormalizeRequiredText(correlationId, nameof(correlationId));
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+
+            var pricingBasisId = $"pricing-basis-{Guid.NewGuid():N}";
+            var auditEvent = CreateGovernanceAuditEventUnderLock(
+                normalized.AuditEventId,
+                request.CustomerOrganizationId,
+                actorProductUserId: null,
+                effectiveRole: null,
+                ProductAuthorizationAction.PricingManage,
+                ProductScopeKind.Pricing.ToString(),
+                pricingBasisId,
+                "created",
+                denialReason: null,
+                normalizedCorrelationId,
+                CreatePricingAuditMetadata(
+                    operation: "pricing_seed_refresh",
+                    result: "candidate",
+                    pricingBasisId,
+                    normalized,
+                    request.TokenType,
+                    request.SourceKind,
+                    request.ReviewState),
+                now);
+
+            var record = new PricingBasisRecord(
+                pricingBasisId,
+                request.CustomerOrganizationId,
+                normalized.Harness,
+                normalized.ProviderName,
+                normalized.ModelName,
+                request.TokenType,
+                normalized.BillingRoute,
+                normalized.Currency,
+                request.PricePerMillionTokens,
+                normalized.PricingVersion,
+                request.SourceKind,
+                request.ReviewState,
+                request.EffectiveFromUtc.ToUniversalTime(),
+                request.EffectiveToUtc?.ToUniversalTime(),
+                auditEvent.AuditEventId,
+                normalized.SourceMetadata,
+                now,
+                now);
+
+            pricingBasisRecords.Add(record.PricingBasisId, record);
+            return Task.FromResult(record);
+        }
+    }
+
     public Task<PricingBasisRecord> CreateCustomerPricingOverrideAsync(
         CreatePricingBasisRecordRequest request,
         ProductUserId actorProductUserId,
@@ -1635,6 +1704,14 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
         ProductRole actorEffectiveRole)
     {
         return ReviewPricingBasisAsync(request, actorProductUserId, actorEffectiveRole, PricingReviewState.Rejected, "rejected");
+    }
+
+    public Task<PricingBasisRecord> SupersedePricingBasisAsync(
+        PricingBasisReviewRequest request,
+        ProductUserId actorProductUserId,
+        ProductRole actorEffectiveRole)
+    {
+        return ReviewPricingBasisAsync(request, actorProductUserId, actorEffectiveRole, PricingReviewState.Superseded, "superseded");
     }
 
     public Task<CostEstimateRecord> RecordCostEstimateAsync(
@@ -3991,11 +4068,13 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
             throw new InvalidOperationException("Pricing basis does not belong to the customer organization.");
         }
 
-        if (existing.ReviewState != PricingReviewState.Candidate)
+        if (existing.ReviewState != PricingReviewState.Candidate &&
+            (reviewState != PricingReviewState.Superseded || existing.ReviewState != PricingReviewState.Approved))
         {
-            throw new InvalidOperationException("Only candidate pricing basis records can be reviewed.");
+            throw new InvalidOperationException("Only candidate pricing basis records, or approved records being superseded, can be reviewed.");
         }
 
+        var now = clock.UtcNow.ToUniversalTime();
         CreateGovernanceAuditEventUnderLock(
             auditEventId,
             request.CustomerOrganizationId,
@@ -4013,7 +4092,7 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
                 pricingBasisId,
                 existing,
                 reviewState),
-            clock.UtcNow.ToUniversalTime());
+            now);
 
         if (reviewState == PricingReviewState.Approved)
         {
@@ -4025,6 +4104,8 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
                     StringComparer.Ordinal.Equals(record.ProviderName, existing.ProviderName) &&
                     StringComparer.Ordinal.Equals(record.ModelName, existing.ModelName) &&
                     StringComparer.Ordinal.Equals(record.BillingRoute, existing.BillingRoute) &&
+                    record.EffectiveFromUtc <= existing.EffectiveFromUtc &&
+                    (record.EffectiveToUtc is null || record.EffectiveToUtc > existing.EffectiveFromUtc) &&
                     record.TokenType == existing.TokenType &&
                     record.SourceKind == existing.SourceKind)
                 .ToArray())
@@ -4032,21 +4113,39 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
                 pricingBasisRecords[approved.PricingBasisId] = approved with
                 {
                     ReviewState = PricingReviewState.Superseded,
-                    EffectiveToUtc = existing.EffectiveFromUtc,
-                    UpdatedAtUtc = clock.UtcNow.ToUniversalTime()
+                    EffectiveToUtc = ClosePricingEffectiveWindow(approved, existing.EffectiveFromUtc),
+                    UpdatedAtUtc = now
                 };
             }
         }
 
+        var effectiveToUtc = reviewState == PricingReviewState.Superseded &&
+            existing.ReviewState == PricingReviewState.Approved
+            ? ClosePricingEffectiveWindow(existing, now)
+            : existing.EffectiveToUtc;
+
         var updated = existing with
         {
             ReviewState = reviewState,
+            EffectiveToUtc = effectiveToUtc,
             AuditEventId = auditEventId,
-            UpdatedAtUtc = clock.UtcNow.ToUniversalTime()
+            UpdatedAtUtc = now
         };
 
         pricingBasisRecords[pricingBasisId] = updated;
         return updated;
+    }
+
+    private static DateTimeOffset ClosePricingEffectiveWindow(PricingBasisRecord existing, DateTimeOffset now)
+    {
+        if (existing.EffectiveToUtc is not null && existing.EffectiveToUtc <= now)
+        {
+            return existing.EffectiveToUtc.Value;
+        }
+
+        return now > existing.EffectiveFromUtc
+            ? now
+            : existing.EffectiveFromUtc.AddMilliseconds(1);
     }
 
     private Task<PricingBasisRecord> ReviewPricingBasisAsync(

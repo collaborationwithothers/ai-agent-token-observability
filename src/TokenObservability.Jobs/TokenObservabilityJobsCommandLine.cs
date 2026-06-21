@@ -12,7 +12,7 @@ public static class TokenObservabilityJobsCommandLine
     public static Task<int> RunAsync(
         IReadOnlyList<string> args,
         TextWriter output,
-        InMemoryTenantMetadataStore? tenantMetadataStore = null,
+        ITenantMetadataStore? tenantMetadataStore = null,
         ProviderPricingRefreshService? pricingRefreshService = null)
     {
         if (args.Count is 0 || args.Contains("--help", StringComparer.Ordinal) || args.Contains("--list-commands", StringComparer.Ordinal))
@@ -57,7 +57,7 @@ public static class TokenObservabilityJobsCommandLine
     private static async Task<int> RunRedactContentAsync(
         IReadOnlyList<string> args,
         TextWriter output,
-        InMemoryTenantMetadataStore? tenantMetadataStore)
+        ITenantMetadataStore? tenantMetadataStore)
     {
         var customerOrganizationId = ReadContentCustomerOrganizationId(args, output, "redact-content");
         if (customerOrganizationId is null)
@@ -66,14 +66,14 @@ public static class TokenObservabilityJobsCommandLine
             return 2;
         }
 
-        if (tenantMetadataStore is null)
+        if (tenantMetadataStore is not InMemoryTenantMetadataStore inMemoryTenantMetadataStore)
         {
             output.WriteLine("redact-content requires a loaded tenant metadata store.");
             output.WriteLine("No raw failed content was read or emitted.");
             return 2;
         }
 
-        if (await tenantMetadataStore.FindCustomerOrganizationAsync(customerOrganizationId.Value) is null)
+        if (await inMemoryTenantMetadataStore.FindCustomerOrganizationAsync(customerOrganizationId.Value) is null)
         {
             output.WriteLine("redact-content requires a tenant metadata store with the target customer organization loaded.");
             output.WriteLine("No raw failed content was read or emitted.");
@@ -90,7 +90,7 @@ public static class TokenObservabilityJobsCommandLine
     private static async Task<int> RunRetentionCleanupAsync(
         IReadOnlyList<string> args,
         TextWriter output,
-        InMemoryTenantMetadataStore? tenantMetadataStore)
+        ITenantMetadataStore? tenantMetadataStore)
     {
         var customerOrganizationId = ReadContentCustomerOrganizationId(args, output, "retention-cleanup");
         if (customerOrganizationId is null)
@@ -98,7 +98,7 @@ public static class TokenObservabilityJobsCommandLine
             return 2;
         }
 
-        if (tenantMetadataStore is null)
+        if (tenantMetadataStore is not InMemoryTenantMetadataStore inMemoryTenantMetadataStore)
         {
             output.WriteLine("retention-cleanup requires a loaded tenant metadata store.");
             output.WriteLine("No content references were changed.");
@@ -107,7 +107,7 @@ public static class TokenObservabilityJobsCommandLine
 
         try
         {
-            if (await tenantMetadataStore.FindCustomerOrganizationAsync(customerOrganizationId.Value) is null)
+            if (await inMemoryTenantMetadataStore.FindCustomerOrganizationAsync(customerOrganizationId.Value) is null)
             {
                 output.WriteLine("retention-cleanup requires a tenant metadata store with the target customer organization loaded.");
                 output.WriteLine("No content references were changed.");
@@ -115,7 +115,7 @@ public static class TokenObservabilityJobsCommandLine
             }
 
             var asOfUtc = ReadDateTimeOffsetOption(args, "--as-of-utc") ?? DateTimeOffset.UtcNow;
-            var result = await tenantMetadataStore.CleanupExpiredContentReferencesAsync(
+            var result = await inMemoryTenantMetadataStore.CleanupExpiredContentReferencesAsync(
                 customerOrganizationId.Value,
                 asOfUtc,
                 actorProductUserId: null,
@@ -137,7 +137,7 @@ public static class TokenObservabilityJobsCommandLine
     private static async Task<int> RunGenerateRecommendationsAsync(
         IReadOnlyList<string> args,
         TextWriter output,
-        InMemoryTenantMetadataStore? tenantMetadataStore)
+        ITenantMetadataStore? tenantMetadataStore)
     {
         var customerOrganizationId = ReadRecommendationCustomerOrganizationId(args, output);
         var agentSessionId = ReadRecommendationAgentSessionId(args, output);
@@ -147,7 +147,7 @@ public static class TokenObservabilityJobsCommandLine
             return 2;
         }
 
-        if (tenantMetadataStore is null)
+        if (tenantMetadataStore is not InMemoryTenantMetadataStore inMemoryTenantMetadataStore)
         {
             output.WriteLine("generate-recommendations requires a loaded tenant metadata store.");
             output.WriteLine("No recommendation records were changed.");
@@ -156,14 +156,14 @@ public static class TokenObservabilityJobsCommandLine
 
         try
         {
-            if (await tenantMetadataStore.FindCustomerOrganizationAsync(customerOrganizationId.Value) is null)
+            if (await inMemoryTenantMetadataStore.FindCustomerOrganizationAsync(customerOrganizationId.Value) is null)
             {
                 output.WriteLine("generate-recommendations requires a tenant metadata store with the target customer organization loaded.");
                 output.WriteLine("No recommendation records were changed.");
                 return 2;
             }
 
-            var generator = new LlmAssistedRecommendationGenerator(tenantMetadataStore);
+            var generator = new LlmAssistedRecommendationGenerator(inMemoryTenantMetadataStore);
             var recommendations = await generator.GenerateForSessionAsync(
                 new GenerateRecommendationsRequest(
                     customerOrganizationId.Value,
@@ -186,7 +186,7 @@ public static class TokenObservabilityJobsCommandLine
     private static async Task<int> RunRefreshPricingAsync(
         IReadOnlyList<string> args,
         TextWriter output,
-        InMemoryTenantMetadataStore? tenantMetadataStore,
+        ITenantMetadataStore? tenantMetadataStore,
         ProviderPricingRefreshService? pricingRefreshService)
     {
         var provider = ReadOption(args, "--provider") ?? "openai";
@@ -240,7 +240,7 @@ public static class TokenObservabilityJobsCommandLine
     }
 
     private static async Task<bool> EnsureCustomerOrganizationLoadedAsync(
-        InMemoryTenantMetadataStore tenantMetadataStore,
+        ITenantMetadataStore tenantMetadataStore,
         CustomerOrganizationId customerOrganizationId,
         IReadOnlyList<string> args,
         TextWriter output)
@@ -248,6 +248,13 @@ public static class TokenObservabilityJobsCommandLine
         if (await tenantMetadataStore.FindCustomerOrganizationAsync(customerOrganizationId) is not null)
         {
             return true;
+        }
+
+        if (!tenantMetadataStore.CanLoadMissingCustomerOrganizations)
+        {
+            output.WriteLine("Pricing refresh requires the target customer organization to already exist.");
+            output.WriteLine("No active pricing basis or cost estimate was changed.");
+            return false;
         }
 
         var slug = ReadOption(args, "--customer-organization-slug");

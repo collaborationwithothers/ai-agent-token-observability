@@ -71,7 +71,7 @@ public sealed class ProviderPricingRefreshService(HttpClient httpClient)
     }
 
     public async Task<IReadOnlyList<PricingBasisRecord>> CreateCandidateRecordsAsync(
-        InMemoryTenantMetadataStore tenantMetadataStore,
+        ITenantMetadataStore tenantMetadataStore,
         CustomerOrganizationId customerOrganizationId,
         IReadOnlyList<ProviderPricingSeedCandidate> candidates,
         string correlationId)
@@ -84,33 +84,7 @@ public sealed class ProviderPricingRefreshService(HttpClient httpClient)
         foreach (var candidate in candidates)
         {
             var auditEventId = $"audit-pricing-seed-{Guid.NewGuid():N}";
-            await tenantMetadataStore.RecordGovernanceAuditEventAsync(
-                customerOrganizationId,
-                new CreateGovernanceAuditEventRequest(
-                    auditEventId,
-                    ActorProductUserId: null,
-                    EffectiveRole: null,
-                    ProductAuthorizationAction.PricingManage,
-                    new ProductScope(ProductScopeKind.Pricing, ScopeId: "pricing-refresh"),
-                    Decision: "created",
-                    DenialReason: null,
-                    correlationId,
-                    new Dictionary<string, string>(StringComparer.Ordinal)
-                    {
-                        ["evidence_kind"] = "admin_operation",
-                        ["operation"] = "pricing_seed_refresh",
-                        ["result"] = "candidate",
-                        ["pricing_basis_id"] = "pending",
-                        ["pricing_version"] = candidate.PricingVersion,
-                        ["provider_name"] = candidate.ProviderName,
-                        ["model_name"] = candidate.ModelName,
-                        ["token_type"] = InMemoryTenantMetadataStore.ToWirePricingTokenType(candidate.TokenType),
-                        ["billing_route"] = candidate.BillingRoute,
-                        ["source_kind"] = "automated_seed",
-                        ["review_state"] = "candidate"
-                    }));
-
-            var record = await tenantMetadataStore.CreatePricingBasisRecordAsync(
+            var record = await tenantMetadataStore.CreatePricingSeedCandidateRecordAsync(
                 new CreatePricingBasisRecordRequest(
                     customerOrganizationId,
                     candidate.Harness,
@@ -126,13 +100,15 @@ public sealed class ProviderPricingRefreshService(HttpClient httpClient)
                     DateTimeOffset.UtcNow,
                     EffectiveToUtc: null,
                     auditEventId,
-                    candidate.SourceMetadata));
+                    candidate.SourceMetadata),
+                correlationId);
 
             created.Add(record);
         }
 
         return created;
     }
+
 }
 
 public static class OpenAiPricingPageParser
