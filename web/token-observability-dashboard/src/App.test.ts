@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
+  buildOverviewRequestUrl,
+  classifyOverviewProblem,
   createSessionInvestigationRequestUrls,
   dashboardRoutes,
   isRouteVisible,
+  overviewHasData,
   readSessionIdFromPath,
   resolveRoute,
   SessionInvestigationContent,
@@ -12,6 +15,7 @@ import {
   type CurrentUser,
   type DashboardPolicySummaries,
   type DashboardFeatureFlag,
+  type OverviewResponse,
   type ProductRole,
   type ProductScope
 } from "./App";
@@ -326,4 +330,126 @@ describe("dashboard route authorization", () => {
   it("does not treat unrelated scopes as authorization for a route", () => {
     expect(scopeMatchesRoute("TenantAdmin", [{ kind: "Pricing", scopeId: "pricing" }])).toBe(false);
   });
+
+  it("keeps overview visible to role-scoped callers without exposing neighboring routes", () => {
+    const readOnlyViewer = user(
+      ["ReadOnlyViewer"],
+      [{ kind: "Organization", scopeId: null }]
+    );
+    const developer = user(
+      ["Developer"],
+      [{ kind: "Self", scopeId: "developer-1" }]
+    );
+
+    expect(isRouteVisible(route("/overview"), readOnlyViewer)).toBe(true);
+    expect(isRouteVisible(route("/overview"), developer)).toBe(true);
+    expect(isRouteVisible(route("/content-review"), readOnlyViewer)).toBe(false);
+  });
 });
+
+describe("overview route helpers", () => {
+  it("calls the Product API overview endpoint with sanitized Grafana filters", () => {
+    const url = buildOverviewRequestUrl(
+      "/api/v1",
+      "/overview?from=2026-06-10&to=2026-06-12&environment=dv&region=eastus2&harness=codex&model=gpt-5&modelProvider=openai&hotspotType=prompt_cache_breakage&cacheBustCategory=prompt_changed&findingState=confirmed&signalType=metrics&result=accepted&rejectionReason=malformed_otlp"
+    );
+
+    expect(url).toBe(
+      "/api/v1/overview?from=2026-06-10&to=2026-06-12&environment=dv&region=eastus2&harness=codex&model=gpt-5&modelProvider=openai&hotspotType=prompt_cache_breakage&cacheBustCategory=prompt_changed&findingState=confirmed&signalType=metrics&result=accepted&rejectionReason=malformed_otlp"
+    );
+  });
+
+  it("distinguishes no data from not authorized and tenant context errors", () => {
+    expect(overviewHasData(emptyOverview())).toBe(false);
+    expect(classifyOverviewProblem({ status: 403, code: "authorization_denied" })).toEqual({
+      title: "Overview not authorized",
+      message: "Your current Product API role or scope does not allow this aggregate overview."
+    });
+    expect(classifyOverviewProblem({ status: 400, code: "tenant_context_required" })).toEqual({
+      title: "Tenant context required",
+      message: "Select or correct the tenant context before loading aggregate overview data."
+    });
+  });
+
+  it("treats state-only aggregate buckets as data without coercing unavailable values to zero", () => {
+    const overview = emptyOverview();
+    overview.tokenSummary.metricStates = [{ label: "unavailable", value: 2 }];
+    overview.costSummary.costStates = [
+      { label: "estimated", value: 1 },
+      { label: "not_applicable", value: 1 },
+      { label: "mixed", value: 1 }
+    ];
+    overview.costMix = [
+      {
+        providerName: "openai",
+        modelName: "gpt-5",
+        billingRoute: "standard",
+        tokenType: "input",
+        costStatus: "unavailable",
+        currency: "USD",
+        estimatedCost: null,
+        estimateCount: 1,
+        metricStatus: "unavailable"
+      }
+    ];
+
+    expect(overviewHasData(overview)).toBe(true);
+    expect(JSON.stringify(overview)).toContain('"estimatedCost":null');
+    expect(JSON.stringify(overview)).toContain("not_applicable");
+    expect(JSON.stringify(overview)).toContain("mixed");
+  });
+
+  it("keeps overview data and copy non-punitive and aggregate-only", () => {
+    const overview = emptyOverview();
+    overview.hotspotSummary.totalHotspots = 1;
+    overview.hotspotSummary.byType = [{ label: "large_context", value: 1 }];
+
+    const combined = `${JSON.stringify(overview)} ${dashboardRoutes.map((candidate) => candidate.purpose).join(" ")}`;
+
+    expect(combined).not.toMatch(/developerRank|leaderboard|ranking|wrongness|sessionId|productUserId|raw content|telemetry-store|blobUri/i);
+  });
+});
+
+function emptyOverview(): OverviewResponse {
+  return {
+    tokenSummary: {
+      totalTokens: null,
+      metricStates: [],
+      tokenTypes: []
+    },
+    costSummary: {
+      totalEstimatedCost: null,
+      currency: null,
+      costStates: [],
+      metricStates: []
+    },
+    cacheSummary: {
+      eventCount: null,
+      tokenImpact: null,
+      results: [],
+      bustCategories: [],
+      evidenceStates: []
+    },
+    hotspotSummary: {
+      totalHotspots: 0,
+      estimatedCostImpact: null,
+      byType: [],
+      findingStates: [],
+      metricStates: []
+    },
+    ingestionSummary: {
+      requestCount: null,
+      rejectedCount: 0,
+      results: [],
+      rejectionReasons: [],
+      signalTypes: []
+    },
+    platformHealthSummary: {
+      signalCount: null,
+      backgroundJobResults: [],
+      productApiStatusClasses: [],
+      containerApps: []
+    },
+    costMix: []
+  };
+}

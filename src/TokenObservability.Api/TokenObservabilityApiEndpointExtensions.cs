@@ -1022,11 +1022,87 @@ internal static class TokenObservabilityApiEndpointExtensions
             return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
         }
 
-        var costMix = await tenantMetadataStore.ListCostMixAsync(
-            resolution.Context.CustomerOrganization.CustomerOrganizationId);
+        var customerOrganizationId = resolution.Context.CustomerOrganization.CustomerOrganizationId;
+        var costMix = ApplyOverviewCostMixFilters(
+            httpContext,
+            await tenantMetadataStore.ListCostMixAsync(customerOrganizationId)).ToArray();
+        var aggregatePoints = ApplyOverviewAggregateFilters(
+            httpContext,
+            await tenantMetadataStore.ListAggregateMetricPointsAsync(customerOrganizationId)).ToArray();
+        var hotspotPoints = aggregatePoints
+            .Where(static point => point.Name is
+                "tokenobs_hotspots_detected_total" or
+                "tokenobs_hotspots_open" or
+                "tokenobs_hotspot_estimated_cost_impact_usd")
+            .ToArray();
+        var ingestionRequestPoints = aggregatePoints
+            .Where(static point => point.Name == "tokenobs_ingestion_requests_total")
+            .ToArray();
 
         return Results.Ok(new
         {
+            tokenSummary = new
+            {
+                totalTokens = SumPointValues(aggregatePoints, "tokenobs_tokens_total"),
+                metricStates = SummarizePointsByLabel(
+                    aggregatePoints.Where(static point => point.Name is "tokenobs_tokens_total" or "tokenobs_token_metric_states_total"),
+                    "metric_status"),
+                tokenTypes = SummarizePointsByLabel(aggregatePoints.Where(static point => point.Name == "tokenobs_tokens_total"), "token_type")
+            },
+            costSummary = CreateOverviewCostSummary(aggregatePoints, costMix, HasOverviewCostMixUnsupportedFilters(httpContext)),
+            cacheSummary = new
+            {
+                eventCount = SumPointValues(aggregatePoints, "tokenobs_cache_events_total"),
+                tokenImpact = SumPointValues(aggregatePoints, "tokenobs_cache_bust_token_impact_total"),
+                results = SummarizePointsByLabel(aggregatePoints.Where(static point => point.Name == "tokenobs_cache_events_total"), "cache_result"),
+                bustCategories = SummarizePointsByLabel(
+                    aggregatePoints.Where(static point => point.Name is "tokenobs_cache_events_total" or "tokenobs_cache_bust_token_impact_total"),
+                    "cache_bust_category"),
+                evidenceStates = SummarizePointsByLabel(
+                    aggregatePoints.Where(static point => point.Name is "tokenobs_cache_events_total" or "tokenobs_cache_bust_token_impact_total"),
+                    "cache_evidence_state")
+            },
+            hotspotSummary = new
+            {
+                totalHotspots = SumFirstAvailablePointValues(
+                    hotspotPoints,
+                    "tokenobs_hotspots_open",
+                    "tokenobs_hotspots_detected_total"),
+                estimatedCostImpact = SumPointValues(hotspotPoints, "tokenobs_hotspot_estimated_cost_impact_usd"),
+                byType = SummarizePointsByLabel(hotspotPoints, "hotspot_type"),
+                findingStates = SummarizePointsByLabel(hotspotPoints, "finding_state"),
+                metricStates = Array.Empty<object>()
+            },
+            ingestionSummary = new
+            {
+                requestCount = SumPointValues(aggregatePoints, "tokenobs_ingestion_requests_total"),
+                rejectedCount = SumPointValues(
+                    ingestionRequestPoints.Where(static point =>
+                        point.Labels.TryGetValue("result", out var result) &&
+                        StringComparer.Ordinal.Equals(result, "rejected")),
+                    "tokenobs_ingestion_requests_total"),
+                results = SummarizePointsByLabel(ingestionRequestPoints, "result"),
+                rejectionReasons = SummarizePointsByLabel(ingestionRequestPoints, "rejection_reason"),
+                signalTypes = SummarizePointsByLabel(ingestionRequestPoints, "signal_type")
+            },
+            platformHealthSummary = new
+            {
+                signalCount = SumPointValues(
+                    aggregatePoints,
+                    "tokenobs_background_jobs_total",
+                    "tokenobs_product_api_requests_total",
+                    "tokenobs_container_app_replicas_ready",
+                    "tokenobs_container_app_replicas_desired"),
+                backgroundJobResults = SummarizePointsByLabel(
+                    aggregatePoints.Where(static point => point.Name == "tokenobs_background_jobs_total"),
+                    "result"),
+                productApiStatusClasses = SummarizePointsByLabel(
+                    aggregatePoints.Where(static point => point.Name == "tokenobs_product_api_requests_total"),
+                    "status_class"),
+                containerApps = SummarizePointsByLabel(
+                    aggregatePoints.Where(static point => point.Name is "tokenobs_container_app_replicas_ready" or "tokenobs_container_app_replicas_desired"),
+                    "container_app")
+            },
             costMix = costMix.Select(static bucket => new
             {
                 providerName = bucket.ProviderName,
@@ -1040,8 +1116,457 @@ internal static class TokenObservabilityApiEndpointExtensions
                 metricStatus = ToWireMetricStatus(bucket.TokenMetricStatus)
             }).ToArray(),
             nextCursor = (string?)null,
-            totalEstimate = costMix.Count
+            totalEstimate = costMix.Length
         });
+    }
+
+    private static IEnumerable<CostMixBucket> ApplyOverviewCostMixFilters(
+        HttpContext httpContext,
+        IEnumerable<CostMixBucket> costMix)
+    {
+        var filtered = costMix;
+
+        if (HasOverviewCostMixUnsupportedFilters(httpContext))
+        {
+            return [];
+        }
+
+        if (TryReadOverviewFilter(httpContext, "modelProvider", out var modelProvider))
+        {
+            filtered = filtered.Where(bucket => DashboardValueEquals(bucket.ProviderName, modelProvider));
+        }
+
+        if (TryReadOverviewFilter(httpContext, "model", out var model))
+        {
+            filtered = filtered.Where(bucket => DashboardValueEquals(bucket.ModelName, model));
+        }
+
+        return filtered;
+    }
+
+    private static bool HasOverviewCostMixUnsupportedFilters(HttpContext httpContext)
+    {
+        foreach (var key in new[]
+        {
+            "from",
+            "to",
+            "environment",
+            "region",
+            "harness",
+            "hotspotType",
+            "cacheBustCategory",
+            "findingState",
+            "signalType",
+            "result",
+            "rejectionReason"
+        })
+        {
+            if (TryReadOverviewFilter(httpContext, key, out _))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static object CreateOverviewCostSummary(
+        IEnumerable<AggregateMetricPointRecord> aggregatePoints,
+        IReadOnlyCollection<CostMixBucket> costMix,
+        bool costMixSuppressed)
+    {
+        var costPoints = aggregatePoints
+            .Where(static point => point.Name == "tokenobs_estimated_cost_usd_total")
+            .ToArray();
+
+        if (costPoints.Length > 0 || costMixSuppressed)
+        {
+            var totalEstimatedCost = SumPointValues(costPoints, "tokenobs_estimated_cost_usd_total");
+            return new
+            {
+                totalEstimatedCost,
+                currency = totalEstimatedCost.HasValue ? "USD" : null,
+                costStates = SummarizePointsByLabel(costPoints, "cost_status"),
+                metricStates = Array.Empty<object>()
+            };
+        }
+
+        return new
+        {
+            totalEstimatedCost = SumCostEstimates(costMix),
+            currency = costMix.Select(static bucket => bucket.Currency).Distinct(StringComparer.Ordinal).FirstOrDefault(),
+            costStates = SummarizeValues(costMix.Select(static bucket => bucket.CostStatus).Select(InMemoryTenantMetadataStore.ToWireCostStatus)),
+            metricStates = SummarizeValues(costMix.Select(static bucket => bucket.TokenMetricStatus).Select(ToWireMetricStatus))
+        };
+    }
+
+    private static IEnumerable<AggregateMetricPointRecord> ApplyOverviewAggregateFilters(
+        HttpContext httpContext,
+        IEnumerable<AggregateMetricPointRecord> aggregatePoints)
+    {
+        var filtered = aggregatePoints;
+
+        filtered = ApplyOverviewTimeFilter(httpContext, filtered, static point => point.ExportedAtUtc);
+        filtered = ApplyOverviewLabelFilter(httpContext, filtered, "environment", "environment");
+        filtered = ApplyOverviewLabelFilter(httpContext, filtered, "region", "region");
+        filtered = ApplyOverviewLabelFilter(httpContext, filtered, "harness", "harness");
+        filtered = ApplyOverviewLabelFilter(httpContext, filtered, "model", "model");
+        filtered = ApplyOverviewLabelFilter(httpContext, filtered, "modelProvider", "model_provider");
+        filtered = ApplyOverviewLabelFilter(httpContext, filtered, "hotspotType", "hotspot_type");
+        filtered = ApplyOverviewLabelFilter(httpContext, filtered, "cacheBustCategory", "cache_bust_category");
+        filtered = ApplyOverviewLabelFilter(httpContext, filtered, "findingState", "finding_state");
+        filtered = ApplyOverviewLabelFilter(httpContext, filtered, "signalType", "signal_type");
+        filtered = ApplyOverviewLabelFilter(httpContext, filtered, "result", "result");
+        filtered = ApplyOverviewLabelFilter(httpContext, filtered, "rejectionReason", "rejection_reason");
+
+        return filtered;
+    }
+
+    private static IEnumerable<AgentSessionRecord> ApplyOverviewSessionFilters(
+        HttpContext httpContext,
+        IEnumerable<AgentSessionRecord> sessions)
+    {
+        var filtered = sessions;
+
+        filtered = ApplyOverviewTimeFilter(httpContext, filtered, static session => session.StartedAtUtc ?? session.CreatedAtUtc);
+
+        if (TryReadOverviewFilter(httpContext, "harness", out var harness))
+        {
+            filtered = filtered.Where(session => DashboardValueEquals(session.Harness, harness));
+        }
+
+        if (TryReadOverviewFilter(httpContext, "model", out var model))
+        {
+            filtered = filtered.Where(session => session.ModelNames.Any(modelName => DashboardValueEquals(modelName, model)));
+        }
+
+        if (TryReadOverviewFilter(httpContext, "modelProvider", out var modelProvider))
+        {
+            filtered = filtered.Where(session => session.ModelNames.Any(modelName =>
+                DashboardValueEquals(ToDashboardModelProvider(modelName), modelProvider)));
+        }
+
+        return filtered;
+    }
+
+    private static IEnumerable<TokenHotspotRecord> ApplyOverviewHotspotFilters(
+        HttpContext httpContext,
+        IEnumerable<TokenHotspotRecord> hotspots)
+    {
+        var filtered = hotspots;
+
+        filtered = ApplyOverviewTimeFilter(httpContext, filtered, static hotspot => hotspot.CreatedAtUtc);
+
+        if (TryReadOverviewFilter(httpContext, "harness", out var harness))
+        {
+            filtered = filtered.Where(hotspot => DashboardValueEquals(hotspot.Harness, harness));
+        }
+
+        if (TryReadOverviewFilter(httpContext, "model", out var model))
+        {
+            filtered = filtered.Where(hotspot => hotspot.ModelName is not null && DashboardValueEquals(hotspot.ModelName, model));
+        }
+
+        if (TryReadOverviewFilter(httpContext, "modelProvider", out var modelProvider))
+        {
+            filtered = filtered.Where(hotspot => DashboardValueEquals(ToDashboardModelProvider(hotspot.ModelName), modelProvider));
+        }
+
+        if (TryReadOverviewFilter(httpContext, "hotspotType", out var hotspotType))
+        {
+            filtered = filtered.Where(hotspot => DashboardValueEquals(ToWireHotspotType(hotspot.HotspotType), hotspotType));
+        }
+
+        if (TryReadOverviewFilter(httpContext, "findingState", out var findingState))
+        {
+            filtered = filtered.Where(hotspot => DashboardValueEquals(ToWireHotspotFindingState(hotspot.FindingState), findingState));
+        }
+
+        return filtered;
+    }
+
+    private static IEnumerable<IngestionRejectionRecord> ApplyOverviewIngestionRejectionFilters(
+        HttpContext httpContext,
+        IEnumerable<IngestionRejectionRecord> rejections)
+    {
+        var filtered = rejections;
+
+        filtered = ApplyOverviewTimeFilter(httpContext, filtered, static rejection => rejection.ReceivedAtUtc);
+
+        if (TryReadOverviewFilter(httpContext, "signalType", out var signalType))
+        {
+            filtered = filtered.Where(rejection => DashboardValueEquals(rejection.SignalType, signalType));
+        }
+
+        if (TryReadOverviewFilter(httpContext, "result", out var result))
+        {
+            filtered = filtered.Where(_ => DashboardValueEquals("rejected", result));
+        }
+
+        if (TryReadOverviewFilter(httpContext, "rejectionReason", out var rejectionReason))
+        {
+            filtered = filtered.Where(rejection => DashboardValueEquals(rejection.ReasonCode, rejectionReason));
+        }
+
+        return filtered;
+    }
+
+    private static IEnumerable<AggregateMetricPointRecord> ApplyOverviewLabelFilter(
+        HttpContext httpContext,
+        IEnumerable<AggregateMetricPointRecord> values,
+        string queryParameter,
+        string labelName)
+    {
+        if (!TryReadOverviewFilter(httpContext, queryParameter, out var filter))
+        {
+            return values;
+        }
+
+        return values.Where(value =>
+            value.Labels.TryGetValue(labelName, out var labelValue) &&
+            DashboardValueEquals(labelValue, filter));
+    }
+
+    private static IEnumerable<T> ApplyOverviewTimeFilter<T>(
+        HttpContext httpContext,
+        IEnumerable<T> values,
+        Func<T, DateTimeOffset> timestampSelector)
+    {
+        if (TryReadOverviewTimestampFilter(httpContext, "from", endOfDay: false, out var fromUtc))
+        {
+            values = values.Where(value => timestampSelector(value).ToUniversalTime() >= fromUtc);
+        }
+
+        if (TryReadOverviewTimestampFilter(httpContext, "to", endOfDay: true, out var toUtc))
+        {
+            values = values.Where(value => timestampSelector(value).ToUniversalTime() <= toUtc);
+        }
+
+        return values;
+    }
+
+    private static bool TryReadOverviewFilter(HttpContext httpContext, string key, out string value)
+    {
+        if (!TryReadQuery(httpContext, key, out value) ||
+            ContainsAbsoluteUrl(value) ||
+            value.Contains('/') ||
+            value.Contains('\\') ||
+            !IsAllowedOverviewFilterValue(key, value))
+        {
+            value = string.Empty;
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsAllowedOverviewFilterValue(string key, string value)
+    {
+        return key switch
+        {
+            "environment" => value is "dv" or "qa" or "pp" or "pd",
+            "harness" => value is "codex" or "copilot" or "claude",
+            "modelProvider" => value is "openai" or "anthropic" or "github" or "unknown",
+            "hotspotType" => value is
+                "prompt_cache_breakage" or
+                "large_context" or
+                "tool_loop" or
+                "model_retry" or
+                "repo_context_bloat" or
+                "generated_artifact_bloat" or
+                "expensive_model_choice" or
+                "error_rework" or
+                "unknown",
+            "cacheBustCategory" => value is
+                "prompt_changed" or
+                "system_instruction_changed" or
+                "tool_context_changed" or
+                "repository_context_changed" or
+                "model_changed" or
+                "unknown",
+            "findingState" => value is "confirmed" or "llm_inferred_candidate",
+            "signalType" => value is "metrics" or "traces" or "logs",
+            "result" => value is "accepted" or "rejected" or "failed" or "succeeded",
+            "rejectionReason" => value is
+                "none" or
+                "invalid_credential" or
+                "out_of_scope" or
+                "unsupported_schema" or
+                "malformed_otlp" or
+                "payload_too_large" or
+                "rate_limited" or
+                "residency_mismatch" or
+                "content_classification_failed" or
+                "transient_failure",
+            _ => true
+        };
+    }
+
+    private static bool TryReadOverviewTimestampFilter(
+        HttpContext httpContext,
+        string key,
+        bool endOfDay,
+        out DateTimeOffset value)
+    {
+        value = default;
+
+        if (!TryReadOverviewFilter(httpContext, key, out var rawValue))
+        {
+            return false;
+        }
+
+        if (long.TryParse(rawValue, NumberStyles.None, CultureInfo.InvariantCulture, out var unixMilliseconds))
+        {
+            value = DateTimeOffset.FromUnixTimeMilliseconds(unixMilliseconds);
+            return true;
+        }
+
+        if (DateOnly.TryParseExact(
+                rawValue,
+                "yyyy-MM-dd",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out var date))
+        {
+            value = new DateTimeOffset(
+                date.ToDateTime(endOfDay ? TimeOnly.MaxValue : TimeOnly.MinValue),
+                TimeSpan.Zero);
+            return true;
+        }
+
+        return DateTimeOffset.TryParse(
+            rawValue,
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+            out value);
+    }
+
+    private static bool DashboardValueEquals(string? actual, string expected)
+    {
+        if (string.IsNullOrWhiteSpace(actual))
+        {
+            return false;
+        }
+
+        return StringComparer.Ordinal.Equals(actual, expected) ||
+            (StringComparer.Ordinal.Equals(actual, "codex-cli") && StringComparer.Ordinal.Equals(expected, "codex")) ||
+            (StringComparer.Ordinal.Equals(actual, "codex") && StringComparer.Ordinal.Equals(expected, "codex-cli")) ||
+            (StringComparer.Ordinal.Equals(actual, "candidate_llm_inferred") && StringComparer.Ordinal.Equals(expected, "llm_inferred_candidate")) ||
+            (StringComparer.Ordinal.Equals(actual, "llm_inferred_candidate") && StringComparer.Ordinal.Equals(expected, "candidate_llm_inferred"));
+    }
+
+    private static string ToDashboardModelProvider(string? modelName)
+    {
+        return !string.IsNullOrWhiteSpace(modelName) &&
+            (modelName.StartsWith("gpt-", StringComparison.OrdinalIgnoreCase) ||
+                modelName.StartsWith("o1", StringComparison.OrdinalIgnoreCase) ||
+                modelName.StartsWith("o3", StringComparison.OrdinalIgnoreCase) ||
+                modelName.StartsWith("o4", StringComparison.OrdinalIgnoreCase))
+            ? "openai"
+            : "unknown";
+    }
+
+    private static double? SumPointValues(
+        IEnumerable<AggregateMetricPointRecord> aggregatePoints,
+        params string[] names)
+    {
+        var matched = aggregatePoints
+            .Where(point => names.Contains(point.Name, StringComparer.Ordinal))
+            .ToArray();
+
+        return matched.Length == 0 ? null : matched.Sum(static point => point.Value);
+    }
+
+    private static double? SumFirstAvailablePointValues(
+        IEnumerable<AggregateMetricPointRecord> aggregatePoints,
+        params string[] names)
+    {
+        foreach (var name in names)
+        {
+            var sum = SumPointValues(aggregatePoints, name);
+            if (sum.HasValue)
+            {
+                return sum;
+            }
+        }
+
+        return null;
+    }
+
+    private static decimal? SumCostEstimates(IEnumerable<CostMixBucket> costMix)
+    {
+        return SumNullableDecimals(costMix.Select(static bucket => bucket.EstimatedCost));
+    }
+
+    private static decimal? SumNullableDecimals(IEnumerable<decimal?> values)
+    {
+        var presentValues = values.Where(static value => value.HasValue).Select(static value => value!.Value).ToArray();
+
+        return presentValues.Length == 0 ? null : presentValues.Sum();
+    }
+
+    private static object[] SummarizePointsByLabel(
+        IEnumerable<AggregateMetricPointRecord> aggregatePoints,
+        string labelName)
+    {
+        return aggregatePoints
+            .Where(point => point.Labels.ContainsKey(labelName))
+            .GroupBy(point => point.Labels[labelName], StringComparer.Ordinal)
+            .OrderBy(static group => group.Key, StringComparer.Ordinal)
+            .Select(static group => new
+            {
+                label = group.Key,
+                value = group.Sum(static point => point.Value)
+            })
+            .Cast<object>()
+            .ToArray();
+    }
+
+    private static object[] SummarizePointAndValueLabels(
+        IEnumerable<AggregateMetricPointRecord> aggregatePoints,
+        string labelName,
+        IEnumerable<string> fallbackValues)
+    {
+        var grouped = new Dictionary<string, double>(StringComparer.Ordinal);
+
+        foreach (var point in aggregatePoints)
+        {
+            if (!point.Labels.TryGetValue(labelName, out var labelValue))
+            {
+                continue;
+            }
+
+            grouped[labelValue] = grouped.GetValueOrDefault(labelValue) + point.Value;
+        }
+
+        foreach (var fallbackValue in fallbackValues)
+        {
+            grouped[fallbackValue] = grouped.GetValueOrDefault(fallbackValue) + 1;
+        }
+
+        return grouped
+            .OrderBy(static pair => pair.Key, StringComparer.Ordinal)
+            .Select(static pair => new
+            {
+                label = pair.Key,
+                value = pair.Value
+            })
+            .Cast<object>()
+            .ToArray();
+    }
+
+    private static object[] SummarizeValues(IEnumerable<string> values)
+    {
+        return values
+            .GroupBy(static value => value, StringComparer.Ordinal)
+            .OrderBy(static group => group.Key, StringComparer.Ordinal)
+            .Select(static group => new
+            {
+                label = group.Key,
+                value = group.Count()
+            })
+            .Cast<object>()
+            .ToArray();
     }
 
     private static async Task<IResult> GetPricingBasis(
@@ -1602,7 +2127,16 @@ internal static class TokenObservabilityApiEndpointExtensions
                     "invalid_grafana_drilldown_filter");
             }
 
-            if (queryParameter.Value.Any(static value => ContainsAbsoluteUrl(value)))
+            if (StringComparer.Ordinal.Equals(queryParameter.Key, "route"))
+            {
+                continue;
+            }
+
+            if (queryParameter.Value.Any(value =>
+                    ContainsAbsoluteUrl(value) ||
+                    value?.Contains('/') == true ||
+                    value?.Contains('\\') == true ||
+                    !IsAllowedOverviewFilterValue(queryParameter.Key, value ?? string.Empty)))
             {
                 return CreateProblem(
                     httpContext,

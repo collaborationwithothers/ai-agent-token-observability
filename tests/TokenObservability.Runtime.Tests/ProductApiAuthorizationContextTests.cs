@@ -1339,20 +1339,115 @@ public sealed class ProductApiAuthorizationContextTests
                 "gpt-5",
                 "standard",
                 PricingTokenType.Input));
+        await store.RecordAggregateMetricPointAsync(new CreateAggregateMetricPointRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            "tokenobs_tokens_total",
+            1_000_000,
+            "tokens",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["customer_organization_slug"] = "contoso",
+                ["environment"] = "dv",
+                ["region"] = "eastus2",
+                ["harness"] = "codex",
+                ["model_provider"] = "openai",
+                ["model"] = "gpt-5",
+                ["token_type"] = "input",
+                ["metric_status"] = "observed",
+                ["metric_confidence"] = "observed"
+            }));
+        await store.RecordAggregateMetricPointAsync(new CreateAggregateMetricPointRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            "tokenobs_hotspots_open",
+            1,
+            "hotspots",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["customer_organization_slug"] = "contoso",
+                ["environment"] = "dv",
+                ["region"] = "eastus2",
+                ["hotspot_type"] = "large_context",
+                ["finding_state"] = "confirmed"
+            }));
+        await store.RecordAggregateMetricPointAsync(new CreateAggregateMetricPointRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            "tokenobs_ingestion_requests_total",
+            1,
+            "requests",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["customer_organization_slug"] = "contoso",
+                ["environment"] = "dv",
+                ["region"] = "eastus2",
+                ["signal_type"] = "logs",
+                ["result"] = "rejected",
+                ["rejection_reason"] = "malformed_otlp",
+                ["schema_version"] = "2026-06-01"
+            }));
+        await store.RecordTokenHotspotAsync(new CreateTokenHotspotRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            TokenHotspotType.LargeContext,
+            TokenHotspotFindingState.Confirmed,
+            TokenHotspotAttributionType.Direct,
+            TokenHotspotConfidence.High,
+            TokenMetricStatus.Observed,
+            TokenMetricConfidence.Observed,
+            PromptCacheEvidenceState.NotApplicable,
+            "gpt-5",
+            "Aggregate token burn exceeded the configured threshold.",
+            ["aggregate-metric:tokenobs_tokens_total"],
+            TokenBurnScore: 0.91,
+            EstimatedCostImpact: null));
+        var auditEvent = await RecordRejectionAuditEventAsync(
+            store,
+            seed,
+            "audit-overview-rejection-001",
+            "overview-rejection-correlation",
+            "malformed_otlp",
+            "profile-contoso-codex");
+        await store.RecordIngestionRejectionAsync(new CreateIngestionRejectionRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            "profile-contoso-codex",
+            ScopedIngestionCredentialId: null,
+            DeclaredHarness: "codex-cli",
+            SignalType: "logs",
+            RequestRoute: "/v1/logs",
+            ReasonCode: "malformed_otlp",
+            HttpStatus: StatusCodes.Status400BadRequest,
+            CorrelationId: "overview-rejection-correlation",
+            AuditEventId: auditEvent.AuditEventId,
+            EvidenceMetadata: CreateRejectionEvidence("malformed_otlp", "profile-contoso-codex")));
         using var factory = CreateFactory(store);
         using var client = factory.CreateClient();
-        using var request = CreateAuthorizedRequest(HttpMethod.Get, "/api/v1/overview", "contoso", viewerClaims);
+        using var request = CreateAuthorizedRequest(
+            HttpMethod.Get,
+            "/api/v1/overview?from=2026-06-10&to=2026-06-16&environment=dv&region=eastus2&sessionId=forbidden",
+            "contoso",
+            viewerClaims);
 
         using var response = await client.SendAsync(request);
 
         response.EnsureSuccessStatusCode();
         using var body = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
-        var bucket = Assert.Single(body.RootElement.GetProperty("costMix").EnumerateArray());
-        Assert.Equal("openai", bucket.GetProperty("providerName").GetString());
-        Assert.Equal("gpt-5", bucket.GetProperty("modelName").GetString());
-        Assert.Equal("input", bucket.GetProperty("tokenType").GetString());
-        Assert.Equal("unavailable", bucket.GetProperty("costStatus").GetString());
-        Assert.Equal(JsonValueKind.Null, bucket.GetProperty("estimatedCost").ValueKind);
+        Assert.Empty(body.RootElement.GetProperty("costMix").EnumerateArray());
+        Assert.Equal(1_000_000, body.RootElement.GetProperty("tokenSummary").GetProperty("totalTokens").GetDouble());
+        Assert.Contains(
+            body.RootElement.GetProperty("tokenSummary").GetProperty("metricStates").EnumerateArray(),
+            item => item.GetProperty("label").GetString() == "observed");
+        Assert.Equal(JsonValueKind.Null, body.RootElement.GetProperty("costSummary").GetProperty("totalEstimatedCost").ValueKind);
+        Assert.Empty(body.RootElement.GetProperty("costSummary").GetProperty("costStates").EnumerateArray());
+        Assert.Equal(1, body.RootElement.GetProperty("hotspotSummary").GetProperty("totalHotspots").GetInt32());
+        Assert.Contains(
+            body.RootElement.GetProperty("hotspotSummary").GetProperty("byType").EnumerateArray(),
+            item => item.GetProperty("label").GetString() == "large_context");
+        Assert.Equal(1, body.RootElement.GetProperty("ingestionSummary").GetProperty("rejectedCount").GetInt32());
+        Assert.Contains(
+            body.RootElement.GetProperty("ingestionSummary").GetProperty("rejectionReasons").EnumerateArray(),
+            item => item.GetProperty("label").GetString() == "malformed_otlp");
         var json = body.RootElement.ToString();
         Assert.DoesNotContain("sessionId", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("productUserId", json, StringComparison.OrdinalIgnoreCase);
@@ -2022,6 +2117,23 @@ public sealed class ProductApiAuthorizationContextTests
         using var absoluteFilterResponse = await client.SendAsync(absoluteFilterRequest);
         Assert.Equal(HttpStatusCode.BadRequest, absoluteFilterResponse.StatusCode);
         await AssertProblemCodeAsync(absoluteFilterResponse, "invalid_grafana_drilldown_filter");
+
+        foreach (var invalidFilter in new[]
+        {
+            "hotspotType=cache",
+            "cacheBustCategory=prefix",
+            "model=/tmp/repo"
+        })
+        {
+            using var invalidBoundedFilterRequest = CreateAuthorizedRequest(
+                HttpMethod.Get,
+                $"/api/v1/grafana/drilldown?route=/overview&from=2026-06-10&{invalidFilter}",
+                "contoso",
+                adminClaims);
+            using var invalidBoundedFilterResponse = await client.SendAsync(invalidBoundedFilterRequest);
+            Assert.Equal(HttpStatusCode.BadRequest, invalidBoundedFilterResponse.StatusCode);
+            await AssertProblemCodeAsync(invalidBoundedFilterResponse, "invalid_grafana_drilldown_filter");
+        }
 
         using var sessionsRouteRequest = CreateAuthorizedRequest(
             HttpMethod.Get,
