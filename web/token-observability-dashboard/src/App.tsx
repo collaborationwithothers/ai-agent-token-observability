@@ -4,14 +4,14 @@ import { sanitizeGrafanaNavigation } from "./grafanaNavigation";
 
 const defaultProductApiBaseUrl = "/api/v1";
 
-type ProductRole =
+export type ProductRole =
   | "PlatformAdmin"
   | "SecurityReviewer"
   | "EngineeringLead"
   | "Developer"
   | "ReadOnlyViewer";
 
-type ProductScopeKind =
+export type ProductScopeKind =
   | "Organization"
   | "Team"
   | "Repository"
@@ -21,12 +21,34 @@ type ProductScopeKind =
   | "Pricing"
   | "TenantAdmin";
 
-type ProductScope = {
+export type ProductScope = {
   kind: ProductScopeKind;
   scopeId: string | null;
 };
 
-type CurrentUser = {
+export type DashboardFeatureFlag =
+  | "sessions"
+  | "contentReview"
+  | "recommendations"
+  | "identityAdmin"
+  | "harnessSetup"
+  | "pricing"
+  | "budgets"
+  | "audit";
+
+export type DashboardPolicySummaries = {
+  contentCapture?: {
+    reviewQueueEnabled?: boolean;
+    state?: "disabled" | "metadata_only" | "review_required" | "active" | string;
+  };
+  recommendations?: {
+    enabled?: boolean;
+    regenerationEnabled?: boolean;
+    state?: "disabled" | "deterministic_only" | "active" | string;
+  };
+};
+
+export type CurrentUser = {
   customerOrganization: {
     slug: string;
     displayName: string;
@@ -38,6 +60,8 @@ type CurrentUser = {
   };
   roles: ProductRole[];
   scopes: ProductScope[];
+  featureFlags?: Partial<Record<DashboardFeatureFlag, boolean>>;
+  policySummaries?: DashboardPolicySummaries;
   correlationId: string;
 };
 
@@ -56,13 +80,15 @@ type BootstrapState =
   | { kind: "forbidden"; problem?: ProblemDetails }
   | { kind: "error"; message: string; problem?: ProblemDetails };
 
-type DashboardRoute = {
+export type DashboardRoute = {
   path: string;
   label: string;
   group: "investigate" | "govern" | "admin" | "personal";
   purpose: string;
   allowedRoles: "all" | ProductRole[];
   requiredScopeKinds: ProductScopeKind[];
+  requiredFeatureFlag?: DashboardFeatureFlag;
+  requiredPolicySummary?: "contentCaptureReview" | "recommendationsEnabled";
   showInNavigation?: boolean;
 };
 
@@ -125,7 +151,7 @@ type DataState<T> =
   | { kind: "ready"; data: T }
   | { kind: "error"; message: string; problem?: ProblemDetails };
 
-const dashboardRoutes: DashboardRoute[] = [
+export const dashboardRoutes: DashboardRoute[] = [
   {
     path: "/overview",
     label: "Overview",
@@ -140,7 +166,8 @@ const dashboardRoutes: DashboardRoute[] = [
     group: "investigate",
     purpose: "Role-scoped session search and investigation entry point.",
     allowedRoles: ["Developer", "EngineeringLead", "PlatformAdmin"],
-    requiredScopeKinds: ["Organization", "Team", "Repository", "Self"]
+    requiredScopeKinds: ["Organization", "Team", "Repository", "Self"],
+    requiredFeatureFlag: "sessions"
   },
   {
     path: "/sessions/:sessionId",
@@ -149,6 +176,7 @@ const dashboardRoutes: DashboardRoute[] = [
     purpose: "Session investigation shell for authorized session detail.",
     allowedRoles: ["Developer", "EngineeringLead", "PlatformAdmin", "SecurityReviewer"],
     requiredScopeKinds: ["Organization", "Team", "Repository", "Self", "ContentReviewQueue"],
+    requiredFeatureFlag: "sessions",
     showInNavigation: false
   },
   {
@@ -157,7 +185,9 @@ const dashboardRoutes: DashboardRoute[] = [
     group: "govern",
     purpose: "Metadata-only content review queue entry point.",
     allowedRoles: ["SecurityReviewer", "PlatformAdmin"],
-    requiredScopeKinds: ["Organization", "ContentReviewQueue"]
+    requiredScopeKinds: ["Organization", "ContentReviewQueue"],
+    requiredFeatureFlag: "contentReview",
+    requiredPolicySummary: "contentCaptureReview"
   },
   {
     path: "/recommendations",
@@ -165,7 +195,9 @@ const dashboardRoutes: DashboardRoute[] = [
     group: "govern",
     purpose: "Visible recommendation queue and status entry point.",
     allowedRoles: ["Developer", "EngineeringLead", "PlatformAdmin"],
-    requiredScopeKinds: ["Organization", "Team", "Repository", "Self"]
+    requiredScopeKinds: ["Organization", "Team", "Repository", "Self"],
+    requiredFeatureFlag: "recommendations",
+    requiredPolicySummary: "recommendationsEnabled"
   },
   {
     path: "/admin/identity",
@@ -173,7 +205,8 @@ const dashboardRoutes: DashboardRoute[] = [
     group: "admin",
     purpose: "Identity tenants and Product Role Mapping administration.",
     allowedRoles: ["PlatformAdmin"],
-    requiredScopeKinds: ["Organization", "TenantAdmin"]
+    requiredScopeKinds: ["Organization", "TenantAdmin"],
+    requiredFeatureFlag: "identityAdmin"
   },
   {
     path: "/admin/harness-setup",
@@ -181,7 +214,8 @@ const dashboardRoutes: DashboardRoute[] = [
     group: "admin",
     purpose: "Harness setup profiles and scoped ingestion credential lifecycle.",
     allowedRoles: ["PlatformAdmin"],
-    requiredScopeKinds: ["Organization", "TenantAdmin", "HarnessProfile"]
+    requiredScopeKinds: ["Organization", "TenantAdmin", "HarnessProfile"],
+    requiredFeatureFlag: "harnessSetup"
   },
   {
     path: "/admin/pricing",
@@ -189,7 +223,8 @@ const dashboardRoutes: DashboardRoute[] = [
     group: "admin",
     purpose: "Harness Pricing Basis review entry point.",
     allowedRoles: ["PlatformAdmin"],
-    requiredScopeKinds: ["Organization", "TenantAdmin", "Pricing"]
+    requiredScopeKinds: ["Organization", "TenantAdmin", "Pricing"],
+    requiredFeatureFlag: "pricing"
   },
   {
     path: "/admin/budgets",
@@ -197,7 +232,8 @@ const dashboardRoutes: DashboardRoute[] = [
     group: "admin",
     purpose: "Non-punitive budget alert policy entry point.",
     allowedRoles: ["PlatformAdmin", "EngineeringLead"],
-    requiredScopeKinds: ["Organization", "Team", "Repository", "Pricing"]
+    requiredScopeKinds: ["Organization", "Team", "Repository", "Pricing"],
+    requiredFeatureFlag: "budgets"
   },
   {
     path: "/admin/audit",
@@ -205,7 +241,8 @@ const dashboardRoutes: DashboardRoute[] = [
     group: "admin",
     purpose: "Governance audit event query entry point.",
     allowedRoles: ["PlatformAdmin", "SecurityReviewer"],
-    requiredScopeKinds: ["Organization", "TenantAdmin", "ContentReviewQueue", "HarnessProfile"]
+    requiredScopeKinds: ["Organization", "TenantAdmin", "ContentReviewQueue", "HarnessProfile"],
+    requiredFeatureFlag: "audit"
   },
   {
     path: "/settings/me",
@@ -937,7 +974,7 @@ async function readProblemDetails(response: Response): Promise<ProblemDetails | 
   }
 }
 
-function resolveRoute(path: string, routes: DashboardRoute[]) {
+export function resolveRoute(path: string, routes: DashboardRoute[]) {
   const pathname = path.split("?")[0] || "/";
 
   if (pathname === "/") {
@@ -957,15 +994,37 @@ function matchSessionDetail(pathname: string, routes: DashboardRoute[]) {
   return undefined;
 }
 
-function isRouteVisible(route: DashboardRoute, currentUser: CurrentUser) {
+export function isRouteVisible(route: DashboardRoute, currentUser: CurrentUser) {
   const roleAllowed =
     route.allowedRoles === "all" || route.allowedRoles.some((role) => currentUser.roles.includes(role));
+  const scopeAllowed = route.requiredScopeKinds.some((scopeKind) => scopeMatchesRoute(scopeKind, currentUser.scopes));
+  const featureAllowed = route.requiredFeatureFlag
+    ? currentUser.featureFlags?.[route.requiredFeatureFlag] !== false
+    : true;
+  const policyAllowed = policySummaryAllowsRoute(route.requiredPolicySummary, currentUser.policySummaries);
 
-  return roleAllowed && route.requiredScopeKinds.some((scopeKind) => scopeMatchesRoute(scopeKind, currentUser.scopes));
+  return roleAllowed && scopeAllowed && featureAllowed && policyAllowed;
 }
 
-function scopeMatchesRoute(requiredScopeKind: ProductScopeKind, scopes: ProductScope[]) {
+export function scopeMatchesRoute(requiredScopeKind: ProductScopeKind, scopes: ProductScope[]) {
   return scopes.some((scope) => scope.kind === "Organization" || scope.kind === requiredScopeKind);
+}
+
+function policySummaryAllowsRoute(
+  requiredPolicySummary: DashboardRoute["requiredPolicySummary"],
+  policySummaries: DashboardPolicySummaries | undefined
+) {
+  if (!requiredPolicySummary) {
+    return true;
+  }
+
+  if (requiredPolicySummary === "contentCaptureReview") {
+    const contentCapture = policySummaries?.contentCapture;
+    return contentCapture?.reviewQueueEnabled !== false && contentCapture?.state !== "disabled";
+  }
+
+  const recommendations = policySummaries?.recommendations;
+  return recommendations?.enabled !== false && recommendations?.state !== "disabled";
 }
 
 function toConcreteRoute(route: string) {
