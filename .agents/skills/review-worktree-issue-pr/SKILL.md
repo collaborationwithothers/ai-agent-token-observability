@@ -47,6 +47,8 @@ Stop and ask only if the issue target cannot be identified from local context or
 
 Before editing, produce a concise planning handoff in the main thread. Do not spawn planner or implementor subagents for this sequential work.
 
+For coordinator-managed parallel batches with two or more independent ready-for-agent issues, the main thread may dispatch one `.codex/agents/issue-executor.toml` Issue Executor per issue after this handoff exists. Do not use Issue Executor for a single issue. Do not recreate separate planner and implementor agents.
+
 Include:
 
 - Issue summary and acceptance criteria.
@@ -74,10 +76,11 @@ High-risk path:
 
 1. Confirm the actual worktree or branch before editing.
 2. Complete the planning handoff.
-3. Read only the source-of-truth docs relevant to the changed boundary.
-4. Implement narrowly against the acceptance matrix and the do not touch list.
-5. If local evidence proves the handoff is wrong, stop and update the handoff before broadening scope.
-6. Run focused validation before first review:
+3. For a single issue, keep implementation in the main thread. For a parallel batch, dispatch one Issue Executor only after assigning an isolated worktree, branch, issue packet, acceptance matrix, do-not-touch list, focused validation command, and risk classification.
+4. Read only the source-of-truth docs relevant to the changed boundary.
+5. Implement narrowly against the acceptance matrix and the do not touch list.
+6. If local evidence proves the handoff is wrong, stop and update the handoff before broadening scope.
+7. Run focused validation before first review:
 
 ```bash
 scripts/validate-focused.sh PROFILE
@@ -85,9 +88,10 @@ scripts/validate-focused.sh PROFILE
 
 Use `ingestion`, `api`, `dashboard`, `terraform`, `docs`, or `all` for `PROFILE`.
 
-7. Request Code Reviewer against the current branch diff.
-8. Keep Code Reviewer output in `Comments.md` only.
-9. If review returns `CHANGES_REQUESTED`, create a findings ledger:
+8. If Issue Executor was used, the coordinator inspects the issue handoff, branch/status, diff stat, untracked files, acceptance matrix, and focused validation result before review.
+9. Request Code Reviewer against the current branch diff.
+10. Keep Code Reviewer output in `Comments.md` only.
+11. If review returns `CHANGES_REQUESTED`, create a findings ledger:
 
 ```text
 Finding:
@@ -97,15 +101,15 @@ Fixed files:
 Tests or validation:
 ```
 
-10. Fix accepted findings, rerun validation, then ask for targeted rereview. Use full-diff rereview only for architecture, security, privacy, tenant-boundary, persistence, Terraform deployment, or product authorization changes.
-11. After approval, run the PR gate. Use the full gate for product runtime, authorization, persistence, migrations, deployed resource definitions, tenant/security boundaries, or broad cross-cutting changes. Use changed-file validation for narrow docs, process, validation-script, GitHub Actions guardrail, or Terraform workflow-script fixes:
+12. Fix accepted findings in the coordinator or redispatch the same Issue Executor with only the accepted findings and targeted validation command. Rerun validation, then ask for targeted rereview. Use full-diff rereview only for architecture, security, privacy, tenant-boundary, persistence, Terraform deployment, or product authorization changes.
+13. After approval, run the PR gate. Use the full gate for product runtime, authorization, persistence, migrations, deployed resource definitions, tenant/security boundaries, or broad cross-cutting changes. Use changed-file validation for narrow docs, process, validation-script, GitHub Actions guardrail, or Terraform workflow-script fixes:
 
 ```bash
 scripts/validate-pr.sh
 scripts/validate-pr.sh --changed origin/main
 ```
 
-12. Commit, push, create the PR, and verify closing references:
+14. The coordinator commits, pushes, creates the PR, and verifies closing references:
 
 ```bash
 gh pr view PR_NUMBER --json closingIssuesReferences
@@ -126,6 +130,9 @@ gh pr view PR_NUMBER --json closingIssuesReferences
 
 - Use subagents only for parallel review, independent research, or Code Reviewer.
 - Do not use planner or implementor subagents for the sequential issue workflow.
+- Use Issue Executor only for coordinator-managed parallel batches with two or more independent ready-for-agent issues, one isolated worktree and branch per issue, and a completed planning handoff.
+- Do not use Issue Executor for a single issue.
+- The coordinator owns final validation, Code Reviewer orchestration, PR creation, and closing-reference verification.
 - Use Code Reviewer as a review gate, not as an acceptance-criteria discovery tool.
 - If a subagent wait or close attempt fails once, stop waiting and continue with local evidence.
 

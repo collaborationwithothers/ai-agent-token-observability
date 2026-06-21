@@ -36,6 +36,43 @@ check_comments_not_staged() {
   fi
 }
 
+validate_agent_toml() {
+  local agent_files=()
+  local python_cmd=""
+  local candidate
+
+  shopt -s nullglob
+  agent_files=(.codex/agents/*.toml)
+  shopt -u nullglob
+
+  if [[ "${#agent_files[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  for candidate in "${PYTHON:-}" python3.12 python3.11 /opt/homebrew/bin/python3.12 python3; do
+    [[ -z "$candidate" ]] && continue
+    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import tomllib' >/dev/null 2>&1; then
+      python_cmd="$candidate"
+      break
+    fi
+  done
+
+  if [[ -z "$python_cmd" ]]; then
+    echo "No Python with tomllib found for .codex/agents/*.toml validation." >&2
+    return 1
+  fi
+
+  "$python_cmd" - "${agent_files[@]}" <<'PY'
+import sys
+import tomllib
+
+for path in sys.argv[1:]:
+    with open(path, "rb") as handle:
+        tomllib.load(handle)
+    print(f"Agent TOML validated: {path}")
+PY
+}
+
 run_docs_checks() {
   check_comments_not_staged
   git diff --check
@@ -55,6 +92,7 @@ run_docs_checks() {
   bash -n scripts/validate-terraform-workflow-guardrails.sh
   bash -n scripts/validate-focused.sh
   bash -n scripts/validate-pr.sh
+  validate_agent_toml
   scripts/validate-grafana-provider-auth-proof.sh
   scripts/validate-markdown-links.sh
   if [[ -f .agents/skills/review-worktree-issue-pr/SKILL.md ]]; then

@@ -9,7 +9,7 @@ description: Use when working the next infrastructure-readiness ready-for-agent 
 
 Ship one infrastructure-readiness issue with minimal repeated context loading, bounded tool output, and a real PR.
 
-This skill refines the repo ready-for-agent issue workflow for infrastructure work. Prefer the workflow below over broad backlog scans, full source-doc reads, full Terraform plan output, or exploratory subagent fanout.
+This skill refines the repo ready-for-agent issue workflow for infrastructure work. Prefer the workflow below over broad backlog scans, full source-doc reads, full Terraform plan output, or exploratory subagent fanout. Use `.codex/agents/issue-executor.toml` only for coordinator-managed parallel batches with two or more independent ready-for-agent issues, never for a single issue.
 
 ## Workflow
 
@@ -26,6 +26,7 @@ This skill refines the repo ready-for-agent issue workflow for infrastructure wo
 
 3. Produce the planning handoff in the main thread.
    - Do not spawn planner or implementor subagents for the sequential infrastructure workflow.
+   - For parallel batches, the coordinator may dispatch one Issue Executor per issue only after each issue has an isolated worktree and branch, compact issue packet, acceptance matrix, do-not-touch list, focused validation command, and risk classification.
    - Map each acceptance criterion to intended Terraform, workflow, docs, or script files.
    - List source documents read and source documents intentionally not loaded.
    - Identify risks for Terraform provider behavior, production architecture, networking, security, privacy, tenant-boundary, authorization, persistence, migration, token metric state changes, and Azure infrastructure behavior.
@@ -36,6 +37,7 @@ This skill refines the repo ready-for-agent issue workflow for infrastructure wo
    - Do not reread every source-of-truth document.
    - Prepare integration checks, validation commands, and PR gate steps from the handoff.
    - Inspect diff stat, changed files, and targeted snippets before deciding whether more reading is needed.
+   - For a single issue, keep implementation in the main thread.
 
 5. Implement or integrate narrowly.
    - Read only source-of-truth docs for the touched infrastructure boundary.
@@ -54,16 +56,17 @@ This skill refines the repo ready-for-agent issue workflow for infrastructure wo
 7. Review once.
    - Confirm target worktree and branch before review.
    - Confirm `Comments.md` is untracked or ignored.
+   - If Issue Executor was used, inspect its handoff, branch/status, diff stat, untracked files, acceptance matrix, and focused validation result before review.
    - Run Code Reviewer once after focused validation.
-   - If review returns `CHANGES_REQUESTED`, create a concise findings ledger, fix accepted findings, rerun focused validation, then request one targeted rereview.
+   - If review returns `CHANGES_REQUESTED`, create a concise findings ledger, fix accepted findings in the coordinator or redispatch the same Issue Executor with only the accepted findings and targeted validation command, rerun focused validation, then request one targeted rereview.
 
 8. Finish with the PR gate.
    - Run `scripts/validate-pr.sh` once after reviewer approval for product runtime, authorization, persistence, migrations, deployed resource definitions, tenant/security boundaries, or broad cross-cutting changes.
    - Use `scripts/validate-pr.sh --changed origin/main` for narrow docs, process, validation-script, GitHub Actions guardrail, or Terraform workflow-script fixes where changed-file validation is sufficient.
    - If validation is silent for more than 90 seconds in a sandboxed environment, stop waiting and diagnose the specific command. If the likely cause is sandboxed cache, package, or network access, rerun that specific command with the required permission.
-   - Commit only relevant files.
-   - Create the PR.
-   - Verify `closingIssuesReferences` closes only the intended issue.
+   - The coordinator commits only relevant files.
+   - The coordinator creates the PR.
+   - The coordinator verifies `closingIssuesReferences` closes only the intended issue.
 
 ## Output Rules
 
@@ -105,6 +108,7 @@ Harmful by default:
 - Full ready issue lists.
 - Full worktree lists.
 - Raw subagent notifications copied into the main thread.
+- Issue Executor for a single issue.
 - Broad search output from the entire `docs` and `infrastructure` trees.
 
 ## Paste-Ready Invocation
@@ -116,3 +120,5 @@ Use $infrastructure-readiness-issue.
 
 Work the next infrastructure-readiness ready-for-agent issue. Use a compact issue packet, produce the planning handoff in the main thread, implement narrowly from that handoff, and do not spawn planner or implementor subagents. Do not spawn explorer agents unless blocked by a specific independent unknown. Keep Terraform, validation, issue-list, and worktree output narrow. Run focused validation before Code Reviewer, one Code Reviewer pass, one targeted rereview only if required, then the PR gate and create a PR closing only the intended issue.
 ```
+
+For a parallel infrastructure batch, dispatch one Issue Executor per independent issue only after the coordinator has prepared a separate worktree, branch, issue packet, planning handoff, acceptance matrix, do-not-touch list, focused validation command, and risk classification. The coordinator still owns Code Reviewer, PR gate, PR creation, and closing-reference verification.

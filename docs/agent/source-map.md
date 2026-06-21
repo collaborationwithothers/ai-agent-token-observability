@@ -14,6 +14,8 @@ Use this file to choose the smallest useful context set for a task. Do not load 
 
 - `.agents/skills/review-worktree-issue-pr/SKILL.md`: issue workflow, review loop, PR gate.
 - `.agents/skills/infrastructure-readiness-issue/SKILL.md`: infrastructure-readiness issue workflow and token-budget controls.
+- `.codex/agents/issue-executor.toml`: per-issue execution agent for coordinator-managed parallel batches only.
+- `.codex/agents/code-reviewer.toml`: independent review gate that writes only `Comments.md`.
 - `scripts/issue-start.sh`: issue packet generator.
 - `scripts/session-digest.sh`: compact issue packet wrapper for new sessions.
 - `scripts/worktree-current.sh`: compact current and issue worktree context.
@@ -109,6 +111,7 @@ Avoid loading or pasting these into the main thread unless they are the artifact
 - Full GitHub workflow YAML when `scripts/workflow-digest.sh` is enough.
 - Full validation logs when a pass/fail summary and targeted diagnostics are enough.
 - Raw subagent notifications when a concise summary will do.
+- Issue Executor for single-issue work.
 
 ## Ignore Strategy
 
