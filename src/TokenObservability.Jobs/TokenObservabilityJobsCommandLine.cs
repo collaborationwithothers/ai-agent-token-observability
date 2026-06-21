@@ -163,14 +163,15 @@ public static class TokenObservabilityJobsCommandLine
                 return 2;
             }
 
-            var generator = new DeterministicRecommendationGenerator(tenantMetadataStore);
+            var generator = new LlmAssistedRecommendationGenerator(tenantMetadataStore);
             var recommendations = await generator.GenerateForSessionAsync(
                 new GenerateRecommendationsRequest(
                     customerOrganizationId.Value,
                     agentSessionId!,
                     ReadOption(args, "--correlation-id") ?? $"generate-recommendations-{Guid.NewGuid():N}"));
 
-            output.WriteLine($"Created {recommendations.Count} deterministic recommendation record(s).");
+            output.WriteLine($"Created {recommendations.Count} recommendation record(s).");
+            output.WriteLine("LLM-assisted generation uses policy-gated deployment aliases when a compliant client is configured; otherwise deterministic fallback is used.");
             output.WriteLine("Recommendation evidence packets contain metadata and hashes only.");
             return 0;
         }

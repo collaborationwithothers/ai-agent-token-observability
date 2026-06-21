@@ -403,7 +403,8 @@ public sealed class TokenObservabilityJobsCommandTests
             store);
 
         Assert.Equal(0, exitCode);
-        Assert.Contains("Created 1 deterministic recommendation record(s).", writer.ToString());
+        Assert.Contains("Created 1 recommendation record(s).", writer.ToString());
+        Assert.Contains("deterministic fallback", writer.ToString());
         Assert.DoesNotContain("raw_prompt", writer.ToString(), StringComparison.OrdinalIgnoreCase);
         var recommendations = await store.ListRecommendationsForSessionAsync(
             organization.CustomerOrganizationId,

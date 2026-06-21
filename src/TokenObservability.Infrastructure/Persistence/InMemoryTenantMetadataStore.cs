@@ -84,6 +84,11 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
         "authority_state",
         "validation_state",
         "evidence_packet_version",
+        "prompt_template_version",
+        "deployment_alias",
+        "fallback_behavior",
+        "structured_output_schema_version",
+        "failure_code",
         "content_capture_policy_version",
         "recommendation_model_policy_version",
         "pricing_basis_version",
@@ -126,6 +131,10 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
     private readonly Dictionary<RecommendationGenerationKey, RecommendationId> recommendationGenerationKeyIndex = [];
     private readonly Dictionary<RecommendationEvidenceId, RecommendationEvidenceRecord> recommendationEvidenceRecords = [];
     private readonly Dictionary<RecommendationRegenerationRequestId, RecommendationRegenerationRequest> recommendationRegenerationRequests = [];
+    private readonly Dictionary<RecommendationModelPolicyKey, RecommendationModelPolicyRecord> recommendationModelPolicies = [];
+    private readonly Dictionary<CustomerOrganizationId, string> activeRecommendationModelPolicyIndex = [];
+    private readonly Dictionary<RecommendationPromptTemplateKey, RecommendationPromptTemplateRecord> recommendationPromptTemplates = [];
+    private readonly Dictionary<RecommendationLlmGenerationFailureId, RecommendationLlmGenerationFailureRecord> recommendationLlmGenerationFailures = [];
     private readonly Dictionary<AggregateMetricPointId, AggregateMetricPointRecord> aggregateMetricPoints = [];
     private readonly List<AggregateTokenTimelineBucket> aggregateTokenTimelineBuckets = [];
     private readonly Dictionary<AggregateMetricExportFailureId, AggregateMetricExportFailureRecord> aggregateMetricExportFailures = [];
@@ -1769,6 +1778,320 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
                         StringComparer.Ordinal.Equals(hotspot.AgentSessionId, normalizedAgentSessionId))
                     .OrderBy(hotspot => hotspot.CreatedAtUtc)
                     .ThenBy(hotspot => hotspot.TokenHotspotId.ToString(), StringComparer.Ordinal)
+                    .ToArray());
+        }
+    }
+
+    public Task<RecommendationPromptTemplateRecord> CreateRecommendationPromptTemplateAsync(
+        CreateRecommendationPromptTemplateRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var promptTemplateVersion = NormalizeSafeResourceId(
+            request.PromptTemplateVersion,
+            nameof(request.PromptTemplateVersion));
+        var promptTextHash = NormalizeHash(request.PromptTextHash, nameof(request.PromptTextHash));
+        var structuredOutputSchemaVersion = NormalizeSafeResourceId(
+            request.StructuredOutputSchemaVersion,
+            nameof(request.StructuredOutputSchemaVersion));
+        var policyConstraintsJson = NormalizeJsonObject(
+            request.PolicyConstraintsJson,
+            nameof(request.PolicyConstraintsJson));
+        var auditEventId = NormalizeRequiredText(request.AuditEventId, nameof(request.AuditEventId));
+        var correlationId = NormalizeRequiredText(request.CorrelationId, nameof(request.CorrelationId));
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+            RequireProductUserForCustomerOrganization(request.CustomerOrganizationId, request.ActorProductUserId);
+
+            var key = new RecommendationPromptTemplateKey(request.CustomerOrganizationId, promptTemplateVersion);
+            if (recommendationPromptTemplates.ContainsKey(key))
+            {
+                throw new InvalidOperationException("Recommendation prompt template versions are immutable.");
+            }
+
+            var now = clock.UtcNow.ToUniversalTime();
+            var template = new RecommendationPromptTemplateRecord(
+                request.CustomerOrganizationId,
+                promptTemplateVersion,
+                request.Purpose,
+                request.State,
+                promptTextHash,
+                structuredOutputSchemaVersion,
+                policyConstraintsJson,
+                auditEventId,
+                now,
+                request.State == RecommendationPromptTemplateState.Active ? now : null);
+
+            CreateGovernanceAuditEventUnderLock(
+                auditEventId,
+                request.CustomerOrganizationId,
+                request.ActorProductUserId,
+                request.EffectiveRole,
+                ProductAuthorizationAction.TenantUpdate,
+                targetResourceKind: "recommendation_prompt_template",
+                targetResourceId: promptTemplateVersion,
+                decision: "created",
+                denialReason: null,
+                correlationId,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["operation"] = "recommendation_prompt_template_change",
+                    ["result"] = ToWireRecommendationPromptTemplateState(request.State),
+                    ["prompt_template_version"] = promptTemplateVersion,
+                    ["structured_output_schema_version"] = structuredOutputSchemaVersion
+                },
+                now);
+
+            recommendationPromptTemplates.Add(key, template);
+            return Task.FromResult(template);
+        }
+    }
+
+    public Task<RecommendationPromptTemplateRecord?> FindRecommendationPromptTemplateAsync(
+        CustomerOrganizationId customerOrganizationId,
+        string promptTemplateVersion)
+    {
+        var normalizedVersion = NormalizeSafeResourceId(promptTemplateVersion, nameof(promptTemplateVersion));
+
+        lock (gate)
+        {
+            return Task.FromResult(
+                recommendationPromptTemplates.TryGetValue(
+                    new RecommendationPromptTemplateKey(customerOrganizationId, normalizedVersion),
+                    out var template)
+                    ? template
+                    : null);
+        }
+    }
+
+    public Task<RecommendationModelPolicyRecord> CreateRecommendationModelPolicyAsync(
+        CreateRecommendationModelPolicyRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var policyVersionId = NormalizeSafeResourceId(request.PolicyVersionId, nameof(request.PolicyVersionId));
+        var primaryDeploymentAlias = NormalizeDeploymentAlias(request.PrimaryDeploymentAlias, nameof(request.PrimaryDeploymentAlias));
+        var fallbackDeploymentAlias = string.IsNullOrWhiteSpace(request.FallbackDeploymentAlias)
+            ? null
+            : NormalizeDeploymentAlias(request.FallbackDeploymentAlias, nameof(request.FallbackDeploymentAlias));
+        var region = NormalizeRequiredText(request.Region, nameof(request.Region)).ToLowerInvariant();
+        var modelFamilyOrSku = NormalizeSafeResourceId(request.ModelFamilyOrSku, nameof(request.ModelFamilyOrSku));
+        var modelVersion = string.IsNullOrWhiteSpace(request.ModelVersion)
+            ? null
+            : NormalizeSafeResourceId(request.ModelVersion, nameof(request.ModelVersion));
+        var promptTemplateVersion = NormalizeSafeResourceId(
+            request.PromptTemplateVersion,
+            nameof(request.PromptTemplateVersion));
+        var structuredOutputSchemaVersion = NormalizeSafeResourceId(
+            request.StructuredOutputSchemaVersion,
+            nameof(request.StructuredOutputSchemaVersion));
+        var auditEventId = NormalizeRequiredText(request.AuditEventId, nameof(request.AuditEventId));
+        var correlationId = NormalizeRequiredText(request.CorrelationId, nameof(request.CorrelationId));
+
+        if (request.AllowedEvidenceClasses.Count == 0)
+        {
+            throw new ArgumentException("Recommendation model policy requires allowed evidence classes.", nameof(request));
+        }
+
+        if (request.FallbackBehavior == RecommendationModelFallbackBehavior.FallbackDeploymentThenDeterministic &&
+            fallbackDeploymentAlias is null)
+        {
+            throw new ArgumentException("Fallback deployment behavior requires a fallback deployment alias.", nameof(request));
+        }
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+            RequireProductUserForCustomerOrganization(request.CustomerOrganizationId, request.ActorProductUserId);
+            if (!recommendationPromptTemplates.TryGetValue(
+                    new RecommendationPromptTemplateKey(request.CustomerOrganizationId, promptTemplateVersion),
+                    out var promptTemplate) ||
+                promptTemplate.State != RecommendationPromptTemplateState.Active)
+            {
+                throw new InvalidOperationException("Recommendation model policy requires an active prompt template version.");
+            }
+
+            var key = new RecommendationModelPolicyKey(request.CustomerOrganizationId, policyVersionId);
+            if (recommendationModelPolicies.ContainsKey(key))
+            {
+                throw new InvalidOperationException("Recommendation model policy versions are immutable.");
+            }
+
+            if (request.State == RecommendationModelPolicyState.Active &&
+                activeRecommendationModelPolicyIndex.TryGetValue(request.CustomerOrganizationId, out var activePolicyVersionId) &&
+                !StringComparer.Ordinal.Equals(activePolicyVersionId, policyVersionId))
+            {
+                throw new InvalidOperationException("Only one active recommendation model policy is allowed per customer organization.");
+            }
+
+            var now = clock.UtcNow.ToUniversalTime();
+            var policy = new RecommendationModelPolicyRecord(
+                request.CustomerOrganizationId,
+                policyVersionId,
+                request.State,
+                request.Provider,
+                primaryDeploymentAlias,
+                fallbackDeploymentAlias,
+                region,
+                modelFamilyOrSku,
+                modelVersion,
+                promptTemplateVersion,
+                structuredOutputSchemaVersion,
+                request.AllowedEvidenceClasses.Distinct().ToArray(),
+                request.FallbackBehavior,
+                request.LlmAssistedEnabled,
+                auditEventId,
+                now,
+                request.State == RecommendationModelPolicyState.Active ? now : null);
+
+            CreateGovernanceAuditEventUnderLock(
+                auditEventId,
+                request.CustomerOrganizationId,
+                request.ActorProductUserId,
+                request.EffectiveRole,
+                ProductAuthorizationAction.TenantUpdate,
+                targetResourceKind: "recommendation_model_policy",
+                targetResourceId: policyVersionId,
+                decision: "created",
+                denialReason: null,
+                correlationId,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["operation"] = "recommendation_model_policy_change",
+                    ["result"] = ToWireRecommendationModelPolicyState(request.State),
+                    ["provider_name"] = ToWireRecommendationModelProvider(request.Provider),
+                    ["deployment_alias"] = primaryDeploymentAlias,
+                    ["fallback_behavior"] = ToWireRecommendationModelFallbackBehavior(request.FallbackBehavior),
+                    ["recommendation_model_policy_version"] = policyVersionId,
+                    ["prompt_template_version"] = promptTemplateVersion,
+                    ["structured_output_schema_version"] = structuredOutputSchemaVersion
+                },
+                now);
+
+            recommendationModelPolicies.Add(key, policy);
+            if (policy.State == RecommendationModelPolicyState.Active)
+            {
+                activeRecommendationModelPolicyIndex[request.CustomerOrganizationId] = policyVersionId;
+            }
+
+            return Task.FromResult(policy);
+        }
+    }
+
+    public Task<RecommendationModelPolicyRecord?> GetActiveRecommendationModelPolicyAsync(
+        CustomerOrganizationId customerOrganizationId)
+    {
+        lock (gate)
+        {
+            if (!activeRecommendationModelPolicyIndex.TryGetValue(customerOrganizationId, out var policyVersionId))
+            {
+                return Task.FromResult<RecommendationModelPolicyRecord?>(null);
+            }
+
+            return Task.FromResult(
+                recommendationModelPolicies.TryGetValue(
+                    new RecommendationModelPolicyKey(customerOrganizationId, policyVersionId),
+                    out var policy)
+                    ? policy
+                    : null);
+        }
+    }
+
+    public Task<RecommendationLlmGenerationFailureRecord> RecordRecommendationLlmGenerationFailureAsync(
+        CreateRecommendationLlmGenerationFailureRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var agentSessionId = NormalizeRequiredText(request.AgentSessionId, nameof(request.AgentSessionId));
+        var failureCode = NormalizeSafeResourceId(request.FailureCode, nameof(request.FailureCode));
+        var provider = NormalizeSafeResourceId(request.Provider, nameof(request.Provider));
+        var deploymentAlias = NormalizeDeploymentAlias(request.DeploymentAlias, nameof(request.DeploymentAlias));
+        var policyVersionId = NormalizeSafeResourceId(request.PolicyVersionId, nameof(request.PolicyVersionId));
+        var promptTemplateVersion = NormalizeSafeResourceId(
+            request.PromptTemplateVersion,
+            nameof(request.PromptTemplateVersion));
+        var evidencePacketHash = NormalizeSha256Hex(request.EvidencePacketHash, nameof(request.EvidencePacketHash));
+        var structuredOutputSchemaVersion = NormalizeSafeResourceId(
+            request.StructuredOutputSchemaVersion,
+            nameof(request.StructuredOutputSchemaVersion));
+        var auditEventId = NormalizeRequiredText(request.AuditEventId, nameof(request.AuditEventId));
+        var correlationId = NormalizeRequiredText(request.CorrelationId, nameof(request.CorrelationId));
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+            if (!agentSessions.TryGetValue(agentSessionId, out var session) ||
+                session.CustomerOrganizationId != request.CustomerOrganizationId)
+            {
+                throw new InvalidOperationException("LLM generation failure session does not belong to the customer organization.");
+            }
+
+            if (request.TokenHotspotId is { } tokenHotspotId &&
+                (!tokenHotspots.TryGetValue(tokenHotspotId, out var hotspot) ||
+                    hotspot.CustomerOrganizationId != request.CustomerOrganizationId ||
+                    !StringComparer.Ordinal.Equals(hotspot.AgentSessionId, agentSessionId)))
+            {
+                throw new InvalidOperationException("LLM generation failure hotspot does not belong to the customer organization and session.");
+            }
+
+            var now = clock.UtcNow.ToUniversalTime();
+            var failure = new RecommendationLlmGenerationFailureRecord(
+                RecommendationLlmGenerationFailureId.NewId(),
+                request.CustomerOrganizationId,
+                agentSessionId,
+                request.TokenHotspotId,
+                failureCode,
+                provider,
+                deploymentAlias,
+                policyVersionId,
+                promptTemplateVersion,
+                evidencePacketHash,
+                structuredOutputSchemaVersion,
+                auditEventId,
+                now);
+
+            CreateGovernanceAuditEventUnderLock(
+                auditEventId,
+                request.CustomerOrganizationId,
+                actorProductUserId: null,
+                effectiveRole: null,
+                ProductAuthorizationAction.RecommendationRegenerate,
+                targetResourceKind: "recommendation_llm_generation_failure",
+                targetResourceId: failure.RecommendationLlmGenerationFailureId.ToString(),
+                decision: "created",
+                denialReason: null,
+                correlationId,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["operation"] = "recommendation_generation_rejection",
+                    ["result"] = "rejected",
+                    ["failure_code"] = failureCode,
+                    ["provider_name"] = provider,
+                    ["deployment_alias"] = deploymentAlias,
+                    ["recommendation_model_policy_version"] = policyVersionId,
+                    ["prompt_template_version"] = promptTemplateVersion,
+                    ["structured_output_schema_version"] = structuredOutputSchemaVersion,
+                    ["evidence_packet_version"] = "recommendation.evidence.v1"
+                },
+                now);
+
+            recommendationLlmGenerationFailures.Add(failure.RecommendationLlmGenerationFailureId, failure);
+            return Task.FromResult(failure);
+        }
+    }
+
+    public Task<IReadOnlyList<RecommendationLlmGenerationFailureRecord>> ListRecommendationLlmGenerationFailuresAsync(
+        CustomerOrganizationId customerOrganizationId)
+    {
+        lock (gate)
+        {
+            return Task.FromResult<IReadOnlyList<RecommendationLlmGenerationFailureRecord>>(
+                recommendationLlmGenerationFailures.Values
+                    .Where(failure => failure.CustomerOrganizationId == customerOrganizationId)
+                    .OrderBy(failure => failure.CreatedAtUtc)
+                    .ThenBy(failure => failure.RecommendationLlmGenerationFailureId.ToString(), StringComparer.Ordinal)
                     .ToArray());
         }
     }
@@ -4634,6 +4957,25 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
         return normalized;
     }
 
+    private static string NormalizeSafeResourceId(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+        if (normalized.Length > 128 || !IsSafeResourceId(normalized))
+        {
+            throw new ArgumentException("Value must be a bounded safe resource identifier.", parameterName);
+        }
+
+        return normalized;
+    }
+
+    private static string NormalizeDeploymentAlias(string value, string parameterName)
+    {
+        var normalized = NormalizeSafeResourceId(value, parameterName);
+        return normalized is "recommendation-writer-primary" or "recommendation-writer-fallback"
+            ? normalized
+            : throw new ArgumentException("Recommendation deployment alias is not supported.", parameterName);
+    }
+
     private static string NormalizeRecommendationText(string value, string parameterName)
     {
         var normalized = NormalizeRequiredText(value, parameterName);
@@ -4794,6 +5136,60 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
         };
     }
 
+    public static string ToWireRecommendationModelPolicyState(RecommendationModelPolicyState state)
+    {
+        return state switch
+        {
+            RecommendationModelPolicyState.Draft => "draft",
+            RecommendationModelPolicyState.Active => "active",
+            RecommendationModelPolicyState.Superseded => "superseded",
+            RecommendationModelPolicyState.Disabled => "disabled",
+            _ => throw new ArgumentOutOfRangeException(nameof(state), state, null)
+        };
+    }
+
+    public static string ToWireRecommendationModelProvider(RecommendationModelProvider provider)
+    {
+        return provider switch
+        {
+            RecommendationModelProvider.AzureOpenAi => "azure_openai",
+            _ => throw new ArgumentOutOfRangeException(nameof(provider), provider, null)
+        };
+    }
+
+    public static string ToWireRecommendationModelFallbackBehavior(RecommendationModelFallbackBehavior behavior)
+    {
+        return behavior switch
+        {
+            RecommendationModelFallbackBehavior.DeterministicOnly => "deterministic_only",
+            RecommendationModelFallbackBehavior.FallbackDeploymentThenDeterministic => "fallback_deployment_then_deterministic",
+            _ => throw new ArgumentOutOfRangeException(nameof(behavior), behavior, null)
+        };
+    }
+
+    public static string ToWireRecommendationPromptTemplateState(RecommendationPromptTemplateState state)
+    {
+        return state switch
+        {
+            RecommendationPromptTemplateState.Draft => "draft",
+            RecommendationPromptTemplateState.Active => "active",
+            RecommendationPromptTemplateState.Superseded => "superseded",
+            RecommendationPromptTemplateState.Disabled => "disabled",
+            _ => throw new ArgumentOutOfRangeException(nameof(state), state, null)
+        };
+    }
+
+    public static string ToWireRecommendationPromptTemplatePurpose(RecommendationPromptTemplatePurpose purpose)
+    {
+        return purpose switch
+        {
+            RecommendationPromptTemplatePurpose.RecommendationDrafter => "recommendation_drafter",
+            RecommendationPromptTemplatePurpose.CandidateHotspotGenerator => "candidate_hotspot_generator",
+            RecommendationPromptTemplatePurpose.CacheBreakageExplainer => "cache_breakage_reasoner",
+            _ => throw new ArgumentOutOfRangeException(nameof(purpose), purpose, null)
+        };
+    }
+
     private static string NormalizeDecision(string decision)
     {
         var normalizedDecision = NormalizeRequiredText(decision, nameof(decision)).ToLowerInvariant();
@@ -4937,6 +5333,11 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
             "authority_state" => value is "deterministic" or "llm_assisted" or "llm_inferred_candidate" or "rejected",
             "validation_state" => value is "pending" or "validated" or "rejected",
             "evidence_packet_version" => IsSafeResourceId(value),
+            "prompt_template_version" => IsSafeResourceId(value),
+            "deployment_alias" => value is "recommendation-writer-primary" or "recommendation-writer-fallback",
+            "fallback_behavior" => value is "deterministic_only" or "fallback_deployment_then_deterministic",
+            "structured_output_schema_version" => IsSafeResourceId(value),
+            "failure_code" => IsSafeResourceId(value),
             "content_capture_policy_version" => IsSafeResourceId(value),
             "recommendation_model_policy_version" => IsSafeResourceId(value),
             "pricing_basis_version" => IsSafeResourceId(value),
@@ -5463,6 +5864,14 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
     private readonly record struct RecommendationGenerationKey(
         CustomerOrganizationId CustomerOrganizationId,
         string GenerationKey);
+
+    private readonly record struct RecommendationModelPolicyKey(
+        CustomerOrganizationId CustomerOrganizationId,
+        string PolicyVersionId);
+
+    private readonly record struct RecommendationPromptTemplateKey(
+        CustomerOrganizationId CustomerOrganizationId,
+        string PromptTemplateVersion);
 
     private sealed record NormalizedPricingBasisRequest(
         string Harness,
