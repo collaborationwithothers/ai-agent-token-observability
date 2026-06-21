@@ -464,6 +464,7 @@ CREATE TABLE IF NOT EXISTS token_hotspot (
     estimated_cost_impact numeric NULL,
     created_at_utc timestamptz NOT NULL,
     CONSTRAINT fk_token_hotspot_agent_session FOREIGN KEY (customer_organization_id, agent_session_id) REFERENCES agent_session (customer_organization_id, agent_session_id),
+    CONSTRAINT uq_token_hotspot_customer_hotspot UNIQUE (customer_organization_id, token_hotspot_id),
     CONSTRAINT ck_token_hotspot_harness CHECK (harness IN ('codex-cli')),
     CONSTRAINT ck_token_hotspot_type CHECK (hotspot_type IN ('prompt_cache_breakage', 'large_context', 'tool_loop', 'model_retry', 'repo_context_bloat', 'generated_artifact_bloat', 'expensive_model_choice', 'error_rework', 'unknown')),
     CONSTRAINT ck_token_hotspot_finding_state CHECK (finding_state IN ('confirmed', 'candidate_llm_inferred', 'candidate_correlated', 'rejected', 'superseded')),
@@ -515,6 +516,110 @@ CREATE TABLE IF NOT EXISTS token_hotspot (
         OR estimated_cost_impact >= 0
     )
 );
+
+CREATE TABLE IF NOT EXISTS recommendation (
+    recommendation_id uuid PRIMARY KEY,
+    customer_organization_id uuid NOT NULL,
+    agent_session_id text NOT NULL,
+    token_hotspot_id uuid NULL,
+    rule_id text NULL,
+    recommendation_kind text NOT NULL,
+    recommendation_state text NOT NULL,
+    authority_state text NOT NULL,
+    confidence text NOT NULL,
+    validation_state text NOT NULL,
+    visibility_scope text NOT NULL,
+    evidence_packet_version text NOT NULL,
+    evidence_packet_json jsonb NOT NULL,
+    evidence_packet_hash text NOT NULL,
+    summary text NOT NULL,
+    rationale text NOT NULL,
+    recommended_action text NOT NULL,
+    expected_benefit text NOT NULL,
+    model_policy_version_id text NULL,
+    prompt_template_version text NULL,
+    evidence_refs_json jsonb NOT NULL,
+    policy_metadata_json jsonb NOT NULL,
+    audit_event_id text NOT NULL,
+    generation_key text NULL,
+    created_at_utc timestamptz NOT NULL,
+    CONSTRAINT fk_recommendation_customer_organization FOREIGN KEY (customer_organization_id) REFERENCES customer_organization (customer_organization_id),
+    CONSTRAINT fk_recommendation_agent_session FOREIGN KEY (customer_organization_id, agent_session_id) REFERENCES agent_session (customer_organization_id, agent_session_id),
+    CONSTRAINT fk_recommendation_token_hotspot FOREIGN KEY (customer_organization_id, token_hotspot_id) REFERENCES token_hotspot (customer_organization_id, token_hotspot_id),
+    CONSTRAINT fk_recommendation_audit_event FOREIGN KEY (customer_organization_id, audit_event_id) REFERENCES governance_audit_event (customer_organization_id, audit_event_id),
+    CONSTRAINT uq_recommendation_customer_recommendation UNIQUE (customer_organization_id, recommendation_id),
+    CONSTRAINT uq_recommendation_generation_key UNIQUE (customer_organization_id, generation_key),
+    CONSTRAINT ck_recommendation_kind CHECK (recommendation_kind IN ('deterministic', 'llm_assisted', 'mixed')),
+    CONSTRAINT ck_recommendation_state CHECK (recommendation_state IN ('candidate', 'accepted', 'rejected', 'expired', 'superseded')),
+    CONSTRAINT ck_recommendation_authority_state CHECK (authority_state IN ('deterministic', 'llm_assisted', 'llm_inferred_candidate', 'rejected')),
+    CONSTRAINT ck_recommendation_confidence CHECK (confidence IN ('low', 'medium', 'high')),
+    CONSTRAINT ck_recommendation_validation_state CHECK (validation_state IN ('pending', 'validated', 'rejected')),
+    CONSTRAINT ck_recommendation_visibility_scope CHECK (visibility_scope IN ('self', 'team_scoped', 'security_review', 'admin', 'aggregate_only')),
+    CONSTRAINT ck_recommendation_evidence_packet_json CHECK (
+        jsonb_typeof(evidence_packet_json) = 'object'
+        AND evidence_packet_json ? 'policy'
+    ),
+    CONSTRAINT ck_recommendation_evidence_packet_hash CHECK (evidence_packet_hash ~ '^[A-F0-9]{64}$'),
+    CONSTRAINT ck_recommendation_evidence_refs_json CHECK (
+        jsonb_typeof(evidence_refs_json) = 'array'
+        AND jsonb_array_length(evidence_refs_json) BETWEEN 1 AND 64
+    ),
+    CONSTRAINT ck_recommendation_policy_metadata_json CHECK (
+        jsonb_typeof(policy_metadata_json) = 'object'
+        AND policy_metadata_json ? 'content_capture_policy_version'
+        AND policy_metadata_json ? 'recommendation_model_policy_version'
+    ),
+    CONSTRAINT ck_recommendation_text_lengths CHECK (
+        length(summary) BETWEEN 1 AND 512
+        AND length(rationale) BETWEEN 1 AND 1024
+        AND length(recommended_action) BETWEEN 1 AND 1024
+        AND length(expected_benefit) BETWEEN 1 AND 1024
+    ),
+    CONSTRAINT ck_recommendation_candidate_authority CHECK (
+        authority_state <> 'llm_inferred_candidate'
+        OR recommendation_state = 'candidate'
+    )
+);
+
+CREATE TABLE IF NOT EXISTS recommendation_evidence (
+    recommendation_evidence_id uuid PRIMARY KEY,
+    customer_organization_id uuid NOT NULL,
+    recommendation_id uuid NOT NULL,
+    evidence_kind text NOT NULL,
+    evidence_id text NOT NULL,
+    evidence_state text NOT NULL,
+    created_at_utc timestamptz NOT NULL,
+    CONSTRAINT fk_recommendation_evidence_customer_organization FOREIGN KEY (customer_organization_id) REFERENCES customer_organization (customer_organization_id),
+    CONSTRAINT fk_recommendation_evidence_recommendation FOREIGN KEY (customer_organization_id, recommendation_id) REFERENCES recommendation (customer_organization_id, recommendation_id),
+    CONSTRAINT ck_recommendation_evidence_kind CHECK (evidence_kind IN ('telemetry_envelope', 'token_observation', 'token_hotspot', 'content_reference', 'repository_evidence', 'audit_event', 'pricing_basis')),
+    CONSTRAINT ck_recommendation_evidence_state CHECK (evidence_state IN ('observed', 'derived', 'correlated', 'llm_inferred', 'unavailable')),
+    CONSTRAINT ck_recommendation_evidence_id CHECK (length(evidence_id) BETWEEN 1 AND 256)
+);
+
+CREATE TABLE IF NOT EXISTS recommendation_regeneration_request (
+    recommendation_regeneration_request_id uuid PRIMARY KEY,
+    customer_organization_id uuid NOT NULL,
+    agent_session_id text NULL,
+    token_hotspot_id uuid NULL,
+    reason text NOT NULL,
+    state text NOT NULL,
+    audit_event_id text NOT NULL,
+    correlation_id text NOT NULL,
+    created_at_utc timestamptz NOT NULL,
+    CONSTRAINT fk_recommendation_regeneration_customer_organization FOREIGN KEY (customer_organization_id) REFERENCES customer_organization (customer_organization_id),
+    CONSTRAINT fk_recommendation_regeneration_agent_session FOREIGN KEY (customer_organization_id, agent_session_id) REFERENCES agent_session (customer_organization_id, agent_session_id),
+    CONSTRAINT fk_recommendation_regeneration_token_hotspot FOREIGN KEY (customer_organization_id, token_hotspot_id) REFERENCES token_hotspot (customer_organization_id, token_hotspot_id),
+    CONSTRAINT fk_recommendation_regeneration_audit_event FOREIGN KEY (customer_organization_id, audit_event_id) REFERENCES governance_audit_event (customer_organization_id, audit_event_id),
+    CONSTRAINT ck_recommendation_regeneration_state CHECK (state IN ('queued', 'completed', 'failed')),
+    CONSTRAINT ck_recommendation_regeneration_target CHECK (agent_session_id IS NOT NULL OR token_hotspot_id IS NOT NULL),
+    CONSTRAINT ck_recommendation_regeneration_reason CHECK (length(reason) BETWEEN 1 AND 512)
+);
+
+CREATE INDEX IF NOT EXISTS ix_recommendation_session_state ON recommendation (customer_organization_id, agent_session_id, recommendation_state, created_at_utc);
+CREATE INDEX IF NOT EXISTS ix_recommendation_customer_state ON recommendation (customer_organization_id, recommendation_state);
+CREATE INDEX IF NOT EXISTS ix_recommendation_evidence_recommendation ON recommendation_evidence (customer_organization_id, recommendation_id);
+CREATE INDEX IF NOT EXISTS ix_recommendation_regeneration_customer_state ON recommendation_regeneration_request (customer_organization_id, state, created_at_utc);
+CREATE INDEX IF NOT EXISTS ix_recommendation_regeneration_customer_session ON recommendation_regeneration_request (customer_organization_id, agent_session_id, created_at_utc);
 
 CREATE TABLE IF NOT EXISTS aggregate_metric_point (
     aggregate_metric_point_id uuid PRIMARY KEY,

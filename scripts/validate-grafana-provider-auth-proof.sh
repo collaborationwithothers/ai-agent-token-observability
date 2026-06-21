@@ -91,7 +91,8 @@ for name, pattern in {
 required_script_terms = [
     "GRAFANA_ENTRA_AUDIENCE=\"6f2d169c-08f3-4a4c-a982-bcaf2d038c45\"",
     "az account get-access-token",
-    "GRAFANA_HTTP_HEADERS",
+    "GRAFANA_AUTH",
+    "unset GRAFANA_HTTP_HEADERS",
     "GRAFANA_SERVICE_ACCOUNT_TOKEN",
     "-chdir=\"$PROOF_DIR\" init -backend=false",
     "-chdir=\"$PROOF_DIR\" plan",

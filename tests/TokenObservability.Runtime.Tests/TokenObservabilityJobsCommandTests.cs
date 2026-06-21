@@ -1,7 +1,12 @@
 using System.Net;
+using System.Security.Cryptography;
+using System.Text;
+using TokenObservability.Domain.Authorization;
+using TokenObservability.Domain.Ingestion;
 using TokenObservability.Jobs;
 using TokenObservability.Domain.Pricing;
 using TokenObservability.Domain.Tenancy;
+using TokenObservability.Infrastructure.Ingestion;
 using TokenObservability.Infrastructure.Persistence;
 
 namespace TokenObservability.Runtime.Tests;
@@ -268,6 +273,104 @@ public sealed class TokenObservabilityJobsCommandTests
         Assert.Empty(await store.ListPricingBasisRecordsAsync(organization.CustomerOrganizationId));
     }
 
+    [Fact]
+    public async Task GenerateRecommendationsCommandCreatesDeterministicRecommendationRecords()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var organization = await store.CreateCustomerOrganizationAsync(
+            new CreateCustomerOrganizationRequest(
+                "contoso",
+                "Contoso",
+                "uksouth",
+                CustomerOrganizationIsolationTier.Shared));
+        var identityTenant = await store.CreateIdentityTenantAsync(
+            organization.CustomerOrganizationId,
+            new CreateIdentityTenantRequest(
+                IdentityTenantProvider.MicrosoftEntra,
+                "https://sts.windows.net/contoso/",
+                "contoso",
+                ["api://token-observability"],
+                JwksUri: null,
+                "Contoso Entra ID"));
+        var admin = await store.CreateProductUserAsync(
+            organization.CustomerOrganizationId,
+            identityTenant.IdentityTenantId,
+            new CreateProductUserRequest("admin", "admin", "admin@example.test"));
+        var developer = await store.CreateProductUserAsync(
+            organization.CustomerOrganizationId,
+            identityTenant.IdentityTenantId,
+            new CreateProductUserRequest("developer", "developer", "developer@example.test"));
+        var lifecycle = new ScopedIngestionCredentialLifecycleService(store, new StaticTenantMetadataClock(Now));
+        var issued = await lifecycle.CreateAsync(
+            organization.CustomerOrganizationId,
+            new IssueScopedIngestionCredentialRequest(
+                "profile-contoso-codex",
+                developer.ProductUserId,
+                CodingAgentHarness.CodexCli,
+                [new ProductScope(ProductScopeKind.Organization, ScopeId: null)],
+                Now.AddDays(30),
+                admin.ProductUserId,
+                ProductRole.PlatformAdmin,
+                "job-credential",
+                "audit-job-credential"));
+        var session = await SeedTokenSessionAsync(store, issued.Credential, "job-recommendation-session");
+        await store.RecordTokenHotspotAsync(new CreateTokenHotspotRecordRequest(
+            organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            TokenHotspotType.LargeContext,
+            TokenHotspotFindingState.Confirmed,
+            TokenHotspotAttributionType.Direct,
+            TokenHotspotConfidence.High,
+            TokenMetricStatus.Observed,
+            TokenMetricConfidence.Observed,
+            PromptCacheEvidenceState.NotApplicable,
+            ModelName: "gpt-5",
+            EvidenceSummary: "Input tokens exceeded configured threshold using accepted token evidence.",
+            EvidenceReferenceIds: [session.AgentSessionId],
+            TokenBurnScore: null,
+            EstimatedCostImpact: null,
+            DetectionKey: "job-large-context"));
+        using var writer = new StringWriter();
+
+        var exitCode = await TokenObservabilityJobsCommandLine.RunAsync(
+            [
+                "generate-recommendations",
+                "--customer-organization-id",
+                organization.CustomerOrganizationId.ToString(),
+                "--agent-session-id",
+                session.AgentSessionId,
+                "--correlation-id",
+                "job-generate-recommendations"
+            ],
+            writer,
+            store);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("Created 1 deterministic recommendation record(s).", writer.ToString());
+        Assert.DoesNotContain("raw_prompt", writer.ToString(), StringComparison.OrdinalIgnoreCase);
+        var recommendations = await store.ListRecommendationsForSessionAsync(
+            organization.CustomerOrganizationId,
+            session.AgentSessionId);
+        Assert.Single(recommendations);
+        var auditEvents = await store.ListGovernanceAuditEventsAsync(organization.CustomerOrganizationId);
+        Assert.Single(auditEvents, audit => audit.EvidenceMetadata["operation"] == "recommendation_generation");
+    }
+
+    [Fact]
+    public async Task GenerateRecommendationsCommandRequiresLoadedTenantAndSessionInputs()
+    {
+        using var writer = new StringWriter();
+
+        var exitCode = await TokenObservabilityJobsCommandLine.RunAsync(
+            ["generate-recommendations"],
+            writer,
+            new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now)));
+
+        Assert.Equal(2, exitCode);
+        Assert.Contains("--customer-organization-id", writer.ToString());
+        Assert.Contains("--agent-session-id", writer.ToString());
+    }
+
     private sealed class StubHttpMessageHandler(string content) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -277,5 +380,74 @@ public sealed class TokenObservabilityJobsCommandTests
                 Content = new StringContent(content)
             });
         }
+    }
+
+    private static async Task<AgentSessionRecord> SeedTokenSessionAsync(
+        InMemoryTenantMetadataStore store,
+        ScopedIngestionCredential credential,
+        string providerSessionId)
+    {
+        var providerSessionIdHash = ComputeSha256Hex(providerSessionId);
+        var envelope = await store.RecordTelemetryEnvelopeAsync(new CreateTelemetryEnvelopeRecordRequest(
+            CustomerOrganizationId: credential.CustomerOrganizationId,
+            HarnessSetupProfileId: credential.HarnessSetupProfileId,
+            ScopedIngestionCredentialId: credential.ScopedIngestionCredentialId,
+            ProductUserId: credential.ProductUserId,
+            Harness: "codex-cli",
+            SchemaVersion: "2026-06-01",
+            SignalType: "metric",
+            SourceEventName: "codex.api_request",
+            SourceEventTimestampUtc: Now,
+            ConversationIdHash: providerSessionIdHash,
+            TurnIdHash: ComputeSha256Hex($"{providerSessionId}-turn"),
+            SourceEventId: null,
+            TraceIdHash: null,
+            SpanIdHash: null,
+            ModelName: "gpt-5",
+            HarnessVersion: null,
+            SandboxSetting: null,
+            ApprovalSetting: null,
+            RepositoryEvidenceState: "unavailable",
+            ContentPolicyDecision: "metadata_only",
+            ContentCaptureState: "metadata_only",
+            RedactionState: "not_required",
+            RoutingDecision: new Dictionary<string, string>
+            {
+                ["result"] = "accepted",
+                ["metadata_store"] = "postgresql",
+                ["diagnostic_store"] = "not_applicable",
+                ["metrics_store"] = "azure_monitor_workspace",
+                ["content_capture"] = "metadata_only"
+            },
+            EvidenceState: "observed",
+            MetricState: "observed",
+            MetricStatus: TokenMetricStatus.Observed,
+            MetricConfidence: TokenMetricConfidence.Observed,
+            SourceEvidenceKind: "harness_emitted",
+            CorrelationId: $"correlation-{providerSessionId}",
+            DedupeKeyHash: ComputeSha256Hex($"dedupe-{providerSessionId}"),
+            IngestionVersionMetadata: new Dictionary<string, string>
+            {
+                ["schema_version"] = "2026-06-01",
+                ["harness_version"] = "unavailable",
+                ["contract_version"] = "2026-06-01"
+            }));
+        var session = Assert.Single(await store.ListAgentSessionsAsync(credential.CustomerOrganizationId));
+        await store.RecordTokenObservationAsync(new CreateTokenObservationRecordRequest(
+            credential.CustomerOrganizationId,
+            session.AgentSessionId,
+            ModelInvocationId: null,
+            TokenMetricName.InputTokens,
+            Value: 120_000,
+            TokenMetricStatus.Observed,
+            TokenMetricConfidence.Observed,
+            TokenObservationSourceKind.CodexEvent,
+            envelope.TelemetryEnvelopeId));
+        return session;
+    }
+
+    private static string ComputeSha256Hex(string value)
+    {
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
     }
 }

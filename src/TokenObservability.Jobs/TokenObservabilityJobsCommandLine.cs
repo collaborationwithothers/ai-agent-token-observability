@@ -1,6 +1,8 @@
 using System.Text.Json;
+using TokenObservability.Domain.Recommendations;
 using TokenObservability.Domain.Tenancy;
 using TokenObservability.Infrastructure.Persistence;
+using TokenObservability.Infrastructure.Recommendations;
 
 namespace TokenObservability.Jobs;
 
@@ -32,8 +34,61 @@ public static class TokenObservabilityJobsCommandLine
             return RunRefreshPricingAsync(args, output, tenantMetadataStore, pricingRefreshService);
         }
 
+        if (StringComparer.Ordinal.Equals(command.Name, "generate-recommendations"))
+        {
+            return RunGenerateRecommendationsAsync(args, output, tenantMetadataStore);
+        }
+
         output.WriteLine($"Token Observability job command '{command.Name}' is a placeholder.");
         return Task.FromResult(0);
+    }
+
+    private static async Task<int> RunGenerateRecommendationsAsync(
+        IReadOnlyList<string> args,
+        TextWriter output,
+        InMemoryTenantMetadataStore? tenantMetadataStore)
+    {
+        var customerOrganizationId = ReadRecommendationCustomerOrganizationId(args, output);
+        var agentSessionId = ReadRecommendationAgentSessionId(args, output);
+        if (customerOrganizationId is null || string.IsNullOrWhiteSpace(agentSessionId))
+        {
+            output.WriteLine("No raw prompt text, code content, command output, or tool results were read or emitted.");
+            return 2;
+        }
+
+        if (tenantMetadataStore is null)
+        {
+            output.WriteLine("generate-recommendations requires a loaded tenant metadata store.");
+            output.WriteLine("No recommendation records were changed.");
+            return 2;
+        }
+
+        try
+        {
+            if (await tenantMetadataStore.FindCustomerOrganizationAsync(customerOrganizationId.Value) is null)
+            {
+                output.WriteLine("generate-recommendations requires a tenant metadata store with the target customer organization loaded.");
+                output.WriteLine("No recommendation records were changed.");
+                return 2;
+            }
+
+            var generator = new DeterministicRecommendationGenerator(tenantMetadataStore);
+            var recommendations = await generator.GenerateForSessionAsync(
+                new GenerateRecommendationsRequest(
+                    customerOrganizationId.Value,
+                    agentSessionId!,
+                    ReadOption(args, "--correlation-id") ?? $"generate-recommendations-{Guid.NewGuid():N}"));
+
+            output.WriteLine($"Created {recommendations.Count} deterministic recommendation record(s).");
+            output.WriteLine("Recommendation evidence packets contain metadata and hashes only.");
+            return 0;
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or JsonException)
+        {
+            output.WriteLine($"generate-recommendations failed: {ex.Message}");
+            output.WriteLine("No raw prompt text, code content, command output, or tool results were emitted.");
+            return 2;
+        }
     }
 
     private static async Task<int> RunRefreshPricingAsync(
@@ -139,6 +194,36 @@ public static class TokenObservabilityJobsCommandLine
         }
 
         return new CustomerOrganizationId(parsed);
+    }
+
+    private static CustomerOrganizationId? ReadRecommendationCustomerOrganizationId(IReadOnlyList<string> args, TextWriter output)
+    {
+        var rawCustomerOrganizationId = ReadOption(args, "--customer-organization-id");
+        if (string.IsNullOrWhiteSpace(rawCustomerOrganizationId))
+        {
+            output.WriteLine("generate-recommendations requires --customer-organization-id.");
+            return null;
+        }
+
+        if (!Guid.TryParse(rawCustomerOrganizationId, out var parsed) || parsed == Guid.Empty)
+        {
+            output.WriteLine("generate-recommendations requires a valid non-empty --customer-organization-id.");
+            return null;
+        }
+
+        return new CustomerOrganizationId(parsed);
+    }
+
+    private static string? ReadRecommendationAgentSessionId(IReadOnlyList<string> args, TextWriter output)
+    {
+        var agentSessionId = ReadOption(args, "--agent-session-id");
+        if (string.IsNullOrWhiteSpace(agentSessionId))
+        {
+            output.WriteLine("generate-recommendations requires --agent-session-id.");
+            return null;
+        }
+
+        return agentSessionId.Trim();
     }
 
     private static string? ReadOption(IReadOnlyList<string> args, string name)
