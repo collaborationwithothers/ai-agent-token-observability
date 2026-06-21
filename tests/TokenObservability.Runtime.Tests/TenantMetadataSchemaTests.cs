@@ -418,6 +418,63 @@ public sealed class TenantMetadataSchemaTests
     }
 
     [Fact]
+    public void PostgreSqlTenantMetadataMigrationPersistsRecommendationEvidenceWorkflow()
+    {
+        var root = FindRepositoryRoot();
+        var migrationPath = Path.Combine(
+            root,
+            "src",
+            "TokenObservability.Infrastructure",
+            "Persistence",
+            "PostgreSql",
+            "Migrations",
+            "0001_tenant_metadata.sql");
+
+        var migration = File.ReadAllText(migrationPath);
+
+        Assert.Contains("CREATE TABLE IF NOT EXISTS recommendation", migration);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS recommendation_evidence", migration);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS recommendation_regeneration_request", migration);
+        Assert.Contains("recommendation_id uuid PRIMARY KEY", migration);
+        Assert.Contains("recommendation_evidence_id uuid PRIMARY KEY", migration);
+        Assert.Contains("recommendation_regeneration_request_id uuid PRIMARY KEY", migration);
+        Assert.Contains("customer_organization_id uuid NOT NULL", migration);
+        Assert.Contains("agent_session_id text NOT NULL", migration);
+        Assert.Contains("token_hotspot_id uuid NULL", migration);
+        Assert.Contains("recommendation_kind text NOT NULL", migration);
+        Assert.Contains("recommendation_state text NOT NULL", migration);
+        Assert.Contains("authority_state text NOT NULL", migration);
+        Assert.Contains("confidence text NOT NULL", migration);
+        Assert.Contains("validation_state text NOT NULL", migration);
+        Assert.Contains("visibility_scope text NOT NULL", migration);
+        Assert.Contains("evidence_packet_json jsonb NOT NULL", migration);
+        Assert.Contains("evidence_packet_hash text NOT NULL", migration);
+        Assert.Contains("policy_metadata_json jsonb NOT NULL", migration);
+        Assert.Contains("CONSTRAINT fk_recommendation_agent_session", migration);
+        Assert.Contains("CONSTRAINT fk_recommendation_token_hotspot", migration);
+        Assert.Contains("CONSTRAINT fk_recommendation_audit_event", migration);
+        Assert.Contains("CONSTRAINT fk_recommendation_evidence_recommendation", migration);
+        Assert.Contains("CONSTRAINT fk_recommendation_regeneration_audit_event", migration);
+        Assert.Contains("ck_recommendation_kind CHECK (recommendation_kind IN ('deterministic', 'llm_assisted', 'mixed'))", migration);
+        Assert.Contains("ck_recommendation_state CHECK (recommendation_state IN ('candidate', 'accepted', 'rejected', 'expired', 'superseded'))", migration);
+        Assert.Contains("ck_recommendation_authority_state CHECK (authority_state IN ('deterministic', 'llm_assisted', 'llm_inferred_candidate', 'rejected'))", migration);
+        Assert.Contains("ck_recommendation_confidence CHECK (confidence IN ('low', 'medium', 'high'))", migration);
+        Assert.Contains("ck_recommendation_evidence_packet_json", migration);
+        Assert.Contains("ix_recommendation_session_state", migration);
+        Assert.Contains("ix_recommendation_regeneration_customer_state", migration);
+
+        var recommendationSection = migration[migration.IndexOf(
+            "CREATE TABLE IF NOT EXISTS recommendation",
+            StringComparison.Ordinal)..];
+        Assert.DoesNotContain("raw_prompt", recommendationSection, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("prompt_text", recommendationSection, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("code_content", recommendationSection, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("command_output", recommendationSection, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("tool_result", recommendationSection, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("developer_rank", recommendationSection, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void PostgreSqlCustomerOrganizationSlugConstraintMatchesTerraformSlugValidation()
     {
         var root = FindRepositoryRoot();

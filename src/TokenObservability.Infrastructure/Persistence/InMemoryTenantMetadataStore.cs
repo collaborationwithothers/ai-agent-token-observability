@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using TokenObservability.Domain.Authorization;
 using TokenObservability.Domain.Ingestion;
 using TokenObservability.Domain.Pricing;
+using TokenObservability.Domain.Recommendations;
 using TokenObservability.Domain.Tenancy;
 
 namespace TokenObservability.Infrastructure.Persistence;
@@ -76,7 +77,17 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
         "token_type",
         "billing_route",
         "source_kind",
-        "review_state"
+        "review_state",
+        "recommendation_kind",
+        "authority_state",
+        "validation_state",
+        "evidence_packet_version",
+        "content_capture_policy_version",
+        "recommendation_model_policy_version",
+        "pricing_basis_version",
+        "reason",
+        "agent_session_id",
+        "token_hotspot_id"
     };
 
     private readonly Dictionary<CustomerOrganizationId, CustomerOrganization> customerOrganizations = [];
@@ -100,6 +111,10 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
     private readonly Dictionary<ProductApiIdempotencyKey, ProductApiIdempotencyRecord> productApiIdempotencyRecords = [];
     private readonly Dictionary<TokenHotspotId, TokenHotspotRecord> tokenHotspots = [];
     private readonly Dictionary<TokenHotspotDetectionKey, TokenHotspotId> tokenHotspotDetectionKeyIndex = [];
+    private readonly Dictionary<RecommendationId, RecommendationRecord> recommendations = [];
+    private readonly Dictionary<RecommendationGenerationKey, RecommendationId> recommendationGenerationKeyIndex = [];
+    private readonly Dictionary<RecommendationEvidenceId, RecommendationEvidenceRecord> recommendationEvidenceRecords = [];
+    private readonly Dictionary<RecommendationRegenerationRequestId, RecommendationRegenerationRequest> recommendationRegenerationRequests = [];
     private readonly Dictionary<AggregateMetricPointId, AggregateMetricPointRecord> aggregateMetricPoints = [];
     private readonly List<AggregateTokenTimelineBucket> aggregateTokenTimelineBuckets = [];
     private readonly Dictionary<AggregateMetricExportFailureId, AggregateMetricExportFailureRecord> aggregateMetricExportFailures = [];
@@ -1526,6 +1541,266 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
                         StringComparer.Ordinal.Equals(hotspot.AgentSessionId, normalizedAgentSessionId))
                     .OrderBy(hotspot => hotspot.CreatedAtUtc)
                     .ThenBy(hotspot => hotspot.TokenHotspotId.ToString(), StringComparer.Ordinal)
+                    .ToArray());
+        }
+    }
+
+    public Task<RecommendationRecord> CreateRecommendationAsync(
+        CreateRecommendationRecordRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var agentSessionId = NormalizeRequiredText(request.AgentSessionId, nameof(request.AgentSessionId));
+        var evidencePacketVersion = NormalizeRequiredText(request.EvidencePacketVersion, nameof(request.EvidencePacketVersion));
+        var evidencePacketJson = NormalizeJsonObject(request.EvidencePacketJson, nameof(request.EvidencePacketJson));
+        var evidencePacketHash = NormalizeSha256Hex(request.EvidencePacketHash, nameof(request.EvidencePacketHash));
+        var summary = NormalizeRecommendationText(request.Summary, nameof(request.Summary));
+        var rationale = NormalizeRecommendationText(request.Rationale, nameof(request.Rationale));
+        var recommendedAction = NormalizeRecommendationText(request.RecommendedAction, nameof(request.RecommendedAction));
+        var expectedBenefit = NormalizeRecommendationText(request.ExpectedBenefit, nameof(request.ExpectedBenefit));
+        var evidenceReferenceIds = NormalizeRecommendationEvidenceReferences(request.EvidenceReferenceIds);
+        var policyMetadata = NormalizeEvidenceMetadata(request.PolicyMetadata);
+        var auditEventId = NormalizeRequiredText(request.AuditEventId, nameof(request.AuditEventId));
+        var correlationId = NormalizeRequiredText(request.CorrelationId, nameof(request.CorrelationId));
+        var ruleId = string.IsNullOrWhiteSpace(request.RuleId)
+            ? null
+            : NormalizeRequiredText(request.RuleId, nameof(request.RuleId));
+        var generationKey = string.IsNullOrWhiteSpace(request.GenerationKey)
+            ? null
+            : NormalizeRequiredText(request.GenerationKey, nameof(request.GenerationKey));
+
+        ValidateRecommendationAuthority(request);
+        ValidateSafeRecommendationText(summary, rationale, recommendedAction, expectedBenefit);
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+            if (!agentSessions.TryGetValue(agentSessionId, out var session) ||
+                session.CustomerOrganizationId != request.CustomerOrganizationId)
+            {
+                throw new InvalidOperationException("Recommendation session does not belong to the customer organization.");
+            }
+
+            if (request.TokenHotspotId is { } tokenHotspotId)
+            {
+                if (!tokenHotspots.TryGetValue(tokenHotspotId, out var hotspot) ||
+                    hotspot.CustomerOrganizationId != request.CustomerOrganizationId ||
+                    !StringComparer.Ordinal.Equals(hotspot.AgentSessionId, agentSessionId))
+                {
+                    throw new InvalidOperationException("Recommendation hotspot does not belong to the customer organization and session.");
+                }
+            }
+
+            if (generationKey is not null)
+            {
+                var key = new RecommendationGenerationKey(request.CustomerOrganizationId, generationKey);
+                if (recommendationGenerationKeyIndex.TryGetValue(key, out var existingRecommendationId) &&
+                    recommendations.TryGetValue(existingRecommendationId, out var existingRecommendation))
+                {
+                    return Task.FromResult(existingRecommendation);
+                }
+            }
+
+            var now = clock.UtcNow.ToUniversalTime();
+            CreateGovernanceAuditEventUnderLock(
+                auditEventId,
+                request.CustomerOrganizationId,
+                actorProductUserId: null,
+                effectiveRole: null,
+                ProductAuthorizationAction.RecommendationRegenerate,
+                targetResourceKind: "recommendation",
+                targetResourceId: generationKey ?? agentSessionId,
+                decision: "created",
+                denialReason: null,
+                correlationId,
+                new Dictionary<string, string>(policyMetadata, StringComparer.Ordinal)
+                {
+                    ["operation"] = "recommendation_generation",
+                    ["result"] = ToWireRecommendationState(request.State),
+                    ["recommendation_kind"] = ToWireRecommendationKind(request.Kind),
+                    ["authority_state"] = ToWireRecommendationAuthorityState(request.AuthorityState),
+                    ["validation_state"] = ToWireRecommendationValidationState(request.ValidationState),
+                    ["evidence_packet_version"] = evidencePacketVersion
+                },
+                now);
+
+            var recommendation = new RecommendationRecord(
+                RecommendationId.NewId(),
+                request.CustomerOrganizationId,
+                agentSessionId,
+                request.TokenHotspotId,
+                ruleId,
+                request.Kind,
+                request.State,
+                request.AuthorityState,
+                request.Confidence,
+                request.ValidationState,
+                request.VisibilityScope,
+                evidencePacketVersion,
+                evidencePacketJson,
+                evidencePacketHash,
+                summary,
+                rationale,
+                recommendedAction,
+                expectedBenefit,
+                string.IsNullOrWhiteSpace(request.ModelPolicyVersionId) ? null : request.ModelPolicyVersionId.Trim(),
+                string.IsNullOrWhiteSpace(request.PromptTemplateVersion) ? null : request.PromptTemplateVersion.Trim(),
+                evidenceReferenceIds,
+                policyMetadata,
+                auditEventId,
+                generationKey,
+                now);
+
+            recommendations.Add(recommendation.RecommendationId, recommendation);
+            if (generationKey is not null)
+            {
+                recommendationGenerationKeyIndex.Add(
+                    new RecommendationGenerationKey(request.CustomerOrganizationId, generationKey),
+                    recommendation.RecommendationId);
+            }
+
+            foreach (var evidenceReferenceId in evidenceReferenceIds)
+            {
+                var evidence = new RecommendationEvidenceRecord(
+                    RecommendationEvidenceId.NewId(),
+                    request.CustomerOrganizationId,
+                    recommendation.RecommendationId,
+                    request.TokenHotspotId?.ToString() == evidenceReferenceId
+                        ? RecommendationEvidenceKind.TokenHotspot
+                        : RecommendationEvidenceKind.TokenObservation,
+                    evidenceReferenceId,
+                    request.AuthorityState == RecommendationAuthorityState.LlmInferredCandidate
+                        ? RecommendationEvidenceState.LlmInferred
+                        : RecommendationEvidenceState.Observed,
+                    now);
+                recommendationEvidenceRecords.Add(evidence.RecommendationEvidenceId, evidence);
+            }
+
+            return Task.FromResult(recommendation);
+        }
+    }
+
+    public Task<IReadOnlyList<RecommendationRecord>> ListRecommendationsForSessionAsync(
+        CustomerOrganizationId customerOrganizationId,
+        string agentSessionId)
+    {
+        var normalizedAgentSessionId = NormalizeRequiredText(agentSessionId, nameof(agentSessionId));
+
+        lock (gate)
+        {
+            return Task.FromResult<IReadOnlyList<RecommendationRecord>>(
+                recommendations.Values
+                    .Where(recommendation =>
+                        recommendation.CustomerOrganizationId == customerOrganizationId &&
+                        StringComparer.Ordinal.Equals(recommendation.AgentSessionId, normalizedAgentSessionId))
+                    .OrderBy(recommendation => recommendation.CreatedAtUtc)
+                    .ThenBy(recommendation => recommendation.RecommendationId.ToString(), StringComparer.Ordinal)
+                    .ToArray());
+        }
+    }
+
+    public Task<RecommendationRecord?> FindRecommendationAsync(
+        CustomerOrganizationId customerOrganizationId,
+        RecommendationId recommendationId)
+    {
+        lock (gate)
+        {
+            return Task.FromResult(
+                recommendations.TryGetValue(recommendationId, out var recommendation) &&
+                recommendation.CustomerOrganizationId == customerOrganizationId
+                    ? recommendation
+                    : null);
+        }
+    }
+
+    public Task<RecommendationRegenerationRequest> CreateRecommendationRegenerationRequestAsync(
+        CreateRecommendationRegenerationRequest request,
+        ProductUserId actorProductUserId,
+        ProductRole actorEffectiveRole)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var reason = NormalizeRecommendationRegenerationReason(request.Reason, nameof(request.Reason));
+        var auditEventId = NormalizeRequiredText(request.AuditEventId, nameof(request.AuditEventId));
+        var correlationId = NormalizeRequiredText(request.CorrelationId, nameof(request.CorrelationId));
+        if (request.AgentSessionId is null && request.TokenHotspotId is null)
+        {
+            throw new ArgumentException("Recommendation regeneration requires a session or hotspot target.", nameof(request));
+        }
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+            RequireProductUserForCustomerOrganization(request.CustomerOrganizationId, actorProductUserId);
+
+            var normalizedAgentSessionId = string.IsNullOrWhiteSpace(request.AgentSessionId)
+                ? null
+                : NormalizeRequiredText(request.AgentSessionId, nameof(request.AgentSessionId));
+            if (normalizedAgentSessionId is not null &&
+                (!agentSessions.TryGetValue(normalizedAgentSessionId, out var session) ||
+                    session.CustomerOrganizationId != request.CustomerOrganizationId))
+            {
+                throw new InvalidOperationException("Recommendation regeneration session does not belong to the customer organization.");
+            }
+
+            if (request.TokenHotspotId is { } tokenHotspotId &&
+                (!tokenHotspots.TryGetValue(tokenHotspotId, out var hotspot) ||
+                    hotspot.CustomerOrganizationId != request.CustomerOrganizationId))
+            {
+                throw new InvalidOperationException("Recommendation regeneration hotspot does not belong to the customer organization.");
+            }
+
+            var now = clock.UtcNow.ToUniversalTime();
+            var regenerationRequest = new RecommendationRegenerationRequest(
+                RecommendationRegenerationRequestId.NewId(),
+                request.CustomerOrganizationId,
+                normalizedAgentSessionId,
+                request.TokenHotspotId,
+                reason,
+                RecommendationRegenerationState.Queued,
+                auditEventId,
+                correlationId,
+                now);
+
+            CreateGovernanceAuditEventUnderLock(
+                auditEventId,
+                request.CustomerOrganizationId,
+                actorProductUserId,
+                actorEffectiveRole,
+                ProductAuthorizationAction.RecommendationRegenerate,
+                targetResourceKind: "recommendation_regeneration_request",
+                targetResourceId: regenerationRequest.RecommendationRegenerationRequestId.ToString(),
+                decision: "created",
+                denialReason: null,
+                correlationId,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["operation"] = "recommendation_regeneration_request",
+                    ["result"] = "queued",
+                    ["reason"] = reason,
+                    ["agent_session_id"] = normalizedAgentSessionId ?? "not_provided",
+                    ["token_hotspot_id"] = request.TokenHotspotId?.ToString() ?? "not_provided"
+                },
+                now);
+
+            recommendationRegenerationRequests.Add(
+                regenerationRequest.RecommendationRegenerationRequestId,
+                regenerationRequest);
+
+            return Task.FromResult(regenerationRequest);
+        }
+    }
+
+    public Task<IReadOnlyList<RecommendationRegenerationRequest>> ListRecommendationRegenerationRequestsAsync(
+        CustomerOrganizationId customerOrganizationId)
+    {
+        lock (gate)
+        {
+            return Task.FromResult<IReadOnlyList<RecommendationRegenerationRequest>>(
+                recommendationRegenerationRequests.Values
+                    .Where(request => request.CustomerOrganizationId == customerOrganizationId)
+                    .OrderBy(request => request.CreatedAtUtc)
+                    .ThenBy(request => request.RecommendationRegenerationRequestId.ToString(), StringComparer.Ordinal)
                     .ToArray());
         }
     }
@@ -3720,6 +3995,186 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
         return string.IsNullOrWhiteSpace(value) ? null : NormalizeHash(value, parameterName);
     }
 
+    private static string NormalizeSha256Hex(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName).ToUpperInvariant();
+        return normalized.Length == 64 && normalized.All(char.IsAsciiHexDigit)
+            ? normalized
+            : throw new ArgumentException("Evidence packet hash must be sha256 hex.", parameterName);
+    }
+
+    private static string NormalizeJsonObject(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+        using var document = System.Text.Json.JsonDocument.Parse(normalized);
+        if (document.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object)
+        {
+            throw new ArgumentException("JSON value must be an object.", parameterName);
+        }
+
+        return normalized;
+    }
+
+    private static string NormalizeRecommendationText(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+        if (normalized.Length > 1024)
+        {
+            throw new ArgumentException("Recommendation text must be 1024 characters or less.", parameterName);
+        }
+
+        return normalized;
+    }
+
+    private static IReadOnlyList<string> NormalizeRecommendationEvidenceReferences(
+        IReadOnlyList<string> evidenceReferenceIds)
+    {
+        if (evidenceReferenceIds.Count is 0 or > 64)
+        {
+            throw new ArgumentException("Recommendation evidence references require between 1 and 64 references.", nameof(evidenceReferenceIds));
+        }
+
+        return evidenceReferenceIds
+            .Select(static reference => NormalizeRequiredText(reference, nameof(evidenceReferenceIds)))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private static string NormalizeRecommendationRegenerationReason(string value, string parameterName)
+    {
+        var normalized = NormalizeRequiredText(value, parameterName);
+        if (normalized.Length > 128 || !IsSafeResourceId(normalized))
+        {
+            throw new ArgumentException("Recommendation regeneration reason must be a bounded reason code.", parameterName);
+        }
+
+        if (SensitiveEvidenceValueFragments.Any(fragment => normalized.Contains(fragment, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new ArgumentException("Recommendation regeneration reason must not store captured content or secrets.", parameterName);
+        }
+
+        return normalized;
+    }
+
+    private static void ValidateSafeRecommendationText(params string[] values)
+    {
+        foreach (var value in values)
+        {
+            if (UnsupportedHotspotSummaryFragments.Any(fragment => value.Contains(fragment, StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new ArgumentException("Recommendation text must not contain blame, ranking, or unsupported user-error claims.", nameof(values));
+            }
+
+            if (SensitiveEvidenceValueFragments.Any(fragment => value.Contains(fragment, StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new ArgumentException("Recommendation text must not store captured content or secrets.", nameof(values));
+            }
+        }
+    }
+
+    private static void ValidateRecommendationAuthority(CreateRecommendationRecordRequest request)
+    {
+        if (request.Kind == RecommendationKind.Deterministic &&
+            request.AuthorityState != RecommendationAuthorityState.Deterministic)
+        {
+            throw new ArgumentException("Deterministic recommendations require deterministic authority.", nameof(request));
+        }
+
+        if (request.AuthorityState == RecommendationAuthorityState.LlmInferredCandidate &&
+            request.State == RecommendationState.Accepted)
+        {
+            throw new ArgumentException("LLM-inferred recommendations must remain candidates until product validation.", nameof(request));
+        }
+
+        if (request.ValidationState == RecommendationValidationState.Rejected &&
+            request.State is not RecommendationState.Rejected)
+        {
+            throw new ArgumentException("Rejected validation state requires rejected recommendation state.", nameof(request));
+        }
+    }
+
+    public static string ToWireRecommendationKind(RecommendationKind kind)
+    {
+        return kind switch
+        {
+            RecommendationKind.Deterministic => "deterministic",
+            RecommendationKind.LlmAssisted => "llm_assisted",
+            RecommendationKind.Mixed => "mixed",
+            _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null)
+        };
+    }
+
+    public static string ToWireRecommendationState(RecommendationState state)
+    {
+        return state switch
+        {
+            RecommendationState.Candidate => "candidate",
+            RecommendationState.Accepted => "accepted",
+            RecommendationState.Rejected => "rejected",
+            RecommendationState.Expired => "expired",
+            RecommendationState.Superseded => "superseded",
+            _ => throw new ArgumentOutOfRangeException(nameof(state), state, null)
+        };
+    }
+
+    public static string ToWireRecommendationAuthorityState(RecommendationAuthorityState authorityState)
+    {
+        return authorityState switch
+        {
+            RecommendationAuthorityState.Deterministic => "deterministic",
+            RecommendationAuthorityState.LlmAssisted => "llm_assisted",
+            RecommendationAuthorityState.LlmInferredCandidate => "llm_inferred_candidate",
+            RecommendationAuthorityState.Rejected => "rejected",
+            _ => throw new ArgumentOutOfRangeException(nameof(authorityState), authorityState, null)
+        };
+    }
+
+    public static string ToWireRecommendationConfidence(RecommendationConfidence confidence)
+    {
+        return confidence switch
+        {
+            RecommendationConfidence.Low => "low",
+            RecommendationConfidence.Medium => "medium",
+            RecommendationConfidence.High => "high",
+            _ => throw new ArgumentOutOfRangeException(nameof(confidence), confidence, null)
+        };
+    }
+
+    public static string ToWireRecommendationValidationState(RecommendationValidationState validationState)
+    {
+        return validationState switch
+        {
+            RecommendationValidationState.Pending => "pending",
+            RecommendationValidationState.Validated => "validated",
+            RecommendationValidationState.Rejected => "rejected",
+            _ => throw new ArgumentOutOfRangeException(nameof(validationState), validationState, null)
+        };
+    }
+
+    public static string ToWireRecommendationVisibilityScope(RecommendationVisibilityScope visibilityScope)
+    {
+        return visibilityScope switch
+        {
+            RecommendationVisibilityScope.Self => "self",
+            RecommendationVisibilityScope.TeamScoped => "team_scoped",
+            RecommendationVisibilityScope.SecurityReview => "security_review",
+            RecommendationVisibilityScope.Admin => "admin",
+            RecommendationVisibilityScope.AggregateOnly => "aggregate_only",
+            _ => throw new ArgumentOutOfRangeException(nameof(visibilityScope), visibilityScope, null)
+        };
+    }
+
+    public static string ToWireRecommendationRegenerationState(RecommendationRegenerationState state)
+    {
+        return state switch
+        {
+            RecommendationRegenerationState.Queued => "queued",
+            RecommendationRegenerationState.Completed => "completed",
+            RecommendationRegenerationState.Failed => "failed",
+            _ => throw new ArgumentOutOfRangeException(nameof(state), state, null)
+        };
+    }
+
     private static string NormalizeDecision(string decision)
     {
         var normalizedDecision = NormalizeRequiredText(decision, nameof(decision)).ToLowerInvariant();
@@ -3859,6 +4314,16 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
             "token_type" => value is "input" or "output" or "cached_input" or "reasoning_output",
             "source_kind" => value is "automated_seed" or "admin_override" or "provider_docs" or "enterprise_contract",
             "review_state" => value is "candidate" or "approved" or "rejected" or "superseded",
+            "recommendation_kind" => value is "deterministic" or "llm_assisted" or "mixed",
+            "authority_state" => value is "deterministic" or "llm_assisted" or "llm_inferred_candidate" or "rejected",
+            "validation_state" => value is "pending" or "validated" or "rejected",
+            "evidence_packet_version" => IsSafeResourceId(value),
+            "content_capture_policy_version" => IsSafeResourceId(value),
+            "recommendation_model_policy_version" => IsSafeResourceId(value),
+            "pricing_basis_version" => IsSafeResourceId(value),
+            "reason" => IsSafeResourceId(value),
+            "agent_session_id" => IsSafeResourceId(value),
+            "token_hotspot_id" => IsSafeResourceId(value),
             _ => false
         };
 
@@ -4368,6 +4833,10 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IP
     private readonly record struct TokenHotspotDetectionKey(
         CustomerOrganizationId CustomerOrganizationId,
         string DetectionKey);
+
+    private readonly record struct RecommendationGenerationKey(
+        CustomerOrganizationId CustomerOrganizationId,
+        string GenerationKey);
 
     private sealed record NormalizedPricingBasisRequest(
         string Harness,

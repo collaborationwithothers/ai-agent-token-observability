@@ -6,6 +6,7 @@ using Microsoft.Extensions.Options;
 using TokenObservability.Domain.Authorization;
 using TokenObservability.Domain.Ingestion;
 using TokenObservability.Domain.Pricing;
+using TokenObservability.Domain.Recommendations;
 using TokenObservability.Domain.Tenancy;
 using TokenObservability.Infrastructure.Ingestion;
 using TokenObservability.Infrastructure.Persistence;
@@ -51,6 +52,9 @@ internal static class TokenObservabilityApiEndpointExtensions
         api.MapPost("/pricing/basis/{pricingBasisId}/reject", RejectPricingBasis);
         api.MapGet("/grafana/drilldown", GetGrafanaDrilldown);
         api.MapGet("/sessions", GetSessions);
+        api.MapGet("/sessions/{sessionId}/recommendations", GetSessionRecommendations);
+        api.MapGet("/recommendations/{recommendationId}", GetRecommendation);
+        api.MapPost("/recommendations/regeneration-requests", CreateRecommendationRegenerationRequest);
     }
 
     private static IResult GetHealth()
@@ -340,6 +344,182 @@ internal static class TokenObservabilityApiEndpointExtensions
             nextCursor = (string?)null,
             totalEstimate = visibleSessions.Length
         });
+    }
+
+    private static async Task<IResult> GetSessionRecommendations(
+        string sessionId,
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        InMemoryTenantMetadataStore tenantMetadataStore)
+    {
+        var resolution = await ResolveRecommendationAuthorizationAsync(
+            httpContext,
+            authorizationContextResolver,
+            ProductAuthorizationAction.RecommendationRead);
+
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
+        }
+
+        var customerOrganizationId = resolution.Context.CustomerOrganization.CustomerOrganizationId;
+        var session = await FindSessionAsync(tenantMetadataStore, customerOrganizationId, sessionId);
+        if (session is null)
+        {
+            return CreateProblem(httpContext, "Session was not found.", StatusCodes.Status404NotFound, "session_not_found");
+        }
+
+        if (!CanAccessRecommendationSession(resolution.Context, session))
+        {
+            return CreateProblem(httpContext, "Recommendation access is denied.", StatusCodes.Status403Forbidden, "recommendation_access_denied");
+        }
+
+        var recommendations = await tenantMetadataStore.ListRecommendationsForSessionAsync(
+            customerOrganizationId,
+            session.AgentSessionId);
+
+        return Results.Ok(new
+        {
+            items = recommendations.Select(ToRecommendationResponse).ToArray(),
+            nextCursor = (string?)null,
+            totalEstimate = recommendations.Count
+        });
+    }
+
+    private static async Task<IResult> GetRecommendation(
+        string recommendationId,
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        InMemoryTenantMetadataStore tenantMetadataStore)
+    {
+        if (!Guid.TryParse(recommendationId, out var parsedRecommendationId) || parsedRecommendationId == Guid.Empty)
+        {
+            return CreateProblem(httpContext, "Recommendation id is invalid.", StatusCodes.Status400BadRequest, "invalid_recommendation_id");
+        }
+
+        var resolution = await ResolveRecommendationAuthorizationAsync(
+            httpContext,
+            authorizationContextResolver,
+            ProductAuthorizationAction.RecommendationRead);
+
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
+        }
+
+        var customerOrganizationId = resolution.Context.CustomerOrganization.CustomerOrganizationId;
+        var recommendation = await tenantMetadataStore.FindRecommendationAsync(
+            customerOrganizationId,
+            new RecommendationId(parsedRecommendationId));
+        if (recommendation is null)
+        {
+            return CreateProblem(httpContext, "Recommendation was not found.", StatusCodes.Status404NotFound, "recommendation_not_found");
+        }
+
+        var session = await FindSessionAsync(tenantMetadataStore, customerOrganizationId, recommendation.AgentSessionId);
+        if (session is null)
+        {
+            return CreateProblem(httpContext, "Session was not found.", StatusCodes.Status404NotFound, "session_not_found");
+        }
+
+        if (!CanAccessRecommendationSession(resolution.Context, session))
+        {
+            return CreateProblem(httpContext, "Recommendation access is denied.", StatusCodes.Status403Forbidden, "recommendation_access_denied");
+        }
+
+        return Results.Ok(ToRecommendationResponse(recommendation));
+    }
+
+    private static async Task<IResult> CreateRecommendationRegenerationRequest(
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        InMemoryTenantMetadataStore tenantMetadataStore,
+        IProductApiIdempotencyStore idempotencyStore)
+    {
+        if (!HasIdempotencyKey(httpContext))
+        {
+            return CreateProblem(httpContext, "Idempotency key required.", StatusCodes.Status400BadRequest, "idempotency_key_required");
+        }
+
+        var resolution = await ResolveRecommendationAuthorizationAsync(
+            httpContext,
+            authorizationContextResolver,
+            ProductAuthorizationAction.RecommendationRegenerate);
+
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
+        }
+
+        var rawBody = await ReadRequestBodyAsync(httpContext);
+        var idempotency = await ResolvePricingMutationIdempotencyAsync(
+            httpContext,
+            resolution.Context,
+            idempotencyStore,
+            rawBody);
+        if (idempotency.Result is not null)
+        {
+            return idempotency.Result;
+        }
+
+        var body = DeserializePricingMutationBody<RecommendationRegenerationBody>(rawBody);
+        if (body is null)
+        {
+            return CreateProblem(httpContext, "Recommendation regeneration request body required.", StatusCodes.Status400BadRequest, "recommendation_regeneration_body_required");
+        }
+
+        var tokenHotspotId = ParseOptionalTokenHotspotId(body.TokenHotspotId);
+        if (!string.IsNullOrWhiteSpace(body.TokenHotspotId) && tokenHotspotId is null)
+        {
+            return CreateProblem(httpContext, "Recommendation regeneration hotspot id is invalid.", StatusCodes.Status400BadRequest, "invalid_token_hotspot_id");
+        }
+
+        var targetSession = await FindRecommendationTargetSessionAsync(
+            tenantMetadataStore,
+            resolution.Context.CustomerOrganization.CustomerOrganizationId,
+            body.AgentSessionId,
+            tokenHotspotId);
+        if (targetSession is null)
+        {
+            return CreateProblem(httpContext, "Recommendation regeneration target was not found.", StatusCodes.Status404NotFound, "recommendation_target_not_found");
+        }
+
+        if (!CanAccessRecommendationSession(resolution.Context, targetSession))
+        {
+            return CreateProblem(httpContext, "Recommendation regeneration access is denied.", StatusCodes.Status403Forbidden, "recommendation_access_denied");
+        }
+
+        try
+        {
+            var request = await tenantMetadataStore.CreateRecommendationRegenerationRequestAsync(
+                new CreateRecommendationRegenerationRequest(
+                    resolution.Context.CustomerOrganization.CustomerOrganizationId,
+                    targetSession.AgentSessionId,
+                    tokenHotspotId,
+                    body.Reason ?? "not_provided",
+                    $"audit-recommendation-regeneration-{Guid.NewGuid():N}",
+                    resolution.Context.CorrelationId),
+                resolution.Context.ProductUser.ProductUserId,
+                resolution.Context.EffectiveRoles.First());
+
+            var location = $"/api/v1/recommendations/regeneration-requests/{request.RecommendationRegenerationRequestId}";
+            return await StorePricingMutationIdempotencyResultAsync(
+                idempotencyStore,
+                resolution.Context,
+                idempotency,
+                request.RecommendationRegenerationRequestId.ToString(),
+                StatusCodes.Status201Created,
+                location,
+                ToRecommendationRegenerationResponse(request));
+        }
+        catch (ArgumentException ex)
+        {
+            return CreateProblem(httpContext, ex.Message, StatusCodes.Status400BadRequest, "invalid_recommendation_regeneration_request");
+        }
+        catch (InvalidOperationException ex)
+        {
+            return CreateProblem(httpContext, ex.Message, StatusCodes.Status409Conflict, "recommendation_regeneration_conflict");
+        }
     }
 
     private static async Task<IResult> GetOverview(
@@ -751,6 +931,87 @@ internal static class TokenObservabilityApiEndpointExtensions
         return selfResolution.IsAllowed ? selfResolution : scopedResolution;
     }
 
+    private static async Task<TokenObservabilityAuthorizationResolution> ResolveRecommendationAuthorizationAsync(
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        ProductAuthorizationAction action)
+    {
+        var organizationResolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            action,
+            new ProductScope(ProductScopeKind.Organization, ScopeId: null));
+
+        if (organizationResolution.IsAllowed)
+        {
+            return organizationResolution;
+        }
+
+        var selfResolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            action,
+            new ProductScope(ProductScopeKind.Self, ScopeId: null));
+
+        return selfResolution.IsAllowed ? selfResolution : organizationResolution;
+    }
+
+    private static async Task<AgentSessionRecord?> FindSessionAsync(
+        InMemoryTenantMetadataStore tenantMetadataStore,
+        CustomerOrganizationId customerOrganizationId,
+        string agentSessionId)
+    {
+        var normalizedAgentSessionId = agentSessionId.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedAgentSessionId))
+        {
+            return null;
+        }
+
+        var sessions = await tenantMetadataStore.ListAgentSessionsAsync(customerOrganizationId);
+        return sessions.SingleOrDefault(session =>
+            StringComparer.Ordinal.Equals(session.AgentSessionId, normalizedAgentSessionId));
+    }
+
+    private static async Task<AgentSessionRecord?> FindRecommendationTargetSessionAsync(
+        InMemoryTenantMetadataStore tenantMetadataStore,
+        CustomerOrganizationId customerOrganizationId,
+        string? agentSessionId,
+        TokenHotspotId? tokenHotspotId)
+    {
+        if (!string.IsNullOrWhiteSpace(agentSessionId))
+        {
+            return await FindSessionAsync(tenantMetadataStore, customerOrganizationId, agentSessionId);
+        }
+
+        if (tokenHotspotId is null)
+        {
+            return null;
+        }
+
+        var sessions = await tenantMetadataStore.ListAgentSessionsAsync(customerOrganizationId);
+        foreach (var session in sessions)
+        {
+            var hotspots = await tenantMetadataStore.ListTokenHotspotsAsync(customerOrganizationId, session.AgentSessionId);
+            if (hotspots.Any(hotspot => hotspot.TokenHotspotId == tokenHotspotId))
+            {
+                return session;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool CanAccessRecommendationSession(
+        TokenObservabilityAuthorizationContext authorizationContext,
+        AgentSessionRecord session)
+    {
+        if (authorizationContext.EffectiveRoles.Any(static role =>
+                role is ProductRole.PlatformAdmin or ProductRole.SecurityReviewer or ProductRole.EngineeringLead))
+        {
+            return true;
+        }
+
+        return session.ProductUserId == authorizationContext.ProductUser.ProductUserId;
+    }
+
     private static IResult CreateProblem(HttpContext httpContext, string title, int statusCode, string code)
     {
         return Results.Problem(
@@ -1070,6 +1331,64 @@ internal static class TokenObservabilityApiEndpointExtensions
         };
     }
 
+    private static object ToRecommendationResponse(RecommendationRecord record)
+    {
+        return new
+        {
+            recommendationId = record.RecommendationId.ToString(),
+            customerOrganizationId = record.CustomerOrganizationId.ToString(),
+            agentSessionId = record.AgentSessionId,
+            tokenHotspotId = record.TokenHotspotId?.ToString(),
+            ruleId = record.RuleId,
+            kind = InMemoryTenantMetadataStore.ToWireRecommendationKind(record.Kind),
+            state = InMemoryTenantMetadataStore.ToWireRecommendationState(record.State),
+            authorityState = InMemoryTenantMetadataStore.ToWireRecommendationAuthorityState(record.AuthorityState),
+            confidence = InMemoryTenantMetadataStore.ToWireRecommendationConfidence(record.Confidence),
+            validationState = InMemoryTenantMetadataStore.ToWireRecommendationValidationState(record.ValidationState),
+            visibilityScope = InMemoryTenantMetadataStore.ToWireRecommendationVisibilityScope(record.VisibilityScope),
+            evidencePacketVersion = record.EvidencePacketVersion,
+            evidencePacketHash = record.EvidencePacketHash,
+            summary = record.Summary,
+            rationale = record.Rationale,
+            recommendedAction = record.RecommendedAction,
+            expectedBenefit = record.ExpectedBenefit,
+            modelPolicyVersionId = record.ModelPolicyVersionId,
+            promptTemplateVersion = record.PromptTemplateVersion,
+            evidenceReferenceIds = record.EvidenceReferenceIds,
+            policyMetadata = record.PolicyMetadata,
+            auditEventId = record.AuditEventId,
+            createdAtUtc = record.CreatedAtUtc
+        };
+    }
+
+    private static object ToRecommendationRegenerationResponse(RecommendationRegenerationRequest request)
+    {
+        return new
+        {
+            recommendationRegenerationRequestId = request.RecommendationRegenerationRequestId.ToString(),
+            customerOrganizationId = request.CustomerOrganizationId.ToString(),
+            agentSessionId = request.AgentSessionId,
+            tokenHotspotId = request.TokenHotspotId?.ToString(),
+            reason = request.Reason,
+            state = InMemoryTenantMetadataStore.ToWireRecommendationRegenerationState(request.State),
+            auditEventId = request.AuditEventId,
+            correlationId = request.CorrelationId,
+            createdAtUtc = request.CreatedAtUtc
+        };
+    }
+
+    private static TokenHotspotId? ParseOptionalTokenHotspotId(string? tokenHotspotId)
+    {
+        if (string.IsNullOrWhiteSpace(tokenHotspotId))
+        {
+            return null;
+        }
+
+        return Guid.TryParse(tokenHotspotId, out var parsed) && parsed != Guid.Empty
+            ? new TokenHotspotId(parsed)
+            : null;
+    }
+
     private static PricingTokenType ParsePricingTokenType(string tokenType)
     {
         return tokenType.Trim().ToLowerInvariant() switch
@@ -1223,6 +1542,11 @@ internal static class TokenObservabilityApiEndpointExtensions
         IReadOnlyDictionary<string, string> SourceMetadata);
 
     private sealed record PricingBasisReviewBody(string? DecisionReason);
+
+    private sealed record RecommendationRegenerationBody(
+        string? AgentSessionId,
+        string? TokenHotspotId,
+        string? Reason);
 
     private sealed record PricingMutationIdempotencyResolution(
         string Route,

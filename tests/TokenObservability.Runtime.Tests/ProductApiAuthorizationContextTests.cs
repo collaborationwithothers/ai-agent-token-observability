@@ -11,6 +11,7 @@ using TokenObservability.Api;
 using TokenObservability.Domain.Authorization;
 using TokenObservability.Domain.Ingestion;
 using TokenObservability.Domain.Pricing;
+using TokenObservability.Domain.Recommendations;
 using TokenObservability.Domain.Tenancy;
 using TokenObservability.Infrastructure.Ingestion;
 using TokenObservability.Infrastructure.Persistence;
@@ -1612,6 +1613,142 @@ public sealed class ProductApiAuthorizationContextTests
                 CorrelationId: "unsafe-harness-rejection-001",
                 AuditEventId: null,
                 EvidenceMetadata: CreateRejectionEvidence("malformed_otlp", "unknown"))));
+    }
+
+    [Fact]
+    public async Task RecommendationRoutesReturnSanitizedSessionRecommendationsAndDetail()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var adminClaims = CreateClaims(subject: "admin-subject", groupObjectIds: ["admin-group"]);
+        var admin = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            adminClaims);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            admin.ProductUserId,
+            "admin-group",
+            ProductRole.PlatformAdmin);
+        var credential = await IssueCredentialAsync(store, seed, "profile-contoso-codex");
+        var session = await SeedTokenSessionAsync(
+            store,
+            credential.Credential,
+            "recommendation-api-session",
+            Now,
+            [(TokenMetricName.InputTokens, 120_000, TokenMetricStatus.Observed, TokenMetricConfidence.Observed, null)]);
+        var recommendation = await store.CreateRecommendationAsync(new CreateRecommendationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            TokenHotspotId: null,
+            RuleId: "rec.high_input_tokens.narrow_context",
+            RecommendationKind.Deterministic,
+            RecommendationState.Accepted,
+            RecommendationAuthorityState.Deterministic,
+            RecommendationConfidence.High,
+            RecommendationValidationState.Validated,
+            RecommendationVisibilityScope.TeamScoped,
+            EvidencePacketVersion: "recommendation.evidence.v1",
+            EvidencePacketJson: "{\"schemaVersion\":\"recommendation.evidence.v1\",\"hiddenEvidence\":[]}",
+            EvidencePacketHash: new string('D', 64),
+            Summary: "Reduce unnecessary context and prefer targeted files.",
+            Rationale: "Observed input token evidence exceeded the configured threshold.",
+            RecommendedAction: "Pass targeted files and summaries.",
+            ExpectedBenefit: "Lower input token use.",
+            ModelPolicyVersionId: null,
+            PromptTemplateVersion: null,
+            EvidenceReferenceIds: [session.AgentSessionId],
+            PolicyMetadata: new Dictionary<string, string> { ["content_capture_policy_version"] = "metadata_only" },
+            AuditEventId: "audit-api-recommendation",
+            CorrelationId: "api-recommendation"));
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+
+        using var listRequest = CreateAuthorizedRequest(
+            HttpMethod.Get,
+            $"/api/v1/sessions/{session.AgentSessionId}/recommendations",
+            "contoso",
+            adminClaims);
+        using var listResponse = await client.SendAsync(listRequest);
+        listResponse.EnsureSuccessStatusCode();
+        using var listBody = await JsonDocument.ParseAsync(await listResponse.Content.ReadAsStreamAsync());
+        var item = Assert.Single(listBody.RootElement.GetProperty("items").EnumerateArray());
+        Assert.Equal(recommendation.RecommendationId.ToString(), item.GetProperty("recommendationId").GetString());
+        Assert.Equal("deterministic", item.GetProperty("kind").GetString());
+        Assert.Equal("accepted", item.GetProperty("state").GetString());
+        Assert.Equal("high", item.GetProperty("confidence").GetString());
+
+        using var detailRequest = CreateAuthorizedRequest(
+            HttpMethod.Get,
+            $"/api/v1/recommendations/{recommendation.RecommendationId}",
+            "contoso",
+            adminClaims);
+        using var detailResponse = await client.SendAsync(detailRequest);
+        detailResponse.EnsureSuccessStatusCode();
+        var detailJson = await detailResponse.Content.ReadAsStringAsync();
+        Assert.Contains("Reduce unnecessary context", detailJson);
+        Assert.DoesNotContain("raw_prompt", detailJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("command_output", detailJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("developerRank", detailJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("blame", detailJson, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task RecommendationRegenerationRequiresIdempotencyAndCreatesAuditEvent()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var adminClaims = CreateClaims(subject: "admin-subject", groupObjectIds: ["admin-group"]);
+        var admin = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            adminClaims);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            admin.ProductUserId,
+            "admin-group",
+            ProductRole.PlatformAdmin);
+        var credential = await IssueCredentialAsync(store, seed, "profile-contoso-codex");
+        var session = await SeedTokenSessionAsync(
+            store,
+            credential.Credential,
+            "recommendation-regen-session",
+            Now,
+            [(TokenMetricName.InputTokens, 120_000, TokenMetricStatus.Observed, TokenMetricConfidence.Observed, null)]);
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+
+        using var missingIdempotency = CreateAuthorizedRequest(
+            HttpMethod.Post,
+            "/api/v1/recommendations/regeneration-requests",
+            "contoso",
+            adminClaims);
+        missingIdempotency.Content = new StringContent(
+            $$"""{"agentSessionId":"{{session.AgentSessionId}}","reason":"policy_changed"}""",
+            Encoding.UTF8,
+            "application/json");
+        using var missingResponse = await client.SendAsync(missingIdempotency);
+        Assert.Equal(HttpStatusCode.BadRequest, missingResponse.StatusCode);
+
+        using var createRequest = CreateAuthorizedRequest(
+            HttpMethod.Post,
+            "/api/v1/recommendations/regeneration-requests",
+            "contoso",
+            adminClaims);
+        createRequest.Headers.Add("Idempotency-Key", "regen-key-1");
+        createRequest.Content = new StringContent(
+            $$"""{"agentSessionId":"{{session.AgentSessionId}}","reason":"policy_changed"}""",
+            Encoding.UTF8,
+            "application/json");
+        using var createResponse = await client.SendAsync(createRequest);
+        Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
+        using var body = await JsonDocument.ParseAsync(await createResponse.Content.ReadAsStreamAsync());
+        Assert.Equal("queued", body.RootElement.GetProperty("state").GetString());
+
+        var auditEvents = await store.ListGovernanceAuditEventsAsync(seed.Organization.CustomerOrganizationId);
+        Assert.Single(auditEvents, audit => audit.EvidenceMetadata["operation"] == "recommendation_regeneration_request");
     }
 
     private static WebApplicationFactory<TokenObservabilityApiAssemblyMarker> CreateFactory(
