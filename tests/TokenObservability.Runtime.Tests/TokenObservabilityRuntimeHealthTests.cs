@@ -3,7 +3,13 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using TokenObservability.Domain.Ingestion;
+using TokenObservability.Domain.Tenancy;
 using TokenObservability.Api;
+using TokenObservability.Infrastructure.Ingestion;
+using TokenObservability.Infrastructure.Persistence;
 using TokenObservability.Ingestion;
 
 namespace TokenObservability.Runtime.Tests;
@@ -15,7 +21,6 @@ public sealed class TokenObservabilityRuntimeHealthTests
         return new TheoryData<string, WebApplicationFactory<TokenObservabilityApiAssemblyMarker>>
         {
             { "/health/live", new WebApplicationFactory<TokenObservabilityApiAssemblyMarker>() },
-            { "/health/ready", new WebApplicationFactory<TokenObservabilityApiAssemblyMarker>() },
             { "/healthz", new WebApplicationFactory<TokenObservabilityApiAssemblyMarker>() },
             { "/api/v1/system/health", new WebApplicationFactory<TokenObservabilityApiAssemblyMarker>() }
         };
@@ -25,8 +30,7 @@ public sealed class TokenObservabilityRuntimeHealthTests
     {
         return new TheoryData<string, WebApplicationFactory<TokenObservabilityIngestionAssemblyMarker>>
         {
-            { "/health/live", new WebApplicationFactory<TokenObservabilityIngestionAssemblyMarker>() },
-            { "/health/ready", new WebApplicationFactory<TokenObservabilityIngestionAssemblyMarker>() }
+            { "/health/live", new WebApplicationFactory<TokenObservabilityIngestionAssemblyMarker>() }
         };
     }
 
@@ -74,8 +78,10 @@ public sealed class TokenObservabilityRuntimeHealthTests
         using var client = factory.CreateClient();
 
         using var response = await client.GetAsync("/readyz");
+        using var healthReadyResponse = await client.GetAsync("/health/ready");
 
         response.EnsureSuccessStatusCode();
+        healthReadyResponse.EnsureSuccessStatusCode();
         var content = await response.Content.ReadAsStringAsync();
         Assert.Contains("product_metadata_store", content);
         Assert.Contains("authorization_enforcement", content);
@@ -98,9 +104,63 @@ public sealed class TokenObservabilityRuntimeHealthTests
     }
 
     [Fact]
+    public async Task TokenObservabilityIngestionReadinessFailsClosedWhenDependenciesAreNotConfigured()
+    {
+        using var factory = new WebApplicationFactory<TokenObservabilityIngestionAssemblyMarker>();
+        using var client = factory.CreateClient();
+
+        using var response = await client.GetAsync("/health/ready");
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        var content = await response.Content.ReadAsStringAsync();
+        Assert.Contains("scoped_ingestion_credentials", content);
+        Assert.Contains("telemetry_acceptance", content);
+        Assert.Contains("not_configured", content);
+        Assert.DoesNotContain("connection", content, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("secret", content, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("password", content, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task TokenObservabilityIngestionReadinessCanSucceedWhenConfigured()
+    {
+        using var factory = CreateIngestionReadinessFactory();
+        using var client = factory.CreateClient();
+
+        using var response = await client.GetAsync("/readyz");
+        using var healthReadyResponse = await client.GetAsync("/health/ready");
+
+        response.EnsureSuccessStatusCode();
+        healthReadyResponse.EnsureSuccessStatusCode();
+        var content = await response.Content.ReadAsStringAsync();
+        Assert.Contains("tenant_metadata_store", content);
+        Assert.Contains("aggregate_metric_sink", content);
+    }
+
+    [Fact]
+    public void ProductDashboardReadinessProxiesProductApiReadinessAndFailsClosedWithoutApiOrigin()
+    {
+        var root = FindRepositoryRoot();
+        var dashboardRoot = Path.Combine(root, "web", "token-observability-dashboard");
+        var nginxConfig = File.ReadAllText(Path.Combine(dashboardRoot, "nginx.conf"));
+        var dockerEntrypoint = File.ReadAllText(Path.Combine(dashboardRoot, "docker-entrypoint.sh"));
+        var appRuntimeLocals = File.ReadAllText(Path.Combine(root, "infrastructure", "azure", "stages", "app_runtime", "locals.tf"));
+
+        Assert.Contains("include /tmp/tokenobs-dashboard-readiness.conf", nginxConfig);
+        Assert.Contains("location = /readyz", dockerEntrypoint);
+        Assert.Contains("proxy_pass ${readiness_origin}/readyz", dockerEntrypoint);
+        Assert.Contains("\"status\":\"not_ready\"", dockerEntrypoint);
+        Assert.Contains("startup_path", appRuntimeLocals);
+        Assert.Contains("\"/healthz\"", appRuntimeLocals);
+        Assert.Contains("liveness_path", appRuntimeLocals);
+        Assert.Contains("readiness_path", appRuntimeLocals);
+        Assert.Contains("startup_probe", File.ReadAllText(Path.Combine(root, "infrastructure", "azure", "stages", "app_runtime", "main.tf")));
+    }
+
+    [Fact]
     public async Task TokenObservabilityApiReadinessCanFailWithoutLeakingConfiguration()
     {
-        using var factory = CreateReadinessFactory(("ProductApi:Readiness:ProductMetadataStore", "false"));
+        using var factory = CreateReadinessFactory(("TOKENOBSERVABILITY_STORAGE_ACCOUNT_NAME", null));
         using var client = factory.CreateClient();
 
         using var response = await client.GetAsync("/readyz");
@@ -167,11 +227,11 @@ public sealed class TokenObservabilityRuntimeHealthTests
     {
         var settings = new Dictionary<string, string?>
         {
-            ["ProductApi:Readiness:ProductMetadataStore"] = "true",
-            ["ProductApi:Readiness:TelemetryBackends"] = "true",
-            ["ProductApi:Readiness:ContentStore"] = "true",
-            ["ProductApi:Readiness:RecommendationDependencies"] = "true",
-            ["ProductApi:Readiness:AuthorizationEnforcement"] = "true"
+            ["CUSTOMER_ORGANIZATION_SLUG"] = "contoso",
+            ["ProductMetadataStore:ConnectionString"] = "Host=postgresql.internal;Database=product_metadata;Username=readiness;Password=not-used",
+            ["APPLICATIONINSIGHTS_CONNECTION_STRING"] = "InstrumentationKey=00000000-0000-0000-0000-000000000000",
+            ["TOKENOBSERVABILITY_STORAGE_ACCOUNT_NAME"] = "sttokenobservability",
+            ["TOKENOBSERVABILITY_RECOMMENDATION_DEPLOYMENT_COUNT"] = "1"
         };
 
         foreach (var (key, value) in overrides)
@@ -180,10 +240,84 @@ public sealed class TokenObservabilityRuntimeHealthTests
         }
 
         return new WebApplicationFactory<TokenObservabilityApiAssemblyMarker>()
-            .WithWebHostBuilder(builder => builder.ConfigureAppConfiguration((_, configuration) =>
+            .WithWebHostBuilder(builder =>
             {
-                configuration.AddInMemoryCollection(settings);
-            }));
+                builder.ConfigureAppConfiguration((_, configuration) =>
+                {
+                    configuration.AddInMemoryCollection(settings);
+                });
+                builder.ConfigureServices(services =>
+                {
+                    var store = CreateReadyTenantStore();
+                    services.RemoveAll<InMemoryTenantMetadataStore>();
+                    services.RemoveAll<ITenantMetadataStore>();
+                    services.RemoveAll<IProductApiIdempotencyStore>();
+                    services.AddSingleton(store);
+                    services.AddSingleton<ITenantMetadataStore>(store);
+                    services.AddSingleton<IProductApiIdempotencyStore>(store);
+                });
+            });
+    }
+
+    private static WebApplicationFactory<TokenObservabilityIngestionAssemblyMarker> CreateIngestionReadinessFactory(
+        params (string Key, string? Value)[] overrides)
+    {
+        var settings = new Dictionary<string, string?>
+        {
+            ["CUSTOMER_ORGANIZATION_SLUG"] = "contoso",
+            ["TOKENOBSERVABILITY_POSTGRESQL_SERVER_FQDN"] = "postgresql.internal",
+            ["TOKENOBSERVABILITY_POSTGRESQL_DATABASE_NAME"] = "product_metadata"
+        };
+
+        foreach (var (key, value) in overrides)
+        {
+            settings[key] = value;
+        }
+
+        return new WebApplicationFactory<TokenObservabilityIngestionAssemblyMarker>()
+            .WithWebHostBuilder(builder =>
+            {
+                builder.ConfigureAppConfiguration((_, configuration) =>
+                {
+                    configuration.AddInMemoryCollection(settings);
+                });
+                builder.ConfigureServices(services =>
+                {
+                    var store = CreateReadyTenantStore();
+                    services.RemoveAll<InMemoryTenantMetadataStore>();
+                    services.RemoveAll<IAggregateMetricSink>();
+                    services.AddSingleton(store);
+                    services.AddSingleton<IAggregateMetricSink, RecordingAggregateMetricSink>();
+                });
+            });
+    }
+
+    private static InMemoryTenantMetadataStore CreateReadyTenantStore()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(DateTimeOffset.Parse("2026-06-21T00:00:00Z")));
+        store.CreateCustomerOrganizationAsync(new CreateCustomerOrganizationRequest(
+            "contoso",
+            "Contoso",
+            "eastus2",
+            CustomerOrganizationIsolationTier.Shared)).GetAwaiter().GetResult();
+        return store;
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+
+        while (directory is not null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "AiAgentTokenObservability.Production.slnx")))
+            {
+                return directory.FullName;
+            }
+
+            directory = directory.Parent;
+        }
+
+        throw new InvalidOperationException("Could not locate repository root.");
     }
 
     private static async Task AssertProblemCodeAsync(HttpResponseMessage response, string expectedCode)
@@ -208,5 +342,15 @@ public sealed class TokenObservabilityRuntimeHealthTests
         };
 
         return Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(principal)));
+    }
+
+    private sealed class RecordingAggregateMetricSink : IAggregateMetricSink
+    {
+        public Task ExportAsync(
+            IReadOnlyList<AggregateMetricPoint> points,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.CompletedTask;
+        }
     }
 }

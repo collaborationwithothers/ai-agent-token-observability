@@ -29,6 +29,10 @@ locals {
   acr_pull_role_assignments_enabled         = var.container_registry_server != null && var.container_registry_id != null
   container_app_environment_subnet_id       = var.container_app_environment_infrastructure_subnet_id
   primary_database_name                     = try(var.data_platform_configuration_contract.postgresql_database_names["product_metadata"], null)
+  product_api_metadata_store_secret_configured = (
+    contains(keys(lookup(var.container_app_secret_names, "product_api", {})), "ConnectionStrings__ProductMetadataStore") &&
+    contains(keys(lookup(var.container_app_key_vault_secret_ids, "product_api", {})), lookup(var.container_app_secret_names, "product_api", {})["ConnectionStrings__ProductMetadataStore"])
+  )
 
   data_platform_environment = {
     TOKENOBSERVABILITY_POSTGRESQL_SERVER_FQDN              = var.data_platform_configuration_contract.postgresql_server_fqdn
@@ -65,8 +69,9 @@ locals {
       min_replicas     = 1
       max_replicas     = 3
       external_enabled = true
-      liveness_path    = "/"
-      readiness_path   = "/"
+      startup_path     = "/healthz"
+      liveness_path    = "/healthz"
+      readiness_path   = "/readyz"
       environment = {
         PORT                        = tostring(var.dashboard_target_port)
         TOKENOBSERVABILITY_APP_ROLE = "product-dashboard"
@@ -86,6 +91,7 @@ locals {
       min_replicas     = 1
       max_replicas     = 5
       external_enabled = true
+      startup_path     = "/health/live"
       liveness_path    = "/health/live"
       readiness_path   = "/health/ready"
       environment = {
@@ -106,6 +112,7 @@ locals {
       min_replicas     = 1
       max_replicas     = 10
       external_enabled = true
+      startup_path     = "/health/live"
       liveness_path    = "/health/live"
       readiness_path   = "/health/ready"
       environment = {

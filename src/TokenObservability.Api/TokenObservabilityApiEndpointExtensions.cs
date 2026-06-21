@@ -2,7 +2,6 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using Microsoft.Extensions.Options;
 using TokenObservability.Domain.Authorization;
 using TokenObservability.Domain.Ingestion;
 using TokenObservability.Domain.Pricing;
@@ -20,8 +19,6 @@ internal static class TokenObservabilityApiEndpointExtensions
 
     public static void AddTokenObservabilityApiServices(this WebApplicationBuilder builder)
     {
-        builder.Services.Configure<TokenObservabilityApiReadinessOptions>(
-            builder.Configuration.GetSection("ProductApi:Readiness"));
         builder.Services.AddTokenObservabilityAuthorizationContext();
     }
 
@@ -50,6 +47,7 @@ internal static class TokenObservabilityApiEndpointExtensions
         });
 
         app.MapGet("/healthz", GetHealth);
+        app.MapGet("/health/ready", GetReadiness);
         app.MapGet("/readyz", GetReadiness);
 
         var api = app.MapGroup("/api/v1");
@@ -101,16 +99,18 @@ internal static class TokenObservabilityApiEndpointExtensions
         return exception.Message.Contains("PostgreSQL tenant metadata runtime support", StringComparison.Ordinal);
     }
 
-    private static IResult GetReadiness(IOptions<TokenObservabilityApiReadinessOptions> options)
+    private static async Task<IResult> GetReadiness(
+        IConfiguration configuration,
+        ITenantMetadataStore tenantMetadataStore,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver)
     {
-        var readiness = options.Value;
         var dependencies = new[]
         {
-            ToDependency("product_metadata_store", readiness.ProductMetadataStore),
-            ToDependency("telemetry_backends", readiness.TelemetryBackends),
-            ToDependency("content_store", readiness.ContentStore),
-            ToDependency("recommendation_dependencies", readiness.RecommendationDependencies),
-            ToDependency("authorization_enforcement", readiness.AuthorizationEnforcement)
+            await CheckProductMetadataStoreAsync(configuration, tenantMetadataStore),
+            CheckRequiredConfiguration("telemetry_backends", configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"] ?? configuration["AzureMonitor:ConnectionString"]),
+            CheckRequiredConfiguration("content_store", configuration["TOKENOBSERVABILITY_STORAGE_ACCOUNT_NAME"]),
+            CheckRequiredConfiguration("recommendation_dependencies", configuration["TOKENOBSERVABILITY_RECOMMENDATION_DEPLOYMENT_COUNT"]),
+            CheckAuthorizationEnforcement(authorizationContextResolver)
         };
         var ready = dependencies.All(static dependency => dependency.Status == "ready");
 
@@ -124,7 +124,8 @@ internal static class TokenObservabilityApiEndpointExtensions
 
     private static async Task<IResult> GetProtectedReadiness(
         HttpContext httpContext,
-        IOptions<TokenObservabilityApiReadinessOptions> options,
+        IConfiguration configuration,
+        ITenantMetadataStore tenantMetadataStore,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver)
     {
         var resolution = await authorizationContextResolver.ResolveAsync(
@@ -137,7 +138,51 @@ internal static class TokenObservabilityApiEndpointExtensions
             return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
         }
 
-        return GetReadiness(options);
+        return await GetReadiness(configuration, tenantMetadataStore, authorizationContextResolver);
+    }
+
+    private static async Task<ReadinessDependency> CheckProductMetadataStoreAsync(
+        IConfiguration configuration,
+        ITenantMetadataStore tenantMetadataStore)
+    {
+        var customerOrganizationSlug = configuration["CUSTOMER_ORGANIZATION_SLUG"];
+
+        if (string.IsNullOrWhiteSpace(customerOrganizationSlug) ||
+            string.IsNullOrWhiteSpace(ReadProductMetadataStoreConnectionString(configuration)))
+        {
+            return new ReadinessDependency("product_metadata_store", "not_configured");
+        }
+
+        try
+        {
+            await tenantMetadataStore.FindCustomerOrganizationBySlugAsync(customerOrganizationSlug);
+            return new ReadinessDependency("product_metadata_store", "ready");
+        }
+        catch
+        {
+            return new ReadinessDependency("product_metadata_store", "not_ready");
+        }
+    }
+
+    private static string? ReadProductMetadataStoreConnectionString(IConfiguration configuration)
+    {
+        return configuration.GetConnectionString("ProductMetadataStore") ??
+            configuration["ProductMetadataStore:ConnectionString"];
+    }
+
+    private static ReadinessDependency CheckAuthorizationEnforcement(
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver)
+    {
+        return authorizationContextResolver is null
+            ? new ReadinessDependency("authorization_enforcement", "not_ready")
+            : new ReadinessDependency("authorization_enforcement", "ready");
+    }
+
+    private static ReadinessDependency CheckRequiredConfiguration(string name, string? value)
+    {
+        return string.IsNullOrWhiteSpace(value)
+            ? new ReadinessDependency(name, "not_configured")
+            : new ReadinessDependency(name, "ready");
     }
 
     private static async Task<IResult> GetCurrentUser(
@@ -1396,16 +1441,6 @@ internal static class TokenObservabilityApiEndpointExtensions
                 ["code"] = code,
                 ["correlationId"] = TokenObservabilityCorrelationId.Resolve(httpContext)
             });
-    }
-
-    private static ReadinessDependency ToDependency(string name, bool? ready)
-    {
-        return new ReadinessDependency(name, ready switch
-        {
-            true => "ready",
-            false => "not_ready",
-            null => "not_configured"
-        });
     }
 
     private static IEnumerable<GovernanceAuditEvent> ApplyAuditEventFilters(
