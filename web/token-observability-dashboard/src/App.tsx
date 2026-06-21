@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import "./App.css";
 import { sanitizeGrafanaNavigation } from "./grafanaNavigation";
 
@@ -144,6 +145,134 @@ type PricingBasisItem = {
 
 type PricingBasisResponse = {
   items: PricingBasisItem[];
+};
+
+type SessionInvestigationResponse = {
+  session: {
+    agentSessionId: string;
+    providerSessionIdHash: string | null;
+    startedAtUtc: string | null;
+    endedAtUtc: string | null;
+    sessionStatus: string;
+  };
+  harnessContext: {
+    harness: string;
+    harnessSetupProfileId: string;
+  };
+  modelContext: {
+    providerNames: string[];
+    modelNames: string[];
+  };
+  tokenSummary: {
+    metricStatus: string;
+    metricConfidence: string;
+    split: Array<{
+      metricName: string;
+      value: number | null;
+      metricStatus: string;
+      metricConfidence: string;
+    }>;
+  };
+  costSummary: {
+    estimatedTotal: number | null;
+    currency: string | null;
+    currencyState?: string;
+    costStatus: string;
+  };
+  repositoryContext: {
+    evidenceState: string;
+  };
+  tokenHotspots: SessionTokenHotspot[];
+  cacheDiagnostics: Array<{
+    diagnosticType: string;
+    evidenceState: string;
+    tokenHotspotId?: string;
+    hotspotType?: string;
+    findingState?: string;
+    evidenceSummary?: string;
+    routeTarget?: string;
+  }>;
+  contentEvidence: {
+    summary: string;
+    items: SessionContentEvidenceItem[];
+  };
+  recommendations: {
+    status: string;
+    items: SessionRecommendationItem[];
+  };
+  auditContext: {
+    correlationId?: string;
+    contentAuditEventIds: string[];
+    recommendationAuditEventIds: string[];
+  };
+};
+
+type SessionTimelineResponse = {
+  items: SessionTimelineItem[];
+};
+
+type SessionTimelineItem = {
+  timelineItemId: string;
+  eventTimestampUtc: string | null;
+  itemType: string;
+  title: string;
+  state: string;
+  relatedResourceId: string | null;
+  metadata: Record<string, unknown>;
+};
+
+type SessionTokenHotspot = {
+  tokenHotspotId: string;
+  hotspotType: string;
+  findingState: string;
+  attributionType: string;
+  confidence: string;
+  metricStatus: string;
+  metricConfidence: string;
+  promptCacheEvidenceState: string;
+  modelName: string;
+  evidenceSummary: string;
+  estimatedCostImpact: number | null;
+  routeTarget?: string;
+};
+
+type SessionContentEvidenceItem = {
+  contentReferenceId: string;
+  contentClass: string;
+  captureState: string;
+  redactionStatus: string;
+  evidenceState?: string;
+  policyVersionId: string;
+  redactionPipelineVersion: string | null;
+  productRuleVersion: string | null;
+  recommendationEligible: boolean;
+  auditEventId: string;
+  approvedExcerpt?: string | null;
+  routeTarget?: string;
+};
+
+type SessionRecommendationItem = {
+  recommendationId: string;
+  tokenHotspotId: string | null;
+  kind: string;
+  state: string;
+  authorityState: string;
+  confidence: string;
+  validationState: string;
+  summary: string;
+  rationale: string;
+  expectedBenefit: string;
+  auditEventId: string;
+};
+
+type SessionRecommendationsResponse = {
+  items: SessionRecommendationItem[];
+};
+
+type SessionInvestigationData = {
+  summary: SessionInvestigationResponse;
+  timeline: SessionTimelineResponse;
+  recommendations: SessionRecommendationsResponse;
 };
 
 type DataState<T> =
@@ -487,6 +616,8 @@ export function App() {
             productApiBaseUrl={productApiBaseUrl}
             setCurrentPath={setCurrentPath}
           />
+        ) : activeRoute.path === "/sessions/:sessionId" ? (
+          <SessionInvestigationShell currentPath={currentPath} productApiBaseUrl={productApiBaseUrl} />
         ) : activeRoute.path === "/admin/pricing" ? (
           <PricingShell productApiBaseUrl={productApiBaseUrl} />
         ) : (
@@ -692,6 +823,341 @@ function CostMixTable({ items }: { items: OverviewCostMixItem[] }) {
   );
 }
 
+function SessionInvestigationShell({
+  currentPath,
+  productApiBaseUrl
+}: {
+  currentPath: string;
+  productApiBaseUrl: string;
+}) {
+  const sessionId = readSessionIdFromPath(currentPath);
+  const [sessionState, setSessionState] = useState<DataState<SessionInvestigationData>>({ kind: "loading" });
+
+  useEffect(() => {
+    let isActive = true;
+
+    async function loadSessionInvestigation() {
+      if (!sessionId) {
+        setSessionState({
+          kind: "error",
+          message: "Session route did not include a session identifier."
+        });
+        return;
+      }
+
+      setSessionState({ kind: "loading" });
+      try {
+        const urls = createSessionInvestigationRequestUrls(productApiBaseUrl, sessionId);
+        const [summary, timeline, recommendations] = await Promise.all([
+          fetchProductApiJson<SessionInvestigationResponse>(urls.summary),
+          fetchProductApiJson<SessionTimelineResponse>(urls.timeline),
+          fetchProductApiJson<SessionRecommendationsResponse>(urls.recommendations)
+        ]);
+
+        if (!isActive) {
+          return;
+        }
+
+        setSessionState({
+          kind: "ready",
+          data: { summary, timeline, recommendations }
+        });
+      } catch (error) {
+        if (isActive) {
+          const requestError = error instanceof ProductApiRequestError ? error : undefined;
+          setSessionState({
+            kind: "error",
+            message:
+              requestError?.problem?.title ??
+              (error instanceof Error ? error.message : "Session investigation request failed."),
+            problem: requestError?.problem
+          });
+        }
+      }
+    }
+
+    loadSessionInvestigation();
+
+    return () => {
+      isActive = false;
+    };
+  }, [currentPath, productApiBaseUrl, sessionId]);
+
+  if (!sessionId) {
+    return <RouteState title="Session detail" detail="This session route is missing a session identifier." />;
+  }
+
+  if (sessionState.kind === "loading") {
+    return (
+      <section className="route-surface" aria-labelledby="session-title">
+        <div className="route-heading">
+          <div>
+            <p className="eyebrow">Session investigation</p>
+            <h3 id="session-title">Loading session evidence</h3>
+          </div>
+          <span className="state-chip">Loading</span>
+        </div>
+        <div className="empty-state">
+          <h4>{sessionId}</h4>
+          <p>The dashboard is requesting authorized session investigation data from Product API.</p>
+        </div>
+      </section>
+    );
+  }
+
+  if (sessionState.kind === "error") {
+    return (
+      <section className="route-surface" aria-labelledby="session-title">
+        <div className="route-heading">
+          <div>
+            <p className="eyebrow">Session investigation</p>
+            <h3 id="session-title">Session unavailable</h3>
+          </div>
+          <span className="state-chip">Product API check</span>
+        </div>
+        <InlineProblem title="Session investigation unavailable" message={sessionState.message} problem={sessionState.problem} />
+      </section>
+    );
+  }
+
+  return <SessionInvestigationContent data={sessionState.data} />;
+}
+
+export function SessionInvestigationContent({ data }: { data: SessionInvestigationData }) {
+  const { summary, timeline, recommendations } = data;
+  const contentItems = summary.contentEvidence.items;
+  const recommendationItems = recommendations.items.length > 0
+    ? recommendations.items
+    : summary.recommendations.items;
+
+  return (
+    <section className="route-surface" aria-labelledby="session-title">
+      <div className="route-heading">
+        <div>
+          <p className="eyebrow">Session investigation</p>
+          <h3 id="session-title">{summary.session.agentSessionId}</h3>
+        </div>
+        <span className="state-chip">{formatMachineText(summary.session.sessionStatus)}</span>
+      </div>
+
+      <div className="investigation-grid">
+        <InvestigationPanel title="Session summary">
+          <dl className="detail-list">
+            <div>
+              <dt>Harness</dt>
+              <dd>{formatMachineText(summary.harnessContext.harness)}</dd>
+            </div>
+            <div>
+              <dt>Model</dt>
+              <dd>{summary.modelContext.modelNames.join(", ") || "Unavailable"}</dd>
+            </div>
+            <div>
+              <dt>Provider</dt>
+              <dd>{summary.modelContext.providerNames.join(", ") || "Unavailable"}</dd>
+            </div>
+            <div>
+              <dt>Started</dt>
+              <dd>{formatDateTime(summary.session.startedAtUtc)}</dd>
+            </div>
+            <div>
+              <dt>Ended</dt>
+              <dd>{formatDateTime(summary.session.endedAtUtc)}</dd>
+            </div>
+            <div>
+              <dt>Repository evidence</dt>
+              <dd>{formatMachineText(summary.repositoryContext.evidenceState)}</dd>
+            </div>
+          </dl>
+        </InvestigationPanel>
+
+        <InvestigationPanel title="Token split and quality">
+          <dl className="detail-list compact">
+            <div>
+              <dt>Metric state</dt>
+              <dd>{formatMachineText(summary.tokenSummary.metricStatus)}</dd>
+            </div>
+            <div>
+              <dt>Confidence</dt>
+              <dd>{formatMachineText(summary.tokenSummary.metricConfidence)}</dd>
+            </div>
+            <div>
+              <dt>Estimated cost</dt>
+              <dd>{formatMoney(summary.costSummary.estimatedTotal, summary.costSummary.currency ?? "USD")}</dd>
+            </div>
+          </dl>
+          <div className="table-wrap compact-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>Metric</th>
+                  <th>Value</th>
+                  <th>State</th>
+                  <th>Confidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {summary.tokenSummary.split.map((item) => (
+                  <tr key={item.metricName}>
+                    <td>{formatMachineText(item.metricName)}</td>
+                    <td>{item.value ?? "Unavailable"}</td>
+                    <td>{formatMachineText(item.metricStatus)}</td>
+                    <td>{formatMachineText(item.metricConfidence)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </InvestigationPanel>
+
+        <InvestigationPanel title="Timeline">
+          {timeline.items.length === 0 ? (
+            <p className="muted-text">Timeline metadata is unavailable for this session.</p>
+          ) : (
+            <ol className="timeline-list">
+              {timeline.items.map((item) => (
+                <li key={item.timelineItemId}>
+                  <time>{formatDateTime(item.eventTimestampUtc)}</time>
+                  <strong>{item.title}</strong>
+                  <span>{formatMachineText(item.itemType)}: {formatMachineText(item.state)}</span>
+                </li>
+              ))}
+            </ol>
+          )}
+        </InvestigationPanel>
+
+        <InvestigationPanel title="Hotspots and cache diagnostics">
+          {summary.tokenHotspots.length === 0 ? (
+            <p className="muted-text">No token hotspots are recorded for this session.</p>
+          ) : (
+            <div className="evidence-list">
+              {summary.tokenHotspots.map((hotspot) => (
+                <article id={`hotspot-${hotspot.tokenHotspotId}`} key={hotspot.tokenHotspotId}>
+                  <h5>{formatMachineText(hotspot.hotspotType)}</h5>
+                  <p>{hotspot.evidenceSummary}</p>
+                  <dl className="inline-metadata">
+                    <div>
+                      <dt>Finding</dt>
+                      <dd>{formatMachineText(hotspot.findingState)}</dd>
+                    </div>
+                    <div>
+                      <dt>Attribution</dt>
+                      <dd>{formatMachineText(hotspot.attributionType)}</dd>
+                    </div>
+                    <div>
+                      <dt>Cache evidence</dt>
+                      <dd>{formatMachineText(hotspot.promptCacheEvidenceState)}</dd>
+                    </div>
+                  </dl>
+                </article>
+              ))}
+            </div>
+          )}
+          {summary.cacheDiagnostics.length > 0 ? (
+            <ul className="metadata-list">
+              {summary.cacheDiagnostics.map((diagnostic, index) => (
+                <li key={`${diagnostic.diagnosticType}-${diagnostic.tokenHotspotId ?? index}`}>
+                  {formatMachineText(diagnostic.diagnosticType)}: {formatMachineText(diagnostic.evidenceState)}
+                  {diagnostic.routeTarget ? <a href={diagnostic.routeTarget}>Open evidence</a> : null}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </InvestigationPanel>
+
+        <InvestigationPanel title="Content evidence">
+          <p className="muted-text">Content summary: {formatMachineText(summary.contentEvidence.summary)}</p>
+          {contentItems.length === 0 ? (
+            <p className="muted-text">No content evidence references are recorded for this session.</p>
+          ) : (
+            <div className="evidence-list">
+              {contentItems.map((item) => (
+                <article id={`content-${item.contentReferenceId}`} key={item.contentReferenceId}>
+                  <h5>{formatMachineText(item.contentClass)}</h5>
+                  <dl className="inline-metadata">
+                    <div>
+                      <dt>Evidence</dt>
+                      <dd>{formatMachineText(item.evidenceState ?? item.captureState)}</dd>
+                    </div>
+                    <div>
+                      <dt>Redaction</dt>
+                      <dd>{formatMachineText(item.redactionStatus)}</dd>
+                    </div>
+                    <div>
+                      <dt>Policy</dt>
+                      <dd>{item.policyVersionId}</dd>
+                    </div>
+                  </dl>
+                  {item.captureState === "approved_excerpt" && item.approvedExcerpt ? (
+                    <blockquote>{item.approvedExcerpt}</blockquote>
+                  ) : (
+                    <p className="muted-text">Content body is metadata-only in this view.</p>
+                  )}
+                </article>
+              ))}
+            </div>
+          )}
+        </InvestigationPanel>
+
+        <InvestigationPanel title="Recommendations">
+          <p className="muted-text">Recommendation state: {formatMachineText(summary.recommendations.status)}</p>
+          {recommendationItems.length === 0 ? (
+            <p className="muted-text">No recommendations are recorded for this session.</p>
+          ) : (
+            <div className="evidence-list">
+              {recommendationItems.map((recommendation) => (
+                <article id={`recommendation-${recommendation.recommendationId}`} key={recommendation.recommendationId}>
+                  <h5>{recommendation.summary}</h5>
+                  <p>{recommendation.rationale}</p>
+                  <dl className="inline-metadata">
+                    <div>
+                      <dt>Authority</dt>
+                      <dd>{formatMachineText(recommendation.authorityState)}</dd>
+                    </div>
+                    <div>
+                      <dt>Confidence</dt>
+                      <dd>{formatMachineText(recommendation.confidence)}</dd>
+                    </div>
+                    <div>
+                      <dt>Expected benefit</dt>
+                      <dd>{recommendation.expectedBenefit}</dd>
+                    </div>
+                  </dl>
+                </article>
+              ))}
+            </div>
+          )}
+        </InvestigationPanel>
+
+        <InvestigationPanel title="Audit context">
+          <dl className="detail-list compact">
+            <div>
+              <dt>Request correlation</dt>
+              <dd>{summary.auditContext.correlationId ?? "Unavailable"}</dd>
+            </div>
+            <div>
+              <dt>Content audit events</dt>
+              <dd>{summary.auditContext.contentAuditEventIds.length}</dd>
+            </div>
+            <div>
+              <dt>Recommendation audit events</dt>
+              <dd>{summary.auditContext.recommendationAuditEventIds.length}</dd>
+            </div>
+          </dl>
+        </InvestigationPanel>
+      </div>
+    </section>
+  );
+}
+
+function InvestigationPanel({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="investigation-panel">
+      <h4>{title}</h4>
+      {children}
+    </section>
+  );
+}
+
 function PricingShell({ productApiBaseUrl }: { productApiBaseUrl: string }) {
   const [pricingState, setPricingState] = useState<DataState<PricingBasisResponse>>({ kind: "loading" });
 
@@ -860,6 +1326,17 @@ function formatMoney(value: number | null, currency: string) {
   }).format(value);
 }
 
+function formatDateTime(value: string | null) {
+  if (!value) {
+    return "Unavailable";
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short"
+  }).format(new Date(value));
+}
+
 function RouteState({ title, detail, route }: { title: string; detail: string; route?: DashboardRoute }) {
   return (
     <section className="route-surface" aria-labelledby="route-state-title">
@@ -958,6 +1435,51 @@ function readProductApiBaseUrl() {
   const normalized = configured.replace(/\/+$/, "");
 
   return normalized.endsWith("/api/v1") ? normalized : `${normalized}/api/v1`;
+}
+
+export function readSessionIdFromPath(path: string) {
+  const pathname = path.split("?")[0] || "/";
+  const segments = pathname.split("/").filter(Boolean);
+
+  if (segments.length !== 2 || segments[0] !== "sessions") {
+    return null;
+  }
+
+  return decodeURIComponent(segments[1]);
+}
+
+export function createSessionInvestigationRequestUrls(productApiBaseUrl: string, sessionId: string) {
+  const encodedSessionId = encodeURIComponent(sessionId);
+  const base = `${productApiBaseUrl}/sessions/${encodedSessionId}`;
+
+  return {
+    summary: base,
+    timeline: `${base}/timeline`,
+    recommendations: `${base}/recommendations`
+  };
+}
+
+class ProductApiRequestError extends Error {
+  constructor(
+    message: string,
+    readonly problem?: ProblemDetails
+  ) {
+    super(message);
+  }
+}
+
+async function fetchProductApiJson<T>(url: string): Promise<T> {
+  const response = await fetch(url, {
+    credentials: "include",
+    headers: { Accept: "application/json" }
+  });
+  const problem = response.ok ? undefined : await readProblemDetails(response);
+
+  if (!response.ok) {
+    throw new ProductApiRequestError(problem?.title ?? "Product API request failed.", problem);
+  }
+
+  return (await response.json()) as T;
 }
 
 async function readProblemDetails(response: Response): Promise<ProblemDetails | undefined> {

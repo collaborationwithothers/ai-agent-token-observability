@@ -888,6 +888,248 @@ public sealed class ProductApiAuthorizationContextTests
     }
 
     [Fact]
+    public async Task SessionInvestigationRoutesReturnSummaryTimelineAndMetadataOnlyContent()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var adminClaims = CreateClaims(subject: "admin-subject", groupObjectIds: ["admin-group"]);
+        var admin = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            adminClaims);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            admin.ProductUserId,
+            "admin-group",
+            ProductRole.PlatformAdmin);
+        var credential = await IssueCredentialAsync(store, seed, "profile-contoso-codex");
+        var session = await SeedTokenSessionAsync(
+            store,
+            credential.Credential,
+            "session-investigation-api",
+            Now,
+            [
+                (TokenMetricName.InputTokens, 120_000, TokenMetricStatus.Observed, TokenMetricConfidence.Observed, "invocation-1"),
+                (TokenMetricName.CachedInputTokens, null, TokenMetricStatus.Unavailable, TokenMetricConfidence.Unavailable, "invocation-1")
+            ]);
+        await store.RecordTokenHotspotAsync(new CreateTokenHotspotRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            TokenHotspotType.PromptCacheBreakage,
+            TokenHotspotFindingState.CandidateCorrelated,
+            TokenHotspotAttributionType.Correlated,
+            TokenHotspotConfidence.Medium,
+            TokenMetricStatus.Unavailable,
+            TokenMetricConfidence.Unavailable,
+            PromptCacheEvidenceState.Unknown,
+            ModelName: "gpt-5",
+            EvidenceSummary: "Cache cause is unknown because provider cache fields were unavailable.",
+            EvidenceReferenceIds: [session.AgentSessionId],
+            TokenBurnScore: null,
+            EstimatedCostImpact: null));
+        await store.RecordCostEstimateAsync(new CreateCostEstimateRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            "invocation-1",
+            PricingBasisId: null,
+            PricingVersion: null,
+            Currency: "USD",
+            EstimatedCost: null,
+            CostEstimateStatus.Unavailable,
+            CostEstimateSourceKind.Unavailable,
+            TokenMetricStatus.Unavailable,
+            TokenMetricConfidence.Unavailable,
+            ProviderName: "openai",
+            ModelName: "gpt-5",
+            BillingRoute: "standard",
+            PricingTokenType.Input));
+        await SeedSessionContentReferenceAsync(
+            store,
+            credential.Credential,
+            session,
+            ContentCandidateEvidenceState.ReviewRequired,
+            ContentRedactionStatus.ReviewRequired,
+            ContentRedactionOutcome.ReviewRequired);
+        await SeedSessionContentReferenceAsync(
+            store,
+            credential.Credential,
+            session,
+            ContentCandidateEvidenceState.RedactionFailed,
+            ContentRedactionStatus.Failed,
+            ContentRedactionOutcome.RedactionFailed);
+        await store.CreateRecommendationAsync(new CreateRecommendationRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            TokenHotspotId: null,
+            RuleId: "rec.session.investigation",
+            RecommendationKind.Deterministic,
+            RecommendationState.Candidate,
+            RecommendationAuthorityState.Deterministic,
+            RecommendationConfidence.High,
+            RecommendationValidationState.Validated,
+            RecommendationVisibilityScope.TeamScoped,
+            EvidencePacketVersion: "recommendation.evidence.v1",
+            EvidencePacketJson: "{\"schemaVersion\":\"recommendation.evidence.v1\",\"hiddenEvidence\":[]}",
+            EvidencePacketHash: new string('E', 64),
+            Summary: "Reduce unnecessary context and prefer targeted files.",
+            Rationale: "Observed input token evidence exceeded the configured threshold.",
+            RecommendedAction: "Pass targeted files and summaries.",
+            ExpectedBenefit: "Lower input token use.",
+            ModelPolicyVersionId: null,
+            PromptTemplateVersion: null,
+            EvidenceReferenceIds: [session.AgentSessionId],
+            PolicyMetadata: new Dictionary<string, string> { ["content_capture_policy_version"] = "metadata_only" },
+            AuditEventId: "audit-session-investigation-recommendation",
+            CorrelationId: "session-investigation-recommendation"));
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+
+        using var summaryRequest = CreateAuthorizedRequest(
+            HttpMethod.Get,
+            $"/api/v1/sessions/{session.AgentSessionId}",
+            "contoso",
+            adminClaims);
+        using var summaryResponse = await client.SendAsync(summaryRequest);
+
+        summaryResponse.EnsureSuccessStatusCode();
+        var summaryJson = await summaryResponse.Content.ReadAsStringAsync();
+        using var summaryBody = JsonDocument.Parse(summaryJson);
+        Assert.Equal(session.AgentSessionId, summaryBody.RootElement.GetProperty("session").GetProperty("agentSessionId").GetString());
+        Assert.Equal("codex-cli", summaryBody.RootElement.GetProperty("harnessContext").GetProperty("harness").GetString());
+        Assert.Contains(
+            "gpt-5",
+            summaryBody.RootElement.GetProperty("modelContext").GetProperty("modelNames").EnumerateArray().Select(item => item.GetString()));
+        var tokenSplit = summaryBody.RootElement.GetProperty("tokenSummary").GetProperty("split").EnumerateArray().ToArray();
+        Assert.Contains(tokenSplit, item =>
+            item.GetProperty("metricName").GetString() == "input_tokens" &&
+            item.GetProperty("value").GetInt64() == 120_000 &&
+            item.GetProperty("metricStatus").GetString() == "observed");
+        Assert.Contains(tokenSplit, item =>
+            item.GetProperty("metricName").GetString() == "cached_input_tokens" &&
+            item.GetProperty("value").ValueKind == JsonValueKind.Null &&
+            item.GetProperty("metricStatus").GetString() == "unavailable");
+        var contentItems = summaryBody.RootElement.GetProperty("contentEvidence").GetProperty("items").EnumerateArray().ToArray();
+        Assert.Contains(contentItems, item => item.GetProperty("evidenceState").GetString() == "review_required");
+        Assert.Contains(contentItems, item => item.GetProperty("evidenceState").GetString() == "redaction_failed");
+        Assert.All(contentItems, item => Assert.Equal(JsonValueKind.Null, item.GetProperty("approvedExcerpt").ValueKind));
+        Assert.Single(summaryBody.RootElement.GetProperty("recommendations").GetProperty("items").EnumerateArray());
+        Assert.DoesNotContain("hello Ada", summaryJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("raw_prompt", summaryJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("command_output", summaryJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("leaderboard", summaryJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ranking", summaryJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("blame", summaryJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("wrongness", summaryJson, StringComparison.OrdinalIgnoreCase);
+
+        using var timelineRequest = CreateAuthorizedRequest(
+            HttpMethod.Get,
+            $"/api/v1/sessions/{session.AgentSessionId}/timeline",
+            "contoso",
+            adminClaims);
+        using var timelineResponse = await client.SendAsync(timelineRequest);
+
+        timelineResponse.EnsureSuccessStatusCode();
+        using var timelineBody = await JsonDocument.ParseAsync(await timelineResponse.Content.ReadAsStreamAsync());
+        var timelineItems = timelineBody.RootElement.GetProperty("items").EnumerateArray().ToArray();
+        Assert.Contains(timelineItems, item => item.GetProperty("itemType").GetString() == "session");
+        Assert.Contains(timelineItems, item => item.GetProperty("itemType").GetString() == "token_observation");
+        Assert.Contains(timelineItems, item => item.GetProperty("itemType").GetString() == "token_hotspot");
+        Assert.Contains(timelineItems, item => item.GetProperty("itemType").GetString() == "content_evidence");
+        Assert.Contains(timelineItems, item => item.GetProperty("itemType").GetString() == "recommendation");
+    }
+
+    [Fact]
+    public async Task SessionInvestigationRoutesAllowDeveloperSelfViewForOwnSession()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var developerClaims = CreateClaims(subject: "developer-subject", groupObjectIds: ["developer-group"]);
+        var developer = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            developerClaims);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            developer.ProductUserId,
+            "developer-group",
+            ProductRole.Developer,
+            ProductScopeKind.Self);
+        var credential = await IssueCredentialAsync(
+            store,
+            seed,
+            "profile-contoso-codex",
+            developer.ProductUserId);
+        await SeedUnavailableSessionAsync(store, credential.Credential, "developer-investigation-session");
+        var session = Assert.Single(await store.ListAgentSessionsAsync(seed.Organization.CustomerOrganizationId));
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+
+        using var summaryRequest = CreateAuthorizedRequest(
+            HttpMethod.Get,
+            $"/api/v1/sessions/{session.AgentSessionId}",
+            "contoso",
+            developerClaims);
+        using var summaryResponse = await client.SendAsync(summaryRequest);
+
+        summaryResponse.EnsureSuccessStatusCode();
+        using var summaryBody = await JsonDocument.ParseAsync(await summaryResponse.Content.ReadAsStreamAsync());
+        Assert.Equal(session.AgentSessionId, summaryBody.RootElement.GetProperty("session").GetProperty("agentSessionId").GetString());
+
+        using var timelineRequest = CreateAuthorizedRequest(
+            HttpMethod.Get,
+            $"/api/v1/sessions/{session.AgentSessionId}/timeline",
+            "contoso",
+            developerClaims);
+        using var timelineResponse = await client.SendAsync(timelineRequest);
+
+        timelineResponse.EnsureSuccessStatusCode();
+        using var timelineBody = await JsonDocument.ParseAsync(await timelineResponse.Content.ReadAsStreamAsync());
+        Assert.Contains(
+            timelineBody.RootElement.GetProperty("items").EnumerateArray(),
+            item => item.GetProperty("itemType").GetString() == "session");
+    }
+
+    [Fact]
+    public async Task SessionInvestigationRoutesRejectUsersWithoutSessionAccess()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var viewerClaims = CreateClaims(subject: "viewer-subject", groupObjectIds: ["viewer-group"]);
+        var viewer = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            viewerClaims);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            viewer.ProductUserId,
+            "viewer-group",
+            ProductRole.ReadOnlyViewer);
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+
+        using var summaryRequest = CreateAuthorizedRequest(
+            HttpMethod.Get,
+            "/api/v1/sessions/shareable-session-id",
+            "contoso",
+            viewerClaims);
+        using var summaryResponse = await client.SendAsync(summaryRequest);
+        Assert.Equal(HttpStatusCode.Forbidden, summaryResponse.StatusCode);
+        await AssertProblemCodeAsync(summaryResponse, "authorization_denied");
+
+        using var timelineRequest = CreateAuthorizedRequest(
+            HttpMethod.Get,
+            "/api/v1/sessions/shareable-session-id/timeline",
+            "contoso",
+            viewerClaims);
+        using var timelineResponse = await client.SendAsync(timelineRequest);
+        Assert.Equal(HttpStatusCode.Forbidden, timelineResponse.StatusCode);
+        await AssertProblemCodeAsync(timelineResponse, "authorization_denied");
+    }
+
+    [Fact]
     public async Task SessionsRouteAllowsDeveloperSelfViewWithoutCrossUserLeakage()
     {
         var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
@@ -2755,6 +2997,45 @@ public sealed class ProductApiAuthorizationContextTests
         return Assert.Single(await store.ListContentReferencesForSessionAsync(
             seed.Organization.CustomerOrganizationId,
             session.AgentSessionId));
+    }
+
+    private static async Task<ContentReferenceRecord> SeedSessionContentReferenceAsync(
+        InMemoryTenantMetadataStore store,
+        ScopedIngestionCredential credential,
+        AgentSessionRecord session,
+        ContentCandidateEvidenceState evidenceState,
+        ContentRedactionStatus redactionStatus,
+        ContentRedactionOutcome redactionOutcome)
+    {
+        var telemetryEnvelopeId = Assert.Single(session.SourceTelemetryEnvelopeIds);
+        var before = await store.ListContentReferencesForSessionAsync(
+            credential.CustomerOrganizationId,
+            session.AgentSessionId);
+
+        await store.RecordContentCandidateMetadataAsync(new CreateContentCandidateMetadataRequest(
+            credential.CustomerOrganizationId,
+            PolicyVersionId: "policy-content-v1",
+            credential.ScopedIngestionCredentialId,
+            credential.HarnessSetupProfileId,
+            session.AgentSessionId,
+            $"{telemetryEnvelopeId}:{redactionOutcome}",
+            ContentClass.PromptSnippet,
+            OriginalLength: "hello Ada".Length,
+            ContentCapturePolicyDecision.CaptureAllowed,
+            evidenceState,
+            redactionStatus,
+            ContentRetentionClass.Short,
+            RecommendationUse.Disabled,
+            redactionOutcome,
+            RedactionDecisionReason: "policy_state",
+            RedactionPipelineVersion: "content-redaction-pipeline-v1",
+            ProductRuleVersion: "product-redaction-rules-v1"));
+
+        var after = await store.ListContentReferencesForSessionAsync(
+            credential.CustomerOrganizationId,
+            session.AgentSessionId);
+
+        return Assert.Single(after, reference => before.All(existing => existing.ContentReferenceId != reference.ContentReferenceId));
     }
 
     private static string CreatePricingOverrideJson(decimal pricePerMillionTokens = 0.75m)

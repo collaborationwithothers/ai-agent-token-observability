@@ -77,6 +77,8 @@ internal static class TokenObservabilityApiEndpointExtensions
         api.MapPatch("/budgets/policies/{budgetPolicyId}", UpdateBudgetPolicy);
         api.MapGet("/grafana/drilldown", GetGrafanaDrilldown);
         api.MapGet("/sessions", GetSessions);
+        api.MapGet("/sessions/{sessionId}", GetSessionSummary);
+        api.MapGet("/sessions/{sessionId}/timeline", GetSessionTimeline);
         api.MapGet("/sessions/{sessionId}/content-references", GetSessionContentReferences);
         api.MapGet("/content-review/items", GetContentReviewItems);
         api.MapGet("/content-review/items/{contentReferenceId}", GetContentReviewItem);
@@ -467,6 +469,133 @@ internal static class TokenObservabilityApiEndpointExtensions
             items = references.Select(reference => ToContentReferenceResponse(reference, includeApprovedExcerpt: false)).ToArray(),
             nextCursor = (string?)null,
             totalEstimate = references.Count
+        });
+    }
+
+    private static async Task<IResult> GetSessionSummary(
+        string sessionId,
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        ITenantMetadataStore tenantMetadataStore)
+    {
+        var resolution = await ResolveSessionSummaryAuthorizationAsync(httpContext, authorizationContextResolver);
+
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
+        }
+
+        var customerOrganizationId = resolution.Context.CustomerOrganization.CustomerOrganizationId;
+        var session = await FindSessionAsync(tenantMetadataStore, customerOrganizationId, sessionId);
+        if (session is null)
+        {
+            return CreateProblem(httpContext, "Session was not found.", StatusCodes.Status404NotFound, "session_not_found");
+        }
+
+        if (!CanAccessPrivilegedSession(resolution.Context, session))
+        {
+            return CreateProblem(httpContext, "Session investigation access is denied.", StatusCodes.Status403Forbidden, "session_access_denied");
+        }
+
+        var observations = await tenantMetadataStore.ListTokenObservationsAsync(customerOrganizationId, session.AgentSessionId);
+        var hotspots = await tenantMetadataStore.ListTokenHotspotsAsync(customerOrganizationId, session.AgentSessionId);
+        var contentReferences = await tenantMetadataStore.ListContentReferencesForSessionAsync(customerOrganizationId, session.AgentSessionId);
+        var recommendations = await tenantMetadataStore.ListRecommendationsForSessionAsync(customerOrganizationId, session.AgentSessionId);
+        var costEstimates = (await tenantMetadataStore.ListCostEstimatesAsync(customerOrganizationId))
+            .Where(estimate => StringComparer.Ordinal.Equals(estimate.AgentSessionId, session.AgentSessionId))
+            .ToArray();
+
+        return Results.Ok(new
+        {
+            session = ToSessionMetadataResponse(session),
+            harnessContext = new
+            {
+                harness = session.Harness,
+                harnessSetupProfileId = session.HarnessSetupProfileId
+            },
+            modelContext = new
+            {
+                providerNames = costEstimates
+                    .Select(static estimate => estimate.ProviderName)
+                    .Where(static providerName => !string.IsNullOrWhiteSpace(providerName))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray(),
+                modelNames = costEstimates
+                    .Select(static estimate => estimate.ModelName)
+                    .Concat(hotspots.Select(static hotspot => hotspot.ModelName))
+                    .Where(static modelName => !string.IsNullOrWhiteSpace(modelName))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray()
+            },
+            tokenSummary = new
+            {
+                metricStatus = ToWireMetricStatus(session.TokenMetricStatus),
+                metricConfidence = ToWireMetricConfidence(session.TokenMetricConfidence),
+                split = CreateTokenSplit(observations),
+                observations = observations.Select(ToTokenObservationResponse).ToArray()
+            },
+            costSummary = CreateCostSummary(costEstimates),
+            repositoryContext = new
+            {
+                evidenceState = session.RepositoryEvidenceState
+            },
+            tokenHotspots = hotspots.Select(ToTokenHotspotResponse).ToArray(),
+            cacheDiagnostics = CreateCacheDiagnostics(observations, hotspots),
+            contentEvidence = new
+            {
+                summary = session.ContentCaptureSummary,
+                items = contentReferences.Select(ToSessionContentEvidenceResponse).ToArray()
+            },
+            recommendations = new
+            {
+                status = session.RecommendationStatus,
+                items = recommendations.Select(ToRecommendationResponse).ToArray()
+            },
+            auditContext = new
+            {
+                correlationId = resolution.Context.CorrelationId,
+                contentAuditEventIds = contentReferences.Select(static reference => reference.AuditEventId).Distinct(StringComparer.Ordinal).ToArray(),
+                recommendationAuditEventIds = recommendations.Select(static recommendation => recommendation.AuditEventId).Distinct(StringComparer.Ordinal).ToArray()
+            }
+        });
+    }
+
+    private static async Task<IResult> GetSessionTimeline(
+        string sessionId,
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        ITenantMetadataStore tenantMetadataStore)
+    {
+        var resolution = await ResolveSessionSummaryAuthorizationAsync(httpContext, authorizationContextResolver);
+
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
+        }
+
+        var customerOrganizationId = resolution.Context.CustomerOrganization.CustomerOrganizationId;
+        var session = await FindSessionAsync(tenantMetadataStore, customerOrganizationId, sessionId);
+        if (session is null)
+        {
+            return CreateProblem(httpContext, "Session was not found.", StatusCodes.Status404NotFound, "session_not_found");
+        }
+
+        if (!CanAccessPrivilegedSession(resolution.Context, session))
+        {
+            return CreateProblem(httpContext, "Session investigation access is denied.", StatusCodes.Status403Forbidden, "session_access_denied");
+        }
+
+        var observations = await tenantMetadataStore.ListTokenObservationsAsync(customerOrganizationId, session.AgentSessionId);
+        var hotspots = await tenantMetadataStore.ListTokenHotspotsAsync(customerOrganizationId, session.AgentSessionId);
+        var contentReferences = await tenantMetadataStore.ListContentReferencesForSessionAsync(customerOrganizationId, session.AgentSessionId);
+        var recommendations = await tenantMetadataStore.ListRecommendationsForSessionAsync(customerOrganizationId, session.AgentSessionId);
+        var items = CreateSessionTimeline(session, observations, hotspots, contentReferences, recommendations);
+
+        return Results.Ok(new
+        {
+            items,
+            nextCursor = (string?)null,
+            totalEstimate = items.Length
         });
     }
 
@@ -1578,6 +1707,65 @@ internal static class TokenObservabilityApiEndpointExtensions
         return selfResolution.IsAllowed ? selfResolution : organizationResolution;
     }
 
+    private static async Task<TokenObservabilityAuthorizationResolution> ResolveSessionSummaryAuthorizationAsync(
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver)
+    {
+        var scopedResolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            ProductAuthorizationAction.SessionReadScoped,
+            new ProductScope(ProductScopeKind.Organization, ScopeId: null));
+        if (scopedResolution.IsAllowed)
+        {
+            return scopedResolution;
+        }
+
+        var ownResolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            ProductAuthorizationAction.SessionReadOwn,
+            new ProductScope(ProductScopeKind.Self, ScopeId: null));
+        if (ownResolution.IsAllowed)
+        {
+            return ownResolution;
+        }
+
+        var investigateResolution = await ResolveSessionInvestigateAuthorizationAsync(
+            httpContext,
+            authorizationContextResolver);
+
+        return investigateResolution.IsAllowed ? investigateResolution : scopedResolution;
+    }
+
+    private static async Task<TokenObservabilityAuthorizationResolution> ResolveSessionInvestigateAuthorizationAsync(
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver)
+    {
+        var organizationResolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            ProductAuthorizationAction.SessionInvestigate,
+            new ProductScope(ProductScopeKind.Organization, ScopeId: null));
+        if (organizationResolution.IsAllowed)
+        {
+            return organizationResolution;
+        }
+
+        var reviewQueueResolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            ProductAuthorizationAction.SessionInvestigate,
+            new ProductScope(ProductScopeKind.ContentReviewQueue, ScopeId: null));
+        if (reviewQueueResolution.IsAllowed)
+        {
+            return reviewQueueResolution;
+        }
+
+        var selfResolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            ProductAuthorizationAction.SessionInvestigate,
+            new ProductScope(ProductScopeKind.Self, ScopeId: null));
+
+        return selfResolution.IsAllowed ? selfResolution : organizationResolution;
+    }
+
     private static async Task<AgentSessionRecord?> FindSessionAsync(
         ITenantMetadataStore tenantMetadataStore,
         CustomerOrganizationId customerOrganizationId,
@@ -2224,6 +2412,336 @@ internal static class TokenObservabilityApiEndpointExtensions
         };
     }
 
+    private static object ToSessionMetadataResponse(AgentSessionRecord session)
+    {
+        return new
+        {
+            agentSessionId = session.AgentSessionId,
+            customerOrganizationId = session.CustomerOrganizationId.ToString(),
+            productUserId = session.ProductUserId.ToString(),
+            providerSessionIdHash = session.ProviderSessionIdHash,
+            startedAtUtc = session.StartedAtUtc,
+            endedAtUtc = session.EndedAtUtc,
+            sessionStatus = session.SessionStatus,
+            environment = session.Environment,
+            sandboxSetting = session.SandboxSetting,
+            approvalSetting = session.ApprovalSetting,
+            createdAtUtc = session.CreatedAtUtc,
+            updatedAtUtc = session.UpdatedAtUtc
+        };
+    }
+
+    private static object ToTokenObservationResponse(TokenObservationRecord observation)
+    {
+        return new
+        {
+            tokenObservationId = observation.TokenObservationId.ToString(),
+            modelInvocationId = observation.ModelInvocationId,
+            metricName = ToWireMetricName(observation.MetricName),
+            value = observation.Value,
+            metricStatus = ToWireMetricStatus(observation.MetricStatus),
+            metricConfidence = ToWireMetricConfidence(observation.MetricConfidence),
+            sourceKind = ToWireSourceKind(observation.SourceKind),
+            sourceTelemetryEnvelopeId = observation.SourceTelemetryEnvelopeId,
+            createdAtUtc = observation.CreatedAtUtc
+        };
+    }
+
+    private static object ToTokenHotspotResponse(TokenHotspotRecord hotspot)
+    {
+        return new
+        {
+            tokenHotspotId = hotspot.TokenHotspotId.ToString(),
+            hotspotType = ToWireHotspotType(hotspot.HotspotType),
+            findingState = ToWireHotspotFindingState(hotspot.FindingState),
+            attributionType = ToWireHotspotAttributionType(hotspot.AttributionType),
+            confidence = ToWireHotspotConfidence(hotspot.Confidence),
+            metricStatus = ToWireMetricStatus(hotspot.MetricStatus),
+            metricConfidence = ToWireMetricConfidence(hotspot.MetricConfidence),
+            promptCacheEvidenceState = ToWirePromptCacheEvidenceState(hotspot.PromptCacheEvidenceState),
+            harness = hotspot.Harness,
+            modelName = hotspot.ModelName,
+            evidenceSummary = hotspot.EvidenceSummary,
+            evidenceReferenceIds = hotspot.EvidenceReferenceIds,
+            tokenBurnScore = hotspot.TokenBurnScore,
+            estimatedCostImpact = hotspot.EstimatedCostImpact,
+            createdAtUtc = hotspot.CreatedAtUtc,
+            routeTarget = $"#hotspot-{hotspot.TokenHotspotId}"
+        };
+    }
+
+    private static IReadOnlyList<SessionTokenSplitItem> CreateTokenSplit(
+        IReadOnlyList<TokenObservationRecord> observations)
+    {
+        return observations
+            .GroupBy(static observation => observation.MetricName)
+            .Select(static group =>
+            {
+                var values = group.Select(static observation => observation.Value).ToArray();
+                var knownValues = values.Where(static value => value.HasValue).Select(static value => value!.Value).ToArray();
+                long? totalValue = knownValues.Length == 0 ? null : knownValues.Sum();
+                var metricStatus = group.Any(static observation => observation.MetricStatus == TokenMetricStatus.Mixed)
+                    ? TokenMetricStatus.Mixed
+                    : group.Select(static observation => observation.MetricStatus).Distinct().Count() == 1
+                        ? group.First().MetricStatus
+                        : TokenMetricStatus.Mixed;
+                var metricConfidence = group.Any(static observation => observation.MetricConfidence == TokenMetricConfidence.Unavailable)
+                    ? TokenMetricConfidence.Unavailable
+                    : group.Select(static observation => observation.MetricConfidence).Distinct().Count() == 1
+                        ? group.First().MetricConfidence
+                        : TokenMetricConfidence.Estimated;
+
+                return new SessionTokenSplitItem(
+                    ToWireMetricName(group.Key),
+                    totalValue,
+                    ToWireMetricStatus(metricStatus),
+                    ToWireMetricConfidence(metricConfidence));
+            })
+            .OrderBy(static item => item.MetricName, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private static object CreateCostSummary(IReadOnlyList<CostEstimateRecord> costEstimates)
+    {
+        var knownCosts = costEstimates
+            .Where(static estimate => estimate.EstimatedCost.HasValue)
+            .Select(static estimate => estimate.EstimatedCost!.Value)
+            .ToArray();
+        var statuses = costEstimates.Select(static estimate => estimate.CostStatus).Distinct().ToArray();
+        var currencies = costEstimates.Select(static estimate => estimate.Currency).Distinct(StringComparer.Ordinal).ToArray();
+
+        return new
+        {
+            estimatedTotal = knownCosts.Length == 0 ? (decimal?)null : knownCosts.Sum(),
+            currency = currencies.Length == 1 ? currencies[0] : null,
+            currencyState = currencies.Length switch
+            {
+                0 => "unavailable",
+                1 => "single",
+                _ => "mixed"
+            },
+            costStatus = statuses.Length switch
+            {
+                0 => "unavailable",
+                1 => InMemoryTenantMetadataStore.ToWireCostStatus(statuses[0]),
+                _ => "mixed"
+            },
+            estimates = costEstimates.Select(static estimate => new
+            {
+                costEstimateId = estimate.CostEstimateId,
+                modelInvocationId = estimate.ModelInvocationId,
+                pricingBasisId = estimate.PricingBasisId,
+                pricingVersion = estimate.PricingVersion,
+                currency = estimate.Currency,
+                estimatedCost = estimate.EstimatedCost,
+                costStatus = InMemoryTenantMetadataStore.ToWireCostStatus(estimate.CostStatus),
+                sourceKind = ToWireCostEstimateSourceKind(estimate.SourceKind),
+                metricStatus = ToWireMetricStatus(estimate.TokenMetricStatus),
+                metricConfidence = ToWireMetricConfidence(estimate.TokenMetricConfidence),
+                providerName = estimate.ProviderName,
+                modelName = estimate.ModelName,
+                billingRoute = estimate.BillingRoute,
+                tokenType = InMemoryTenantMetadataStore.ToWirePricingTokenType(estimate.TokenType),
+                createdAtUtc = estimate.CreatedAtUtc
+            }).ToArray()
+        };
+    }
+
+    private static IReadOnlyList<object> CreateCacheDiagnostics(
+        IReadOnlyList<TokenObservationRecord> observations,
+        IReadOnlyList<TokenHotspotRecord> hotspots)
+    {
+        var diagnostics = new List<object>();
+        var cachedInput = observations
+            .Where(static observation => observation.MetricName == TokenMetricName.CachedInputTokens)
+            .Select(ToTokenObservationResponse)
+            .ToArray();
+
+        if (cachedInput.Length > 0)
+        {
+            diagnostics.Add(new
+            {
+                diagnosticType = "cached_input_tokens",
+                evidenceState = "observed_metric",
+                tokenObservations = cachedInput
+            });
+        }
+
+        diagnostics.AddRange(hotspots
+            .Where(static hotspot => hotspot.PromptCacheEvidenceState != PromptCacheEvidenceState.NotApplicable)
+            .Select(static hotspot => new
+            {
+                diagnosticType = "prompt_cache_evidence",
+                evidenceState = ToWirePromptCacheEvidenceState(hotspot.PromptCacheEvidenceState),
+                tokenHotspotId = hotspot.TokenHotspotId.ToString(),
+                hotspotType = ToWireHotspotType(hotspot.HotspotType),
+                findingState = ToWireHotspotFindingState(hotspot.FindingState),
+                evidenceSummary = hotspot.EvidenceSummary,
+                routeTarget = $"#hotspot-{hotspot.TokenHotspotId}"
+            }));
+
+        return diagnostics;
+    }
+
+    private static object ToSessionContentEvidenceResponse(ContentReferenceRecord reference)
+    {
+        return new
+        {
+            contentReferenceId = reference.ContentReferenceId.ToString(),
+            agentSessionId = reference.AgentSessionId,
+            telemetryEnvelopeId = reference.TelemetryEnvelopeId,
+            contentClass = InMemoryTenantMetadataStore.ToWireContentClass(reference.ContentClass),
+            captureState = InMemoryTenantMetadataStore.ToWireContentReferenceCaptureState(reference.CaptureState),
+            redactionStatus = InMemoryTenantMetadataStore.ToWireContentReferenceRedactionStatus(reference.RedactionStatus),
+            evidenceState = ToSessionContentEvidenceState(reference),
+            policyVersionId = reference.PolicyVersionId,
+            redactionPipelineVersion = reference.RedactionPipelineVersion,
+            productRuleVersion = reference.ProductRuleVersion,
+            retentionClass = InMemoryTenantMetadataStore.ToWireContentRetentionClass(reference.RetentionClass),
+            expiresAtUtc = reference.ExpiresAtUtc,
+            recommendationEligible = reference.RecommendationEligible,
+            auditEventId = reference.AuditEventId,
+            approvedExcerpt = (string?)null,
+            createdAtUtc = reference.CreatedAtUtc,
+            updatedAtUtc = reference.UpdatedAtUtc,
+            routeTarget = $"#content-{reference.ContentReferenceId}"
+        };
+    }
+
+    private static string ToSessionContentEvidenceState(ContentReferenceRecord reference)
+    {
+        return reference.CaptureState switch
+        {
+            ContentReferenceCaptureState.NotAllowed => "policy_hidden",
+            ContentReferenceCaptureState.MetadataOnly => "metadata_only",
+            ContentReferenceCaptureState.Captured => "metadata_only",
+            ContentReferenceCaptureState.RedactionFailed => "redaction_failed",
+            ContentReferenceCaptureState.ReviewRequired => "review_required",
+            ContentReferenceCaptureState.Discarded => "metadata_only",
+            ContentReferenceCaptureState.ApprovedExcerpt => "approved_excerpt",
+            _ => "unavailable"
+        };
+    }
+
+    private static SessionTimelineItem[] CreateSessionTimeline(
+        AgentSessionRecord session,
+        IReadOnlyList<TokenObservationRecord> observations,
+        IReadOnlyList<TokenHotspotRecord> hotspots,
+        IReadOnlyList<ContentReferenceRecord> contentReferences,
+        IReadOnlyList<RecommendationRecord> recommendations)
+    {
+        var items = new List<SessionTimelineItem>
+        {
+            new(
+                $"session-started-{session.AgentSessionId}",
+                session.StartedAtUtc ?? session.CreatedAtUtc,
+                "session",
+                "Session started",
+                session.SessionStatus,
+                session.AgentSessionId,
+                new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    ["harness"] = session.Harness,
+                    ["harnessSetupProfileId"] = session.HarnessSetupProfileId,
+                    ["providerSessionIdHash"] = session.ProviderSessionIdHash
+                })
+        };
+
+        items.AddRange(observations.Select(observation => new SessionTimelineItem(
+            $"token-observation-{observation.TokenObservationId}",
+            observation.CreatedAtUtc,
+            "token_observation",
+            "Token observation recorded",
+            ToWireMetricStatus(observation.MetricStatus),
+            observation.TokenObservationId.ToString(),
+            new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["metricName"] = ToWireMetricName(observation.MetricName),
+                ["value"] = observation.Value,
+                ["metricConfidence"] = ToWireMetricConfidence(observation.MetricConfidence),
+                ["sourceKind"] = ToWireSourceKind(observation.SourceKind),
+                ["modelInvocationId"] = observation.ModelInvocationId
+            })));
+
+        items.AddRange(hotspots.Select(hotspot => new SessionTimelineItem(
+            $"token-hotspot-{hotspot.TokenHotspotId}",
+            hotspot.CreatedAtUtc,
+            "token_hotspot",
+            "Token hotspot recorded",
+            ToWireHotspotFindingState(hotspot.FindingState),
+            hotspot.TokenHotspotId.ToString(),
+            new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["hotspotType"] = ToWireHotspotType(hotspot.HotspotType),
+                ["attributionType"] = ToWireHotspotAttributionType(hotspot.AttributionType),
+                ["confidence"] = ToWireHotspotConfidence(hotspot.Confidence),
+                ["promptCacheEvidenceState"] = ToWirePromptCacheEvidenceState(hotspot.PromptCacheEvidenceState),
+                ["routeTarget"] = $"#hotspot-{hotspot.TokenHotspotId}"
+            })));
+
+        items.AddRange(contentReferences.Select(reference => new SessionTimelineItem(
+            $"content-evidence-{reference.ContentReferenceId}",
+            reference.CreatedAtUtc,
+            "content_evidence",
+            "Content evidence state recorded",
+            ToSessionContentEvidenceState(reference),
+            reference.ContentReferenceId.ToString(),
+            new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["captureState"] = InMemoryTenantMetadataStore.ToWireContentReferenceCaptureState(reference.CaptureState),
+                ["redactionStatus"] = InMemoryTenantMetadataStore.ToWireContentReferenceRedactionStatus(reference.RedactionStatus),
+                ["contentClass"] = InMemoryTenantMetadataStore.ToWireContentClass(reference.ContentClass),
+                ["routeTarget"] = $"#content-{reference.ContentReferenceId}"
+            })));
+
+        items.AddRange(recommendations.Select(recommendation => new SessionTimelineItem(
+            $"recommendation-{recommendation.RecommendationId}",
+            recommendation.CreatedAtUtc,
+            "recommendation",
+            "Recommendation recorded",
+            InMemoryTenantMetadataStore.ToWireRecommendationState(recommendation.State),
+            recommendation.RecommendationId.ToString(),
+            new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["kind"] = InMemoryTenantMetadataStore.ToWireRecommendationKind(recommendation.Kind),
+                ["authorityState"] = InMemoryTenantMetadataStore.ToWireRecommendationAuthorityState(recommendation.AuthorityState),
+                ["confidence"] = InMemoryTenantMetadataStore.ToWireRecommendationConfidence(recommendation.Confidence),
+                ["routeTarget"] = $"#recommendation-{recommendation.RecommendationId}"
+            })));
+
+        if (session.EndedAtUtc.HasValue)
+        {
+            items.Add(new SessionTimelineItem(
+                $"session-ended-{session.AgentSessionId}",
+                session.EndedAtUtc,
+                "session",
+                "Session ended",
+                session.SessionStatus,
+                session.AgentSessionId,
+                new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    ["harness"] = session.Harness
+                }));
+        }
+
+        return items
+            .OrderBy(static item => item.EventTimestampUtc)
+            .ThenBy(static item => item.TimelineItemId, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private static string ToWireCostEstimateSourceKind(CostEstimateSourceKind sourceKind)
+    {
+        return sourceKind switch
+        {
+            CostEstimateSourceKind.DerivedFromObservedTokens => "derived_from_observed_tokens",
+            CostEstimateSourceKind.DerivedFromEstimatedTokens => "derived_from_estimated_tokens",
+            CostEstimateSourceKind.ManualOverride => "manual_override",
+            CostEstimateSourceKind.Unavailable => "unavailable",
+            _ => throw new ArgumentOutOfRangeException(nameof(sourceKind), sourceKind, null)
+        };
+    }
+
     private static TokenHotspotId? ParseOptionalTokenHotspotId(string? tokenHotspotId)
     {
         if (string.IsNullOrWhiteSpace(tokenHotspotId))
@@ -2437,6 +2955,21 @@ internal static class TokenObservabilityApiEndpointExtensions
         string? AgentSessionId,
         string? TokenHotspotId,
         string? Reason);
+
+    private sealed record SessionTokenSplitItem(
+        string MetricName,
+        long? Value,
+        string MetricStatus,
+        string MetricConfidence);
+
+    private sealed record SessionTimelineItem(
+        string TimelineItemId,
+        DateTimeOffset? EventTimestampUtc,
+        string ItemType,
+        string Title,
+        string State,
+        string? RelatedResourceId,
+        IReadOnlyDictionary<string, object?> Metadata);
 
     private sealed record ContentReviewDecisionBody(string? DecisionReason);
 

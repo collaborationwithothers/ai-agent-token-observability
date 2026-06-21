@@ -339,6 +339,120 @@ td small {
   line-height: 1.6;
 }
 
+.investigation-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.investigation-panel {
+  border: 1px solid #d9e1e8;
+  border-radius: 8px;
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 16px;
+}
+
+.investigation-panel h5 {
+  font-size: 0.94rem;
+  line-height: 1.35;
+  margin: 0;
+}
+
+.detail-list,
+.inline-metadata {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.detail-list {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.detail-list.compact,
+.inline-metadata {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.detail-list div,
+.inline-metadata div {
+  min-width: 0;
+}
+
+.detail-list dt,
+.inline-metadata dt {
+  color: #687582;
+  font-size: 0.72rem;
+  font-weight: 800;
+  margin-bottom: 3px;
+  text-transform: uppercase;
+}
+
+.detail-list dd,
+.inline-metadata dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.compact-table table {
+  min-width: 640px;
+}
+
+.timeline-list,
+.metadata-list,
+.evidence-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+}
+
+.timeline-list {
+  list-style: none;
+}
+
+.timeline-list li,
+.metadata-list li,
+.evidence-list article {
+  background: #f8fafc;
+  border: 1px solid #e3e9ee;
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px;
+}
+
+.timeline-list time {
+  color: #687582;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.metadata-list {
+  list-style: none;
+}
+
+.metadata-list a {
+  display: inline-block;
+  font-weight: 700;
+  margin-left: 8px;
+}
+
+.evidence-list p,
+.evidence-list blockquote {
+  color: #536273;
+  line-height: 1.55;
+}
+
+.evidence-list blockquote {
+  border-left: 4px solid #2d9c8f;
+  margin: 0;
+  padding-left: 12px;
+}
+
 .status-shell {
   align-items: center;
   display: flex;
@@ -382,6 +496,10 @@ td small {
   .filter-grid {
     grid-template-columns: repeat(2, minmax(180px, 1fr));
   }
+
+  .investigation-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 640px) {
@@ -392,7 +510,10 @@ td small {
   }
 
   .context-list,
-  .filter-grid {
+  .filter-grid,
+  .detail-list,
+  .detail-list.compact,
+  .inline-metadata {
     grid-template-columns: 1fr;
   }
 
