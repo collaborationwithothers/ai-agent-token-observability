@@ -79,12 +79,16 @@ Use `scripts/session-digest.sh ISSUE_NUMBER` or `scripts/issue-start.sh --compac
 
 Use subagents only for parallel review, independent research, or Code Reviewer.
 
-Do not use planner or implementor subagents for normal ready-for-agent issue work. The issue planning, risk classification, implementation handoff, and narrow implementation loop live in the repo skills:
+Do not recreate separate issue planner or issue implementor subagents for normal ready-for-agent issue work. The issue planning, risk classification, implementation handoff, and narrow implementation loop live in the repo skills:
 
 - `.agents/skills/review-worktree-issue-pr/SKILL.md`
 - `.agents/skills/infrastructure-readiness-issue/SKILL.md`
 
-Use the main agent to produce the planning handoff and implement from it. Escalate internally to the high-risk workflow in the relevant skill for security, privacy, tenant-boundary, authorization, persistence, migration, Terraform provider behavior, production architecture, token metric state changes, or Azure infrastructure behavior.
+Use the main agent to produce the planning handoff and implement from it for single-issue work. Escalate internally to the high-risk workflow in the relevant skill for security, privacy, tenant-boundary, authorization, persistence, migration, Terraform provider behavior, production architecture, token metric state changes, or Azure infrastructure behavior.
+
+Narrow exception: use the `.codex/agents/issue-executor.toml` Issue Executor only for coordinator-managed parallel batches with two or more independent ready-for-agent issues. Each issue must already have a confirmed open, ready-for-agent, unblocked state; an isolated worktree and branch; an Issue Start Packet; and a planning handoff with an acceptance matrix, do-not-touch list, focused validation command, and risk classification. Do not use Issue Executor for one issue.
+
+For parallel batches, the main agent remains the coordinator. The coordinator dispatches one Issue Executor per issue, then inspects each handoff, branch/status, diff stat, untracked files, acceptance matrix, and focused validation result before Code Reviewer. The coordinator owns final validation, Code Reviewer orchestration, PR creation, and `closingIssuesReferences` verification.
 
 Do not spawn explorer agents unless a specific independent unknown remains after the skill-driven planning handoff.
 

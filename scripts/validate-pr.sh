@@ -104,7 +104,7 @@ run_step() {
 
 run_focused_profile() {
   local selected_profile="$1"
-  run_step "focused validation: ${selected_profile}" scripts/validate-focused.sh "$selected_profile"
+  run_step "focused validation: ${selected_profile}" bash scripts/validate-focused.sh "$selected_profile"
 }
 
 changed_files() {
@@ -140,7 +140,7 @@ infer_changed_profiles() {
 
   while IFS= read -r file; do
     case "$file" in
-      AGENTS.md|README.md|docs/*|.agents/skills/*|*.md)
+      AGENTS.md|README.md|docs/*|.agents/skills/*|.codex/agents/*.toml|*.md)
         docs=true
         ;;
       .github/workflows/terraform-*.yml|.github/workflows/terraform-*.yaml|.github/workflows/edge-origin-validation.yml|infrastructure/azure/*|scripts/terraform-*|scripts/validate-terraform-*|scripts/validate-edge-origin-workflow.sh|tests/workflow-guardrails/*)
