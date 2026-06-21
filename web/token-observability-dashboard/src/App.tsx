@@ -66,7 +66,7 @@ export type CurrentUser = {
   correlationId: string;
 };
 
-type ProblemDetails = {
+export type ProblemDetails = {
   title?: string;
   status?: number;
   code?: string;
@@ -121,7 +121,50 @@ type OverviewCostMixItem = {
   metricStatus: string;
 };
 
-type OverviewResponse = {
+type OverviewSummaryItem = {
+  label: string;
+  value: number;
+};
+
+export type OverviewResponse = {
+  tokenSummary: {
+    totalTokens: number | null;
+    metricStates: OverviewSummaryItem[];
+    tokenTypes: OverviewSummaryItem[];
+  };
+  costSummary: {
+    totalEstimatedCost: number | null;
+    currency: string | null;
+    costStates: OverviewSummaryItem[];
+    metricStates: OverviewSummaryItem[];
+  };
+  cacheSummary: {
+    eventCount: number | null;
+    tokenImpact: number | null;
+    results: OverviewSummaryItem[];
+    bustCategories: OverviewSummaryItem[];
+    evidenceStates: OverviewSummaryItem[];
+  };
+  hotspotSummary: {
+    totalHotspots: number;
+    estimatedCostImpact: number | null;
+    byType: OverviewSummaryItem[];
+    findingStates: OverviewSummaryItem[];
+    metricStates: OverviewSummaryItem[];
+  };
+  ingestionSummary: {
+    requestCount: number | null;
+    rejectedCount: number;
+    results: OverviewSummaryItem[];
+    rejectionReasons: OverviewSummaryItem[];
+    signalTypes: OverviewSummaryItem[];
+  };
+  platformHealthSummary: {
+    signalCount: number | null;
+    backgroundJobResults: OverviewSummaryItem[];
+    productApiStatusClasses: OverviewSummaryItem[];
+    containerApps: OverviewSummaryItem[];
+  };
   costMix: OverviewCostMixItem[];
 };
 
@@ -650,7 +693,7 @@ function OverviewShell({
     async function loadOverview() {
       setOverviewState({ kind: "loading" });
       try {
-        const response = await fetch(`${productApiBaseUrl}/overview${window.location.search}`, {
+        const response = await fetch(buildOverviewRequestUrl(productApiBaseUrl, currentPath), {
           credentials: "include",
           headers: { Accept: "application/json" }
         });
@@ -661,11 +704,8 @@ function OverviewShell({
         }
 
         if (!response.ok) {
-          setOverviewState({
-            kind: "error",
-            message: problem?.title ?? "Overview data request failed.",
-            problem
-          });
+          const copy = classifyOverviewProblem(problem);
+          setOverviewState({ kind: "error", message: copy.message, problem });
           return;
         }
 
@@ -763,30 +803,207 @@ function OverviewShell({
         </label>
         <label>
           <span>Finding state</span>
-          <input
+          <select
             value={filters.findingState}
             onChange={(event) => setFilters({ ...filters, findingState: event.target.value })}
-            placeholder="confirmed"
+          >
+            <option value="">Any finding state</option>
+            <option value="confirmed">Confirmed</option>
+            <option value="llm_inferred_candidate">LLM inferred candidate</option>
+          </select>
+        </label>
+        <label>
+          <span>Hotspot type</span>
+          <select
+            value={filters.hotspotType}
+            onChange={(event) => setFilters({ ...filters, hotspotType: event.target.value })}
+          >
+            <option value="">Any hotspot type</option>
+            <option value="prompt_cache_breakage">Prompt cache breakage</option>
+            <option value="large_context">Large context</option>
+            <option value="tool_loop">Tool loop</option>
+            <option value="model_retry">Model retry</option>
+            <option value="repo_context_bloat">Repo context bloat</option>
+            <option value="generated_artifact_bloat">Generated artifact bloat</option>
+            <option value="expensive_model_choice">Expensive model choice</option>
+            <option value="error_rework">Error rework</option>
+            <option value="unknown">Unknown</option>
+          </select>
+        </label>
+        <label>
+          <span>Cache bust category</span>
+          <select
+            value={filters.cacheBustCategory}
+            onChange={(event) => setFilters({ ...filters, cacheBustCategory: event.target.value })}
+          >
+            <option value="">Any cache category</option>
+            <option value="prompt_changed">Prompt changed</option>
+            <option value="system_instruction_changed">System instruction changed</option>
+            <option value="tool_context_changed">Tool context changed</option>
+            <option value="repository_context_changed">Repository context changed</option>
+            <option value="model_changed">Model changed</option>
+            <option value="unknown">Unknown</option>
+          </select>
+        </label>
+        <label>
+          <span>Signal type</span>
+          <select
+            value={filters.signalType}
+            onChange={(event) => setFilters({ ...filters, signalType: event.target.value })}
+          >
+            <option value="">Any signal type</option>
+            <option value="metrics">Metrics</option>
+            <option value="traces">Traces</option>
+            <option value="logs">Logs</option>
+          </select>
+        </label>
+        <label>
+          <span>Result</span>
+          <input
+            value={filters.result}
+            onChange={(event) => setFilters({ ...filters, result: event.target.value })}
+            placeholder="accepted"
+          />
+        </label>
+        <label>
+          <span>Rejection reason</span>
+          <input
+            value={filters.rejectionReason}
+            onChange={(event) => setFilters({ ...filters, rejectionReason: event.target.value })}
+            placeholder="malformed_otlp"
           />
         </label>
         <button type="submit">Apply filters</button>
       </form>
       {overviewState.kind === "loading" ? (
         <div className="empty-state">
-          <h4>Loading aggregate cost mix</h4>
-          <p>The dashboard is requesting authorized aggregate cost data.</p>
+          <h4>Loading aggregate overview</h4>
+          <p>The dashboard is requesting authorized aggregate token, cost, cache, hotspot, ingestion, and platform health data.</p>
         </div>
       ) : overviewState.kind === "error" ? (
-        <InlineProblem title="Overview unavailable" message={overviewState.message} problem={overviewState.problem} />
-      ) : overviewState.data.costMix.length === 0 ? (
-        <div className="empty-state">
-          <h4>No aggregate cost mix yet</h4>
-          <p>Cost buckets appear after pricing basis and cost estimates are available.</p>
-        </div>
+        <OverviewProblem message={overviewState.message} problem={overviewState.problem} />
       ) : (
-        <CostMixTable items={overviewState.data.costMix} />
+        <OverviewContent overview={overviewState.data} />
       )}
     </section>
+  );
+}
+
+function OverviewProblem({ message, problem }: { message: string; problem?: ProblemDetails }) {
+  const copy = classifyOverviewProblem(problem);
+
+  return <InlineProblem title={copy.title} message={message || copy.message} problem={problem} />;
+}
+
+function OverviewContent({ overview }: { overview: OverviewResponse }) {
+  if (!overviewHasData(overview)) {
+    return (
+      <div className="empty-state">
+        <h4>No aggregate data for these filters</h4>
+        <p>Aggregate summaries appear after authorized telemetry is accepted and exported for the selected tenant context.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="overview-content">
+      <div className="summary-grid">
+        <SummaryCard
+          title="Token summary"
+          value={formatNumberOrUnavailable(overview.tokenSummary.totalTokens)}
+          stateItems={overview.tokenSummary.metricStates}
+          detailItems={overview.tokenSummary.tokenTypes}
+          detailLabel="Token types"
+        />
+        <SummaryCard
+          title="Cost summary"
+          value={formatMoney(overview.costSummary.totalEstimatedCost, overview.costSummary.currency)}
+          stateItems={overview.costSummary.costStates}
+          detailItems={overview.costSummary.metricStates}
+          detailLabel="Metric states"
+        />
+        <SummaryCard
+          title="Cache summary"
+          value={formatNumberOrUnavailable(overview.cacheSummary.eventCount)}
+          stateItems={overview.cacheSummary.evidenceStates}
+          detailItems={overview.cacheSummary.bustCategories}
+          detailLabel="Bust categories"
+        />
+        <SummaryCard
+          title="Hotspot summary"
+          value={formatNumberOrUnavailable(overview.hotspotSummary.totalHotspots)}
+          stateItems={overview.hotspotSummary.findingStates}
+          detailItems={overview.hotspotSummary.metricStates}
+          detailLabel="Metric states"
+        />
+        <SummaryCard
+          title="Ingestion summary"
+          value={formatNumberOrUnavailable(overview.ingestionSummary.requestCount)}
+          stateItems={overview.ingestionSummary.results}
+          detailItems={overview.ingestionSummary.rejectionReasons}
+          detailLabel="Rejection reasons"
+        />
+        <SummaryCard
+          title="Platform health"
+          value={formatNumberOrUnavailable(overview.platformHealthSummary.signalCount)}
+          stateItems={overview.platformHealthSummary.productApiStatusClasses}
+          detailItems={overview.platformHealthSummary.backgroundJobResults}
+          detailLabel="Job results"
+        />
+      </div>
+
+      {overview.costMix.length === 0 ? (
+        <div className="empty-state">
+          <h4>No aggregate cost mix yet</h4>
+          <p>Cost buckets appear after pricing basis and cost estimates are available for the selected filters.</p>
+        </div>
+      ) : (
+        <CostMixTable items={overview.costMix} />
+      )}
+    </div>
+  );
+}
+
+function SummaryCard({
+  title,
+  value,
+  stateItems,
+  detailItems,
+  detailLabel
+}: {
+  title: string;
+  value: string;
+  stateItems: OverviewSummaryItem[];
+  detailItems: OverviewSummaryItem[];
+  detailLabel: string;
+}) {
+  return (
+    <article className="summary-card">
+      <h4>{title}</h4>
+      <p className="summary-value">{value}</p>
+      <SummaryList label="States" items={stateItems} emptyLabel="Unavailable" />
+      <SummaryList label={detailLabel} items={detailItems} emptyLabel="No aggregate buckets" />
+    </article>
+  );
+}
+
+function SummaryList({ label, items, emptyLabel }: { label: string; items: OverviewSummaryItem[]; emptyLabel: string }) {
+  return (
+    <div className="summary-list">
+      <span>{label}</span>
+      {items.length === 0 ? (
+        <em>{emptyLabel}</em>
+      ) : (
+        <ul>
+          {items.map((item) => (
+            <li key={item.label}>
+              <span className="state-chip">{formatMachineText(item.label)}</span>
+              <strong>{formatNumberOrUnavailable(item.value)}</strong>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -1314,14 +1531,22 @@ function formatMachineText(value: string) {
   return value.replaceAll("_", " ");
 }
 
-function formatMoney(value: number | null, currency: string) {
+function formatNumberOrUnavailable(value: number | null) {
+  if (value === null) {
+    return "Unavailable";
+  }
+
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value);
+}
+
+function formatMoney(value: number | null, currency: string | null) {
   if (value === null) {
     return "Unavailable";
   }
 
   return new Intl.NumberFormat(undefined, {
     style: "currency",
-    currency,
+    currency: currency ?? "USD",
     maximumFractionDigits: 6
   }).format(value);
 }
@@ -1494,6 +1719,53 @@ async function readProblemDetails(response: Response): Promise<ProblemDetails | 
   } catch {
     return undefined;
   }
+}
+
+export function buildOverviewRequestUrl(productApiBaseUrl: string, currentPath: string) {
+  const [, rawSearch = ""] = currentPath.split("?");
+  const search = rawSearch ? `?${rawSearch}` : "";
+
+  return `${productApiBaseUrl}/overview${search}`;
+}
+
+export function classifyOverviewProblem(problem: ProblemDetails | undefined) {
+  if (problem?.code === "authorization_denied" || problem?.status === 403) {
+    return {
+      title: "Overview not authorized",
+      message: "Your current Product API role or scope does not allow this aggregate overview."
+    };
+  }
+
+  if (problem?.code === "tenant_context_required" || problem?.code === "tenant_context_ambiguous") {
+    return {
+      title: "Tenant context required",
+      message: "Select or correct the tenant context before loading aggregate overview data."
+    };
+  }
+
+  return {
+    title: "Overview unavailable",
+    message: problem?.title ?? "Overview data request failed."
+  };
+}
+
+export function overviewHasData(overview: OverviewResponse) {
+  return (
+    overview.tokenSummary.totalTokens !== null ||
+    overview.costSummary.totalEstimatedCost !== null ||
+    overview.cacheSummary.eventCount !== null ||
+    overview.cacheSummary.tokenImpact !== null ||
+    overview.hotspotSummary.totalHotspots > 0 ||
+    overview.ingestionSummary.requestCount !== null ||
+    overview.ingestionSummary.rejectedCount > 0 ||
+    overview.platformHealthSummary.signalCount !== null ||
+    overview.costMix.length > 0 ||
+    overview.tokenSummary.metricStates.length > 0 ||
+    overview.costSummary.costStates.length > 0 ||
+    overview.cacheSummary.results.length > 0 ||
+    overview.ingestionSummary.results.length > 0 ||
+    overview.platformHealthSummary.containerApps.length > 0
+  );
 }
 
 export function resolveRoute(path: string, routes: DashboardRoute[]) {

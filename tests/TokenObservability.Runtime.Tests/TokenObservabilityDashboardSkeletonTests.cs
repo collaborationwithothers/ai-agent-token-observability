@@ -50,7 +50,8 @@ public sealed class TokenObservabilityDashboardSkeletonTests
 
         Assert.Contains("defaultProductApiBaseUrl = \"/api/v1\"", appSource);
         Assert.Contains("fetch(`${productApiBaseUrl}/me`", appSource);
-        Assert.Contains("fetch(`${productApiBaseUrl}/overview", appSource);
+        Assert.Contains("buildOverviewRequestUrl", appSource);
+        Assert.Contains("return `${productApiBaseUrl}/overview${search}`", appSource);
         Assert.Contains("fetch(`${productApiBaseUrl}/pricing/basis", appSource);
         Assert.Contains("requiredScopeKinds", appSource);
         Assert.Contains("scopeMatchesRoute", appSource);

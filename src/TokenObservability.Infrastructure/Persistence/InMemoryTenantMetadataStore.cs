@@ -4148,7 +4148,9 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IT
                 "tokenobs_sessions_started_total" or
                 "tokenobs_token_metric_states_total" or
                 "tokenobs_model_invocations_total" or
-                "tokenobs_turns_total"
+                "tokenobs_turns_total" or
+                "tokenobs_hotspots_open" or
+                "tokenobs_ingestion_requests_total"
             ? normalized
             : throw new ArgumentException("Aggregate metric name is not supported.", parameterName);
     }
@@ -4157,7 +4159,7 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IT
     {
         var normalized = NormalizeRequiredText(value, parameterName);
 
-        return normalized is "tokens" or "sessions" or "observations" or "invocations" or "turns"
+        return normalized is "tokens" or "sessions" or "observations" or "invocations" or "turns" or "hotspots" or "requests"
             ? normalized
             : throw new ArgumentException("Aggregate metric unit is not supported.", parameterName);
     }
@@ -4536,6 +4538,8 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IT
             "tokenobs_tokens_total" or "tokenobs_token_metric_states_total" => label is "model_provider" or "model" or "token_type" or "metric_status" or "metric_confidence",
             "tokenobs_model_invocations_total" => label is "model_provider" or "model" or "result",
             "tokenobs_turns_total" => label is "result",
+            "tokenobs_hotspots_open" => label is "hotspot_type" or "finding_state",
+            "tokenobs_ingestion_requests_total" => label is "signal_type" or "result" or "rejection_reason" or "schema_version",
             "tokenobs_sessions_started_total" => false,
             _ => false
         };
