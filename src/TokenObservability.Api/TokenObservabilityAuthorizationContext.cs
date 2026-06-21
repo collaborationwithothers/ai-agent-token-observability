@@ -16,7 +16,7 @@ internal static class TokenObservabilityAuthorizationContextServiceCollectionExt
     {
         services.TryAddSingleton<ITenantMetadataClock, SystemTenantMetadataClock>();
         services.TryAddSingleton<InMemoryTenantMetadataStore>();
-        services.TryAddSingleton<IProductApiIdempotencyStore>(serviceProvider =>
+        services.TryAddSingleton<ITenantMetadataStore>(serviceProvider =>
         {
             var configuration = serviceProvider.GetRequiredService<IConfiguration>();
             var connectionString =
@@ -25,13 +25,15 @@ internal static class TokenObservabilityAuthorizationContextServiceCollectionExt
             if (!string.IsNullOrWhiteSpace(connectionString))
             {
                 var dataSource = NpgsqlDataSource.Create(connectionString);
-                return new PostgreSqlProductApiIdempotencyStore(
+                return new PostgreSqlTenantMetadataStore(
                     dataSource,
                     serviceProvider.GetRequiredService<ITenantMetadataClock>());
             }
 
             return serviceProvider.GetRequiredService<InMemoryTenantMetadataStore>();
         });
+        services.TryAddSingleton<IProductApiIdempotencyStore>(serviceProvider =>
+            serviceProvider.GetRequiredService<ITenantMetadataStore>());
         services.TryAddScoped<TokenObservabilityAuthorizationContextAccessor>();
         services.TryAddScoped<TokenObservabilityAuthorizationContextResolver>();
     }
@@ -43,7 +45,7 @@ internal sealed class TokenObservabilityAuthorizationContextAccessor
 }
 
 internal sealed class TokenObservabilityAuthorizationContextResolver(
-    InMemoryTenantMetadataStore tenantMetadataStore,
+    ITenantMetadataStore tenantMetadataStore,
     TokenObservabilityAuthorizationContextAccessor authorizationContextAccessor)
 {
     public async Task<TokenObservabilityAuthorizationResolution> ResolveAsync(

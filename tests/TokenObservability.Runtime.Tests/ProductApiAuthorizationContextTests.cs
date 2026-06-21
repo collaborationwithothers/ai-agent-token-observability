@@ -1321,6 +1321,83 @@ public sealed class ProductApiAuthorizationContextTests
     }
 
     [Fact]
+    public async Task PricingSupersedeRouteReviewsCandidateAndApprovedRecordsWithIdempotency()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var adminClaims = CreateClaims(subject: "admin-subject", groupObjectIds: ["admin-group"]);
+        var admin = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            adminClaims);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            admin.ProductUserId,
+            "admin-group",
+            ProductRole.PlatformAdmin);
+        var candidate = await SeedPricingCandidateAsync(store, seed, "gpt-5", "audit-pricing-seed-supersede-candidate");
+        var approved = await SeedPricingCandidateAsync(store, seed, "gpt-5-mini", "audit-pricing-seed-supersede-approved");
+        await store.ApprovePricingBasisAsync(
+            new PricingBasisReviewRequest(
+                seed.Organization.CustomerOrganizationId,
+                approved.PricingBasisId,
+                "audit-pricing-approve-before-supersede",
+                "pricing-approve-before-supersede",
+                "reviewed"),
+            admin.ProductUserId,
+            ProductRole.PlatformAdmin);
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+
+        using var candidateRequest = CreateAuthorizedRequest(
+            HttpMethod.Post,
+            $"/api/v1/pricing/basis/{candidate.PricingBasisId}/supersede",
+            "contoso",
+            adminClaims);
+        candidateRequest.Headers.Add("Idempotency-Key", "pricing-supersede-candidate");
+        candidateRequest.Content = new StringContent("""{"decisionReason":"stale_candidate"}""", Encoding.UTF8, "application/json");
+
+        using var candidateResponse = await client.SendAsync(candidateRequest);
+
+        candidateResponse.EnsureSuccessStatusCode();
+        using var candidateBody = await JsonDocument.ParseAsync(await candidateResponse.Content.ReadAsStreamAsync());
+        Assert.Equal("superseded", candidateBody.RootElement.GetProperty("reviewState").GetString());
+
+        using var approvedRequest = CreateAuthorizedRequest(
+            HttpMethod.Post,
+            $"/api/v1/pricing/basis/{approved.PricingBasisId}/supersede",
+            "contoso",
+            adminClaims);
+        approvedRequest.Headers.Add("Idempotency-Key", "pricing-supersede-approved");
+        approvedRequest.Content = new StringContent("""{"decisionReason":"contract_replaced"}""", Encoding.UTF8, "application/json");
+
+        using var approvedResponse = await client.SendAsync(approvedRequest);
+
+        approvedResponse.EnsureSuccessStatusCode();
+        using var approvedBody = await JsonDocument.ParseAsync(await approvedResponse.Content.ReadAsStreamAsync());
+        Assert.Equal("superseded", approvedBody.RootElement.GetProperty("reviewState").GetString());
+        Assert.NotEqual(JsonValueKind.Null, approvedBody.RootElement.GetProperty("effectiveToUtc").ValueKind);
+
+        using var replayRequest = CreateAuthorizedRequest(
+            HttpMethod.Post,
+            $"/api/v1/pricing/basis/{approved.PricingBasisId}/supersede",
+            "contoso",
+            adminClaims);
+        replayRequest.Headers.Add("Idempotency-Key", "pricing-supersede-approved");
+        replayRequest.Content = new StringContent("""{"decisionReason":"contract_replaced"}""", Encoding.UTF8, "application/json");
+
+        using var replayResponse = await client.SendAsync(replayRequest);
+
+        replayResponse.EnsureSuccessStatusCode();
+        using var replayBody = await JsonDocument.ParseAsync(await replayResponse.Content.ReadAsStreamAsync());
+        Assert.Equal(approved.PricingBasisId, replayBody.RootElement.GetProperty("pricingBasisId").GetString());
+
+        var pricingAuditEvents = await store.ListGovernanceAuditEventsAsync(seed.Organization.CustomerOrganizationId);
+        Assert.Equal(2, pricingAuditEvents.Count(audit => audit.EvidenceMetadata.GetValueOrDefault("operation") == "pricing_basis_superseded"));
+    }
+
+    [Fact]
     public async Task OverviewTokenTimelineRouteRejectsInvalidRangeAndUnauthorizedCaller()
     {
         var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
