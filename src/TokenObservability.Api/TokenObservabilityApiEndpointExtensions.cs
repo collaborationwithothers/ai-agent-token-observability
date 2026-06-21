@@ -52,6 +52,13 @@ internal static class TokenObservabilityApiEndpointExtensions
         api.MapPost("/pricing/basis/{pricingBasisId}/reject", RejectPricingBasis);
         api.MapGet("/grafana/drilldown", GetGrafanaDrilldown);
         api.MapGet("/sessions", GetSessions);
+        api.MapGet("/sessions/{sessionId}/content-references", GetSessionContentReferences);
+        api.MapGet("/content-review/items", GetContentReviewItems);
+        api.MapGet("/content-review/items/{contentReferenceId}", GetContentReviewItem);
+        api.MapPost("/content-review/items/{contentReferenceId}/retry-redaction", RetryContentRedaction);
+        api.MapPost("/content-review/items/{contentReferenceId}/discard", DiscardContentReference);
+        api.MapPost("/content-review/items/{contentReferenceId}/approve-excerpt", ApproveContentReferenceExcerpt);
+        api.MapPost("/content-review/items/{contentReferenceId}/mark-recommendation-ineligible", MarkContentReferenceRecommendationIneligible);
         api.MapGet("/sessions/{sessionId}/recommendations", GetSessionRecommendations);
         api.MapGet("/recommendations/{recommendationId}", GetRecommendation);
         api.MapPost("/recommendations/regeneration-requests", CreateRecommendationRegenerationRequest);
@@ -344,6 +351,278 @@ internal static class TokenObservabilityApiEndpointExtensions
             nextCursor = (string?)null,
             totalEstimate = visibleSessions.Length
         });
+    }
+
+    private static async Task<IResult> GetSessionContentReferences(
+        string sessionId,
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        InMemoryTenantMetadataStore tenantMetadataStore)
+    {
+        var resolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            ProductAuthorizationAction.SessionInvestigate,
+            new ProductScope(ProductScopeKind.Organization, ScopeId: null));
+
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
+        }
+
+        var customerOrganizationId = resolution.Context.CustomerOrganization.CustomerOrganizationId;
+        var session = await FindSessionAsync(tenantMetadataStore, customerOrganizationId, sessionId);
+        if (session is null)
+        {
+            return CreateProblem(httpContext, "Session was not found.", StatusCodes.Status404NotFound, "session_not_found");
+        }
+
+        if (!CanAccessPrivilegedSession(resolution.Context, session))
+        {
+            return CreateProblem(httpContext, "Session content reference access is denied.", StatusCodes.Status403Forbidden, "content_reference_access_denied");
+        }
+
+        var references = await tenantMetadataStore.ListContentReferencesForSessionAsync(
+            customerOrganizationId,
+            session.AgentSessionId);
+
+        return Results.Ok(new
+        {
+            items = references.Select(reference => ToContentReferenceResponse(reference, includeApprovedExcerpt: false)).ToArray(),
+            nextCursor = (string?)null,
+            totalEstimate = references.Count
+        });
+    }
+
+    private static async Task<IResult> GetContentReviewItems(
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        InMemoryTenantMetadataStore tenantMetadataStore)
+    {
+        var resolution = await ResolveContentReviewAuthorizationAsync(
+            httpContext,
+            authorizationContextResolver,
+            ProductAuthorizationAction.ContentReviewRead);
+
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
+        }
+
+        ContentReferenceCaptureState? requestedState;
+        try
+        {
+            requestedState = ParseOptionalContentReviewState(httpContext.Request.Query["state"].ToString());
+        }
+        catch (ArgumentException)
+        {
+            return CreateProblem(httpContext, "Content review state is not supported.", StatusCodes.Status400BadRequest, "validation_failed");
+        }
+        if (requestedState == ContentReferenceCaptureState.Captured ||
+            requestedState == ContentReferenceCaptureState.MetadataOnly ||
+            requestedState == ContentReferenceCaptureState.NotAllowed)
+        {
+            return CreateProblem(httpContext, "Content review state is not supported.", StatusCodes.Status400BadRequest, "validation_failed");
+        }
+
+        var references = await tenantMetadataStore.ListContentReviewItemsAsync(
+            resolution.Context.CustomerOrganization.CustomerOrganizationId,
+            requestedState);
+
+        return Results.Ok(new
+        {
+            items = references.Select(reference => ToContentReferenceResponse(reference, includeApprovedExcerpt: false)).ToArray(),
+            nextCursor = (string?)null,
+            totalEstimate = references.Count
+        });
+    }
+
+    private static async Task<IResult> GetContentReviewItem(
+        string contentReferenceId,
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        InMemoryTenantMetadataStore tenantMetadataStore)
+    {
+        var parsedContentReferenceId = ParseContentReferenceId(contentReferenceId);
+        if (parsedContentReferenceId is null)
+        {
+            return CreateProblem(httpContext, "Content reference id is invalid.", StatusCodes.Status400BadRequest, "validation_failed");
+        }
+
+        var resolution = await ResolveContentReviewAuthorizationAsync(
+            httpContext,
+            authorizationContextResolver,
+            ProductAuthorizationAction.ContentReviewRead);
+
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
+        }
+
+        var reference = await tenantMetadataStore.FindContentReferenceAsync(
+            resolution.Context.CustomerOrganization.CustomerOrganizationId,
+            parsedContentReferenceId.Value);
+        if (reference is null)
+        {
+            return CreateProblem(httpContext, "Content reference was not found.", StatusCodes.Status404NotFound, "not_found");
+        }
+
+        return Results.Ok(ToContentReferenceResponse(reference, includeApprovedExcerpt: true));
+    }
+
+    private static Task<IResult> RetryContentRedaction(
+        string contentReferenceId,
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        InMemoryTenantMetadataStore tenantMetadataStore,
+        IProductApiIdempotencyStore idempotencyStore)
+    {
+        return ReviewContentReference(
+            contentReferenceId,
+            httpContext,
+            authorizationContextResolver,
+            tenantMetadataStore,
+            idempotencyStore,
+            RedactionReviewDecision.Retry);
+    }
+
+    private static Task<IResult> DiscardContentReference(
+        string contentReferenceId,
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        InMemoryTenantMetadataStore tenantMetadataStore,
+        IProductApiIdempotencyStore idempotencyStore)
+    {
+        return ReviewContentReference(
+            contentReferenceId,
+            httpContext,
+            authorizationContextResolver,
+            tenantMetadataStore,
+            idempotencyStore,
+            RedactionReviewDecision.Discard);
+    }
+
+    private static Task<IResult> ApproveContentReferenceExcerpt(
+        string contentReferenceId,
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        InMemoryTenantMetadataStore tenantMetadataStore,
+        IProductApiIdempotencyStore idempotencyStore)
+    {
+        return ReviewContentReference(
+            contentReferenceId,
+            httpContext,
+            authorizationContextResolver,
+            tenantMetadataStore,
+            idempotencyStore,
+            RedactionReviewDecision.ApproveExcerpt);
+    }
+
+    private static Task<IResult> MarkContentReferenceRecommendationIneligible(
+        string contentReferenceId,
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        InMemoryTenantMetadataStore tenantMetadataStore,
+        IProductApiIdempotencyStore idempotencyStore)
+    {
+        return ReviewContentReference(
+            contentReferenceId,
+            httpContext,
+            authorizationContextResolver,
+            tenantMetadataStore,
+            idempotencyStore,
+            RedactionReviewDecision.MarkRecommendationIneligible);
+    }
+
+    private static async Task<IResult> ReviewContentReference(
+        string contentReferenceId,
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        InMemoryTenantMetadataStore tenantMetadataStore,
+        IProductApiIdempotencyStore idempotencyStore,
+        RedactionReviewDecision decision)
+    {
+        if (!HasIdempotencyKey(httpContext))
+        {
+            return CreateProblem(httpContext, "Idempotency key required.", StatusCodes.Status400BadRequest, "idempotency_key_required");
+        }
+
+        var parsedContentReferenceId = ParseContentReferenceId(contentReferenceId);
+        if (parsedContentReferenceId is null)
+        {
+            return CreateProblem(httpContext, "Content reference id is invalid.", StatusCodes.Status400BadRequest, "validation_failed");
+        }
+
+        var resolution = await ResolveContentReviewAuthorizationAsync(
+            httpContext,
+            authorizationContextResolver,
+            ProductAuthorizationAction.ContentReviewDecide);
+
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
+        }
+
+        var rawBody = await ReadRequestBodyAsync(httpContext);
+        var idempotency = await ResolvePricingMutationIdempotencyAsync(
+            httpContext,
+            resolution.Context,
+            idempotencyStore,
+            rawBody);
+        if (idempotency.Result is not null)
+        {
+            return idempotency.Result;
+        }
+
+        var decisionBody = decision == RedactionReviewDecision.ApproveExcerpt
+            ? null
+            : DeserializePricingMutationBody<ContentReviewDecisionBody>(rawBody);
+        var approveExcerptBody = decision == RedactionReviewDecision.ApproveExcerpt
+            ? DeserializePricingMutationBody<ApproveExcerptBody>(rawBody)
+            : null;
+
+        try
+        {
+            var review = await tenantMetadataStore.ReviewContentReferenceAsync(new ReviewContentReferenceRequest(
+                resolution.Context.CustomerOrganization.CustomerOrganizationId,
+                parsedContentReferenceId.Value,
+                resolution.Context.ProductUser.ProductUserId,
+                resolution.Context.EffectiveRoles.First(),
+                decision,
+                decisionBody?.DecisionReason ?? approveExcerptBody?.DecisionReason,
+                resolution.Context.CorrelationId,
+                $"audit-content-review-{Guid.NewGuid():N}",
+                approveExcerptBody?.ApprovedExcerpt));
+
+            var reference = await tenantMetadataStore.FindContentReferenceAsync(
+                resolution.Context.CustomerOrganization.CustomerOrganizationId,
+                parsedContentReferenceId.Value);
+
+            var response = new
+            {
+                redactionReviewId = review.RedactionReviewId.ToString(),
+                contentReference = reference is null ? null : ToContentReferenceResponse(reference, includeApprovedExcerpt: true),
+                auditEventId = review.AuditEventId,
+                decision = InMemoryTenantMetadataStore.ToWireRedactionReviewDecision(review.Decision),
+                decidedAtUtc = review.DecidedAtUtc
+            };
+
+            return await StorePricingMutationIdempotencyResultAsync(
+                idempotencyStore,
+                resolution.Context,
+                idempotency,
+                operationId: review.RedactionReviewId.ToString(),
+                StatusCodes.Status200OK,
+                Location: null,
+                response);
+        }
+        catch (ArgumentException ex)
+        {
+            return CreateProblem(httpContext, ex.Message, StatusCodes.Status400BadRequest, "validation_failed");
+        }
+        catch (InvalidOperationException ex)
+        {
+            return CreateProblem(httpContext, ex.Message, StatusCodes.Status409Conflict, "conflict");
+        }
     }
 
     private static async Task<IResult> GetSessionRecommendations(
@@ -931,6 +1210,29 @@ internal static class TokenObservabilityApiEndpointExtensions
         return selfResolution.IsAllowed ? selfResolution : scopedResolution;
     }
 
+    private static async Task<TokenObservabilityAuthorizationResolution> ResolveContentReviewAuthorizationAsync(
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        ProductAuthorizationAction action)
+    {
+        var queueResolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            action,
+            new ProductScope(ProductScopeKind.ContentReviewQueue, ScopeId: "content-review"));
+
+        if (queueResolution.IsAllowed)
+        {
+            return queueResolution;
+        }
+
+        var organizationResolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            action,
+            new ProductScope(ProductScopeKind.Organization, ScopeId: null));
+
+        return organizationResolution.IsAllowed ? organizationResolution : queueResolution;
+    }
+
     private static async Task<TokenObservabilityAuthorizationResolution> ResolveRecommendationAuthorizationAsync(
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
@@ -1000,6 +1302,19 @@ internal static class TokenObservabilityApiEndpointExtensions
     }
 
     private static bool CanAccessRecommendationSession(
+        TokenObservabilityAuthorizationContext authorizationContext,
+        AgentSessionRecord session)
+    {
+        if (authorizationContext.EffectiveRoles.Any(static role =>
+                role is ProductRole.PlatformAdmin or ProductRole.SecurityReviewer or ProductRole.EngineeringLead))
+        {
+            return true;
+        }
+
+        return session.ProductUserId == authorizationContext.ProductUser.ProductUserId;
+    }
+
+    private static bool CanAccessPrivilegedSession(
         TokenObservabilityAuthorizationContext authorizationContext,
         AgentSessionRecord session)
     {
@@ -1331,6 +1646,43 @@ internal static class TokenObservabilityApiEndpointExtensions
         };
     }
 
+    private static object ToContentReferenceResponse(ContentReferenceRecord record, bool includeApprovedExcerpt)
+    {
+        return new
+        {
+            contentReferenceId = record.ContentReferenceId.ToString(),
+            customerOrganizationId = record.CustomerOrganizationId.ToString(),
+            agentSessionId = record.AgentSessionId,
+            telemetryEnvelopeId = record.TelemetryEnvelopeId,
+            contentClass = InMemoryTenantMetadataStore.ToWireContentClass(record.ContentClass),
+            captureState = InMemoryTenantMetadataStore.ToWireContentReferenceCaptureState(record.CaptureState),
+            redactionStatus = InMemoryTenantMetadataStore.ToWireContentReferenceRedactionStatus(record.RedactionStatus),
+            contentHash = record.ContentHash,
+            blob = record.BlobPointer is null
+                ? null
+                : new
+                {
+                    container = record.BlobPointer.Container,
+                    blobName = record.BlobPointer.BlobName,
+                    blobUri = record.BlobPointer.BlobUri,
+                    blobVersion = record.BlobPointer.BlobVersion
+                },
+            policyVersionId = record.PolicyVersionId,
+            redactionPipelineVersion = record.RedactionPipelineVersion,
+            productRuleVersion = record.ProductRuleVersion,
+            retentionClass = InMemoryTenantMetadataStore.ToWireContentRetentionClass(record.RetentionClass),
+            expiresAtUtc = record.ExpiresAtUtc,
+            recommendationEligible = record.RecommendationEligible,
+            auditEventId = record.AuditEventId,
+            approvedExcerpt = includeApprovedExcerpt &&
+                record.CaptureState == ContentReferenceCaptureState.ApprovedExcerpt
+                    ? record.ApprovedExcerpt
+                    : null,
+            createdAtUtc = record.CreatedAtUtc,
+            updatedAtUtc = record.UpdatedAtUtc
+        };
+    }
+
     private static object ToRecommendationResponse(RecommendationRecord record)
     {
         return new
@@ -1387,6 +1739,33 @@ internal static class TokenObservabilityApiEndpointExtensions
         return Guid.TryParse(tokenHotspotId, out var parsed) && parsed != Guid.Empty
             ? new TokenHotspotId(parsed)
             : null;
+    }
+
+    private static ContentReferenceId? ParseContentReferenceId(string? contentReferenceId)
+    {
+        return Guid.TryParse(contentReferenceId, out var parsed) && parsed != Guid.Empty
+            ? new ContentReferenceId(parsed)
+            : null;
+    }
+
+    private static ContentReferenceCaptureState? ParseOptionalContentReviewState(string? state)
+    {
+        if (string.IsNullOrWhiteSpace(state))
+        {
+            return null;
+        }
+
+        return state.Trim().ToLowerInvariant() switch
+        {
+            "not_allowed" => ContentReferenceCaptureState.NotAllowed,
+            "metadata_only" => ContentReferenceCaptureState.MetadataOnly,
+            "captured" => ContentReferenceCaptureState.Captured,
+            "redaction_failed" => ContentReferenceCaptureState.RedactionFailed,
+            "review_required" => ContentReferenceCaptureState.ReviewRequired,
+            "discarded" => ContentReferenceCaptureState.Discarded,
+            "approved_excerpt" => ContentReferenceCaptureState.ApprovedExcerpt,
+            _ => throw new ArgumentException("Content review state is not supported.", nameof(state))
+        };
     }
 
     private static PricingTokenType ParsePricingTokenType(string tokenType)
@@ -1547,6 +1926,12 @@ internal static class TokenObservabilityApiEndpointExtensions
         string? AgentSessionId,
         string? TokenHotspotId,
         string? Reason);
+
+    private sealed record ContentReviewDecisionBody(string? DecisionReason);
+
+    private sealed record ApproveExcerptBody(
+        string? DecisionReason,
+        string? ApprovedExcerpt);
 
     private sealed record PricingMutationIdempotencyResolution(
         string Route,

@@ -8,6 +8,7 @@ public static class ContentRedactionLimits
 {
     public const int MaxCandidateUtf8Bytes = 16 * 1024;
     public const int MaxEnvelopeUtf8Bytes = 64 * 1024;
+    public const int MaxApprovedExcerptUtf8Bytes = 2 * 1024;
 }
 
 public sealed record ContentRedactionRequest(
@@ -37,7 +38,15 @@ public sealed record ContentRedactionDecision(
     string? RedactedContentHash,
     int OriginalLength,
     int? RedactedLength,
-    IReadOnlyList<ContentRedactionFinding> Findings);
+    IReadOnlyList<ContentRedactionFinding> Findings,
+    RedactedContentStorageResult? StorageResult = null);
+
+public sealed record RedactedContentStorageResult(
+    bool Stored,
+    string? BlobVersion = null)
+{
+    public static RedactedContentStorageResult NotStored { get; } = new(Stored: false);
+}
 
 public sealed record ContentRedactionFinding(
     string Stage,
@@ -98,7 +107,7 @@ public interface IAzureContentSafetyClassifier
 
 public interface IRedactedContentStore
 {
-    Task StoreAsync(ContentRedactionDecision decision, CancellationToken cancellationToken);
+    Task<RedactedContentStorageResult> StoreAsync(ContentRedactionDecision decision, CancellationToken cancellationToken);
 }
 
 public sealed class ContentRedactionServiceUnavailableException(string message) : Exception(message);
@@ -325,8 +334,8 @@ public sealed class ContentRedactionPipeline(
             productRedacted.Length,
             findings);
 
-        await redactedContentStore.StoreAsync(decision, cancellationToken);
-        return decision;
+        var storageResult = await redactedContentStore.StoreAsync(decision, cancellationToken);
+        return decision with { StorageResult = storageResult };
     }
 
     private static string RedactDeterministicSecrets(
@@ -504,8 +513,8 @@ public sealed class NoopAzureContentSafetyClassifier : IAzureContentSafetyClassi
 
 public sealed class NoopRedactedContentStore : IRedactedContentStore
 {
-    public Task StoreAsync(ContentRedactionDecision decision, CancellationToken cancellationToken)
+    public Task<RedactedContentStorageResult> StoreAsync(ContentRedactionDecision decision, CancellationToken cancellationToken)
     {
-        return Task.CompletedTask;
+        return Task.FromResult(RedactedContentStorageResult.NotStored);
     }
 }

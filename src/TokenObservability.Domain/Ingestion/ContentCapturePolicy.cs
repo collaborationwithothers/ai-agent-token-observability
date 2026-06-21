@@ -75,6 +75,9 @@ public sealed record ContentCandidateMetadata(
     string? RedactionDecisionReason = null,
     string? RedactionPipelineVersion = null,
     string? ProductRuleVersion = null,
+    string? RedactedContentHash = null,
+    bool RedactedContentStored = false,
+    string? RedactedContentBlobVersion = null,
     IReadOnlyList<ContentRedactionFinding>? RedactionFindings = null);
 
 public sealed record CreateContentCandidateMetadataRequest(
@@ -95,6 +98,9 @@ public sealed record CreateContentCandidateMetadataRequest(
     string? RedactionDecisionReason = null,
     string? RedactionPipelineVersion = null,
     string? ProductRuleVersion = null,
+    string? RedactedContentHash = null,
+    bool RedactedContentStored = false,
+    string? RedactedContentBlobVersion = null,
     IReadOnlyList<ContentRedactionFinding>? RedactionFindings = null);
 
 public sealed record CreateContentCandidateExtractionFailureRequest(

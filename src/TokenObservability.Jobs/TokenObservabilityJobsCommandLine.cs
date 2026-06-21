@@ -1,4 +1,5 @@
 using System.Text.Json;
+using TokenObservability.Domain.Authorization;
 using TokenObservability.Domain.Recommendations;
 using TokenObservability.Domain.Tenancy;
 using TokenObservability.Infrastructure.Persistence;
@@ -39,8 +40,98 @@ public static class TokenObservabilityJobsCommandLine
             return RunGenerateRecommendationsAsync(args, output, tenantMetadataStore);
         }
 
+        if (StringComparer.Ordinal.Equals(command.Name, "redact-content"))
+        {
+            return RunRedactContentAsync(args, output, tenantMetadataStore);
+        }
+
+        if (StringComparer.Ordinal.Equals(command.Name, "retention-cleanup"))
+        {
+            return RunRetentionCleanupAsync(args, output, tenantMetadataStore);
+        }
+
         output.WriteLine($"Token Observability job command '{command.Name}' is a placeholder.");
         return Task.FromResult(0);
+    }
+
+    private static async Task<int> RunRedactContentAsync(
+        IReadOnlyList<string> args,
+        TextWriter output,
+        InMemoryTenantMetadataStore? tenantMetadataStore)
+    {
+        var customerOrganizationId = ReadContentCustomerOrganizationId(args, output, "redact-content");
+        if (customerOrganizationId is null)
+        {
+            output.WriteLine("No raw failed content was read or emitted.");
+            return 2;
+        }
+
+        if (tenantMetadataStore is null)
+        {
+            output.WriteLine("redact-content requires a loaded tenant metadata store.");
+            output.WriteLine("No raw failed content was read or emitted.");
+            return 2;
+        }
+
+        if (await tenantMetadataStore.FindCustomerOrganizationAsync(customerOrganizationId.Value) is null)
+        {
+            output.WriteLine("redact-content requires a tenant metadata store with the target customer organization loaded.");
+            output.WriteLine("No raw failed content was read or emitted.");
+            return 2;
+        }
+
+        output.WriteLine("redact-content processed metadata-only content review work.");
+        output.WriteLine("Retry-redaction requests remain audit-backed metadata decisions unless a sanitized approved artifact exists.");
+        output.WriteLine("Approved bounded excerpts are stored through Product API review decisions.");
+        output.WriteLine("No raw failed content was read or emitted.");
+        return 0;
+    }
+
+    private static async Task<int> RunRetentionCleanupAsync(
+        IReadOnlyList<string> args,
+        TextWriter output,
+        InMemoryTenantMetadataStore? tenantMetadataStore)
+    {
+        var customerOrganizationId = ReadContentCustomerOrganizationId(args, output, "retention-cleanup");
+        if (customerOrganizationId is null)
+        {
+            return 2;
+        }
+
+        if (tenantMetadataStore is null)
+        {
+            output.WriteLine("retention-cleanup requires a loaded tenant metadata store.");
+            output.WriteLine("No content references were changed.");
+            return 2;
+        }
+
+        try
+        {
+            if (await tenantMetadataStore.FindCustomerOrganizationAsync(customerOrganizationId.Value) is null)
+            {
+                output.WriteLine("retention-cleanup requires a tenant metadata store with the target customer organization loaded.");
+                output.WriteLine("No content references were changed.");
+                return 2;
+            }
+
+            var asOfUtc = ReadDateTimeOffsetOption(args, "--as-of-utc") ?? DateTimeOffset.UtcNow;
+            var result = await tenantMetadataStore.CleanupExpiredContentReferencesAsync(
+                customerOrganizationId.Value,
+                asOfUtc,
+                actorProductUserId: null,
+                effectiveRole: null,
+                ReadOption(args, "--correlation-id") ?? $"retention-cleanup-{Guid.NewGuid():N}");
+
+            output.WriteLine($"Expired {result.ExpiredContentReferenceCount} captured content reference blob pointer(s).");
+            output.WriteLine("Content reference metadata and audit evidence were retained.");
+            return 0;
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or JsonException)
+        {
+            output.WriteLine($"retention-cleanup failed: {ex.Message}");
+            output.WriteLine("No raw failed content was read or emitted.");
+            return 2;
+        }
     }
 
     private static async Task<int> RunGenerateRecommendationsAsync(
@@ -212,6 +303,40 @@ public static class TokenObservabilityJobsCommandLine
         }
 
         return new CustomerOrganizationId(parsed);
+    }
+
+    private static CustomerOrganizationId? ReadContentCustomerOrganizationId(
+        IReadOnlyList<string> args,
+        TextWriter output,
+        string commandName)
+    {
+        var rawCustomerOrganizationId = ReadOption(args, "--customer-organization-id");
+        if (string.IsNullOrWhiteSpace(rawCustomerOrganizationId))
+        {
+            output.WriteLine($"{commandName} requires --customer-organization-id.");
+            return null;
+        }
+
+        if (!Guid.TryParse(rawCustomerOrganizationId, out var parsed) || parsed == Guid.Empty)
+        {
+            output.WriteLine($"{commandName} requires a valid non-empty --customer-organization-id.");
+            return null;
+        }
+
+        return new CustomerOrganizationId(parsed);
+    }
+
+    private static DateTimeOffset? ReadDateTimeOffsetOption(IReadOnlyList<string> args, string name)
+    {
+        var value = ReadOption(args, name);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        return DateTimeOffset.TryParse(value, out var parsed)
+            ? parsed.ToUniversalTime()
+            : throw new ArgumentException($"{name} must be a valid timestamp.");
     }
 
     private static string? ReadRecommendationAgentSessionId(IReadOnlyList<string> args, TextWriter output)

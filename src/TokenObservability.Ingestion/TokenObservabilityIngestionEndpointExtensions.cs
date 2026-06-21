@@ -592,6 +592,9 @@ internal static class TokenObservabilityIngestionEndpointExtensions
                 redactionDecision?.DecisionReason,
                 redactionDecision?.PipelineVersion,
                 redactionDecision?.ProductRuleVersion,
+                redactionDecision?.RedactedContentHash,
+                redactionDecision?.StorageResult?.Stored == true,
+                redactionDecision?.StorageResult?.BlobVersion,
                 redactionDecision?.Findings));
         }
 

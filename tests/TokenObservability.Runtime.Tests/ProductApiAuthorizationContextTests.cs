@@ -1616,6 +1616,233 @@ public sealed class ProductApiAuthorizationContextTests
     }
 
     [Fact]
+    public async Task ContentReviewRoutesRequireReviewerScopeAndReturnSanitizedMetadata()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var adminClaims = CreateClaims(subject: "admin-subject", groupObjectIds: ["admin-group"]);
+        var reviewerClaims = CreateClaims(subject: "reviewer-subject", groupObjectIds: ["reviewer-group"]);
+        var admin = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            adminClaims);
+        var reviewer = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            reviewerClaims);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            admin.ProductUserId,
+            "admin-group",
+            ProductRole.PlatformAdmin);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            reviewer.ProductUserId,
+            "reviewer-group",
+            ProductRole.SecurityReviewer,
+            ProductScopeKind.ContentReviewQueue,
+            "content-review");
+        var reference = await SeedReviewRequiredContentReferenceAsync(store, seed);
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+
+        using var adminRequest = CreateAuthorizedRequest(
+            HttpMethod.Get,
+            "/api/v1/content-review/items",
+            "contoso",
+            adminClaims);
+        using var adminResponse = await client.SendAsync(adminRequest);
+
+        Assert.Equal(HttpStatusCode.Forbidden, adminResponse.StatusCode);
+
+        using var reviewerRequest = CreateAuthorizedRequest(
+            HttpMethod.Get,
+            "/api/v1/content-review/items",
+            "contoso",
+            reviewerClaims);
+        using var reviewerResponse = await client.SendAsync(reviewerRequest);
+
+        reviewerResponse.EnsureSuccessStatusCode();
+        var json = await reviewerResponse.Content.ReadAsStringAsync();
+        using var body = JsonDocument.Parse(json);
+        var item = Assert.Single(body.RootElement.GetProperty("items").EnumerateArray());
+        Assert.Equal(reference.ContentReferenceId.ToString(), item.GetProperty("contentReferenceId").GetString());
+        Assert.Equal("review_required", item.GetProperty("captureState").GetString());
+        Assert.Equal("review_required", item.GetProperty("redactionStatus").GetString());
+        Assert.Equal(JsonValueKind.Null, item.GetProperty("blob").ValueKind);
+        Assert.Equal(JsonValueKind.Null, item.GetProperty("approvedExcerpt").ValueKind);
+        Assert.DoesNotContain("hello Ada", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("raw_prompt", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("command_output", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ContentReviewRetryAndApproveExcerptAreAuditedAndBounded()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var reviewerClaims = CreateClaims(subject: "reviewer-subject", groupObjectIds: ["reviewer-group"]);
+        var reviewer = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            reviewerClaims);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            reviewer.ProductUserId,
+            "reviewer-group",
+            ProductRole.SecurityReviewer,
+            ProductScopeKind.ContentReviewQueue,
+            "content-review");
+        var reference = await SeedReviewRequiredContentReferenceAsync(store, seed, providerSessionId: "content-review-api-session-1");
+        var oversizedReference = await SeedReviewRequiredContentReferenceAsync(store, seed, providerSessionId: "content-review-api-session-2");
+        var boundaryReference = await SeedReviewRequiredContentReferenceAsync(store, seed, providerSessionId: "content-review-api-session-3");
+        var ineligibleReference = await SeedReviewRequiredContentReferenceAsync(store, seed, providerSessionId: "content-review-api-session-4");
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+
+        using var retryRequest = CreateAuthorizedRequest(
+            HttpMethod.Post,
+            $"/api/v1/content-review/items/{reference.ContentReferenceId}/retry-redaction",
+            "contoso",
+            reviewerClaims);
+        retryRequest.Content = new StringContent("""{"decisionReason":"recognizer_updated"}""", Encoding.UTF8, "application/json");
+        using var missingIdempotencyRequest = CreateAuthorizedRequest(
+            HttpMethod.Post,
+            $"/api/v1/content-review/items/{reference.ContentReferenceId}/retry-redaction",
+            "contoso",
+            reviewerClaims);
+        missingIdempotencyRequest.Content = new StringContent("""{"decisionReason":"recognizer_updated"}""", Encoding.UTF8, "application/json");
+
+        using var missingIdempotencyResponse = await client.SendAsync(missingIdempotencyRequest);
+
+        Assert.Equal(HttpStatusCode.BadRequest, missingIdempotencyResponse.StatusCode);
+        await AssertProblemCodeAsync(missingIdempotencyResponse, "idempotency_key_required");
+
+        retryRequest.Headers.Add("Idempotency-Key", "content-review-retry-1");
+        using var retryResponse = await client.SendAsync(retryRequest);
+
+        retryResponse.EnsureSuccessStatusCode();
+        using var retryBody = await JsonDocument.ParseAsync(await retryResponse.Content.ReadAsStreamAsync());
+        Assert.Equal("retry", retryBody.RootElement.GetProperty("decision").GetString());
+        var retryReviewId = retryBody.RootElement.GetProperty("redactionReviewId").GetString();
+        var retriedReference = retryBody.RootElement.GetProperty("contentReference");
+        Assert.Equal("review_required", retriedReference.GetProperty("captureState").GetString());
+        Assert.Equal(JsonValueKind.Null, retriedReference.GetProperty("approvedExcerpt").ValueKind);
+
+        using var retryReplayRequest = CreateAuthorizedRequest(
+            HttpMethod.Post,
+            $"/api/v1/content-review/items/{reference.ContentReferenceId}/retry-redaction",
+            "contoso",
+            reviewerClaims);
+        retryReplayRequest.Headers.Add("Idempotency-Key", "content-review-retry-1");
+        retryReplayRequest.Content = new StringContent("""{"decisionReason":"recognizer_updated"}""", Encoding.UTF8, "application/json");
+        using var retryReplayResponse = await client.SendAsync(retryReplayRequest);
+
+        retryReplayResponse.EnsureSuccessStatusCode();
+        using var retryReplayBody = await JsonDocument.ParseAsync(await retryReplayResponse.Content.ReadAsStreamAsync());
+        Assert.Equal(retryReviewId, retryReplayBody.RootElement.GetProperty("redactionReviewId").GetString());
+
+        using var retryConflictRequest = CreateAuthorizedRequest(
+            HttpMethod.Post,
+            $"/api/v1/content-review/items/{reference.ContentReferenceId}/retry-redaction",
+            "contoso",
+            reviewerClaims);
+        retryConflictRequest.Headers.Add("Idempotency-Key", "content-review-retry-1");
+        retryConflictRequest.Content = new StringContent("""{"decisionReason":"different_reason"}""", Encoding.UTF8, "application/json");
+        using var retryConflictResponse = await client.SendAsync(retryConflictRequest);
+
+        Assert.Equal(HttpStatusCode.Conflict, retryConflictResponse.StatusCode);
+        await AssertProblemCodeAsync(retryConflictResponse, "idempotency_key_conflict");
+
+        using var approveRequest = CreateAuthorizedRequest(
+            HttpMethod.Post,
+            $"/api/v1/content-review/items/{reference.ContentReferenceId}/approve-excerpt",
+            "contoso",
+            reviewerClaims);
+        approveRequest.Headers.Add("Idempotency-Key", "content-review-approve-1");
+        approveRequest.Content = new StringContent(
+            """{"decisionReason":"manual_redaction_complete","approvedExcerpt":"Customer-safe excerpt with identifiers removed."}""",
+            Encoding.UTF8,
+            "application/json");
+        using var approveResponse = await client.SendAsync(approveRequest);
+
+        approveResponse.EnsureSuccessStatusCode();
+        var approveJson = await approveResponse.Content.ReadAsStringAsync();
+        using var approveBody = JsonDocument.Parse(approveJson);
+        var approvedReference = approveBody.RootElement.GetProperty("contentReference");
+        Assert.Equal("approved_excerpt", approvedReference.GetProperty("captureState").GetString());
+        Assert.Equal("manually_approved", approvedReference.GetProperty("redactionStatus").GetString());
+        Assert.Equal("Customer-safe excerpt with identifiers removed.", approvedReference.GetProperty("approvedExcerpt").GetString());
+        Assert.Equal("content-review-artifacts", approvedReference.GetProperty("blob").GetProperty("container").GetString());
+        Assert.DoesNotContain("hello Ada", approveJson, StringComparison.OrdinalIgnoreCase);
+
+        using var boundaryApproveRequest = CreateAuthorizedRequest(
+            HttpMethod.Post,
+            $"/api/v1/content-review/items/{boundaryReference.ContentReferenceId}/approve-excerpt",
+            "contoso",
+            reviewerClaims);
+        boundaryApproveRequest.Headers.Add("Idempotency-Key", "content-review-approve-boundary");
+        boundaryApproveRequest.Content = new StringContent(
+            JsonSerializer.Serialize(new
+            {
+                decisionReason = "manual_redaction_complete",
+                approvedExcerpt = new string('b', ContentRedactionLimits.MaxApprovedExcerptUtf8Bytes)
+            }),
+            Encoding.UTF8,
+            "application/json");
+        using var boundaryApproveResponse = await client.SendAsync(boundaryApproveRequest);
+
+        boundaryApproveResponse.EnsureSuccessStatusCode();
+
+        using var oversizedApproveRequest = CreateAuthorizedRequest(
+            HttpMethod.Post,
+            $"/api/v1/content-review/items/{oversizedReference.ContentReferenceId}/approve-excerpt",
+            "contoso",
+            reviewerClaims);
+        oversizedApproveRequest.Headers.Add("Idempotency-Key", "content-review-approve-oversized");
+        oversizedApproveRequest.Content = new StringContent(
+            JsonSerializer.Serialize(new
+            {
+                decisionReason = "manual_redaction_complete",
+                approvedExcerpt = new string('a', ContentRedactionLimits.MaxApprovedExcerptUtf8Bytes + 1)
+            }),
+            Encoding.UTF8,
+            "application/json");
+        using var oversizedApproveResponse = await client.SendAsync(oversizedApproveRequest);
+
+        Assert.Equal(HttpStatusCode.BadRequest, oversizedApproveResponse.StatusCode);
+        await AssertProblemCodeAsync(oversizedApproveResponse, "validation_failed");
+
+        using var ineligibleRequest = CreateAuthorizedRequest(
+            HttpMethod.Post,
+            $"/api/v1/content-review/items/{ineligibleReference.ContentReferenceId}/mark-recommendation-ineligible",
+            "contoso",
+            reviewerClaims);
+        ineligibleRequest.Headers.Add("Idempotency-Key", "content-review-ineligible-1");
+        ineligibleRequest.Content = new StringContent("""{"decisionReason":"not_relevant_to_recommendations"}""", Encoding.UTF8, "application/json");
+        using var ineligibleResponse = await client.SendAsync(ineligibleRequest);
+
+        ineligibleResponse.EnsureSuccessStatusCode();
+        using var ineligibleBody = await JsonDocument.ParseAsync(await ineligibleResponse.Content.ReadAsStreamAsync());
+        Assert.Equal("mark_recommendation_ineligible", ineligibleBody.RootElement.GetProperty("decision").GetString());
+        Assert.False(ineligibleBody.RootElement.GetProperty("contentReference").GetProperty("recommendationEligible").GetBoolean());
+
+        var auditEvents = await store.ListGovernanceAuditEventsAsync(seed.Organization.CustomerOrganizationId);
+        Assert.Contains(auditEvents, audit =>
+            audit.Action == ProductAuthorizationAction.ContentReviewDecide &&
+            audit.EvidenceMetadata["operation"] == "content_review_retry");
+        Assert.Contains(auditEvents, audit =>
+            audit.Action == ProductAuthorizationAction.ContentReviewDecide &&
+            audit.EvidenceMetadata["operation"] == "content_review_approve_excerpt");
+        Assert.Contains(auditEvents, audit =>
+            audit.Action == ProductAuthorizationAction.ContentReviewDecide &&
+            audit.EvidenceMetadata["operation"] == "content_review_mark_recommendation_ineligible");
+    }
+
+    [Fact]
     public async Task RecommendationRoutesReturnSanitizedSessionRecommendationsAndDetail()
     {
         var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
@@ -2176,6 +2403,44 @@ public sealed class ProductApiAuthorizationContextTests
         }
 
         return session;
+    }
+
+    private static async Task<ContentReferenceRecord> SeedReviewRequiredContentReferenceAsync(
+        InMemoryTenantMetadataStore store,
+        TenantSeed seed,
+        string providerSessionId = "content-review-api-session")
+    {
+        var credential = await IssueCredentialAsync(store, seed, $"profile-{providerSessionId}");
+        var session = await SeedTokenSessionAsync(
+            store,
+            credential.Credential,
+            providerSessionId,
+            Now,
+            [(TokenMetricName.InputTokens, 1_024, TokenMetricStatus.Observed, TokenMetricConfidence.Observed, null)]);
+        var telemetryEnvelopeId = Assert.Single(session.SourceTelemetryEnvelopeIds);
+
+        await store.RecordContentCandidateMetadataAsync(new CreateContentCandidateMetadataRequest(
+            seed.Organization.CustomerOrganizationId,
+            PolicyVersionId: "policy-content-v1",
+            credential.Credential.ScopedIngestionCredentialId,
+            credential.Credential.HarnessSetupProfileId,
+            session.AgentSessionId,
+            $"{telemetryEnvelopeId}:otlp.log.body",
+            ContentClass.PromptSnippet,
+            OriginalLength: "hello Ada".Length,
+            ContentCapturePolicyDecision.CaptureAllowed,
+            ContentCandidateEvidenceState.ReviewRequired,
+            ContentRedactionStatus.ReviewRequired,
+            ContentRetentionClass.Short,
+            RecommendationUse.Disabled,
+            ContentRedactionOutcome.ReviewRequired,
+            RedactionDecisionReason: "pii_low_confidence",
+            RedactionPipelineVersion: "content-redaction-pipeline-v1",
+            ProductRuleVersion: "product-redaction-rules-v1"));
+
+        return Assert.Single(await store.ListContentReferencesForSessionAsync(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId));
     }
 
     private static string CreatePricingOverrideJson(decimal pricePerMillionTokens = 0.75m)

@@ -1228,6 +1228,52 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
         Assert.Contains(metadata.RedactionFindings, finding => finding.Stage == "azure_ai_language_pii" && finding.Category == "Person");
         Assert.Equal("hello ******** from [REDACTED]", contentStore.StoredDecisions.Single().RedactedText);
         Assert.DoesNotContain(rawPrompt, metadata.ToString(), StringComparison.OrdinalIgnoreCase);
+        var contentReference = Assert.Single(await store.ListContentReferencesForSessionAsync(
+            seed.Organization.CustomerOrganizationId,
+            metadata.SessionId));
+        Assert.Equal(ContentReferenceCaptureState.Captured, contentReference.CaptureState);
+        Assert.Equal(ContentReferenceRedactionStatus.Passed, contentReference.RedactionStatus);
+        Assert.Equal(metadata.RedactedContentHash, contentReference.ContentHash);
+        Assert.NotNull(contentReference.BlobPointer);
+        Assert.Equal("captured-content", contentReference.BlobPointer.Container);
+        Assert.Contains($"customer-organization-id={seed.Organization.CustomerOrganizationId}", contentReference.BlobPointer.BlobName, StringComparison.Ordinal);
+        Assert.Contains($"session-id={metadata.SessionId}", contentReference.BlobPointer.BlobName, StringComparison.Ordinal);
+        Assert.EndsWith("/redacted.txt", contentReference.BlobPointer.BlobName, StringComparison.Ordinal);
+        Assert.Equal(Now.AddDays(30), contentReference.ExpiresAtUtc);
+        Assert.Null(contentReference.ApprovedExcerpt);
+    }
+
+    [Fact]
+    public async Task CodexOtlpEndpointDoesNotCreateBlobPointerWhenRedactedContentStoreDoesNotPersist()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store);
+        var issued = await IssueCredentialAsync(store, seed);
+        await AllowPromptCaptureAsync(store, seed, issued, retentionClass: ContentRetentionClass.Short);
+        using var factory = CreateFactory(
+            store,
+            piiDetector: new EndpointPiiDetector(),
+            contentCaptureEnabledProfiles: [SetupProfileId]);
+        using var client = factory.CreateClient();
+        using var request = CreateOtlpRequest(
+            "/v1/logs",
+            issued.Secret,
+            CreateLogPayloadWithBody("aito.content.prompt:hello Ada"));
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var metadata = Assert.Single(await store.ListContentCandidateMetadataAsync(seed.Organization.CustomerOrganizationId));
+        Assert.Equal(ContentRedactionOutcome.Captured, metadata.RedactionOutcome);
+        Assert.Equal(ContentRedactionStatus.Passed, metadata.RedactionStatus);
+        Assert.False(metadata.RedactedContentStored);
+        var contentReference = Assert.Single(await store.ListContentReferencesForSessionAsync(
+            seed.Organization.CustomerOrganizationId,
+            metadata.SessionId));
+        Assert.Equal(ContentReferenceCaptureState.MetadataOnly, contentReference.CaptureState);
+        Assert.Equal(ContentReferenceRedactionStatus.Passed, contentReference.RedactionStatus);
+        Assert.Null(contentReference.BlobPointer);
+        Assert.NotNull(contentReference.ContentHash);
     }
 
     [Fact]
@@ -1270,6 +1316,14 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
         Assert.Equal(ContentRedactionOutcome.ReviewRequired, metadata.RedactionOutcome);
         Assert.Equal("pii_low_confidence", metadata.RedactionDecisionReason);
         Assert.DoesNotContain("hello Ada", metadata.ToString(), StringComparison.OrdinalIgnoreCase);
+        var contentReference = Assert.Single(await store.ListContentReferencesForSessionAsync(
+            seed.Organization.CustomerOrganizationId,
+            metadata.SessionId));
+        Assert.Equal(ContentReferenceCaptureState.ReviewRequired, contentReference.CaptureState);
+        Assert.Equal(ContentReferenceRedactionStatus.ReviewRequired, contentReference.RedactionStatus);
+        Assert.Null(contentReference.BlobPointer);
+        Assert.Null(contentReference.ContentHash);
+        Assert.Null(contentReference.ApprovedExcerpt);
     }
 
     [Fact]
@@ -2477,10 +2531,10 @@ public sealed class CodexOtlpHttpIngestionEndpointTests
     {
         public List<ContentRedactionDecision> StoredDecisions { get; } = [];
 
-        public Task StoreAsync(ContentRedactionDecision decision, CancellationToken cancellationToken)
+        public Task<RedactedContentStorageResult> StoreAsync(ContentRedactionDecision decision, CancellationToken cancellationToken)
         {
             StoredDecisions.Add(decision);
-            return Task.CompletedTask;
+            return Task.FromResult(new RedactedContentStorageResult(Stored: true));
         }
     }
 
