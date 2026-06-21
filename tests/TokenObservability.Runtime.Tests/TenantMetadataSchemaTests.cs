@@ -263,9 +263,11 @@ public sealed class TenantMetadataSchemaTests
 
         Assert.Contains("CREATE TABLE IF NOT EXISTS pricing_basis", migration);
         Assert.Contains("CREATE TABLE IF NOT EXISTS cost_estimate", migration);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS budget_policy", migration);
         Assert.Contains("CREATE TABLE IF NOT EXISTS product_api_idempotency", migration);
         Assert.Contains("pricing_basis_id text PRIMARY KEY", migration);
         Assert.Contains("cost_estimate_id text PRIMARY KEY", migration);
+        Assert.Contains("budget_policy_id text PRIMARY KEY", migration);
         Assert.Contains("request_hash text NOT NULL", migration);
         Assert.Contains("operation_id text NULL", migration);
         Assert.Contains("response_json jsonb NULL", migration);
@@ -279,19 +281,26 @@ public sealed class TenantMetadataSchemaTests
         Assert.Contains("source_metadata_json jsonb NOT NULL", migration);
         Assert.Contains("estimated_cost numeric(18, 12) NULL", migration);
         Assert.Contains("pricing_basis_id text NULL", migration);
+        Assert.Contains("threshold_json jsonb NOT NULL", migration);
         Assert.Contains("ck_pricing_basis_token_type CHECK (token_type IN ('input', 'output', 'cached_input', 'reasoning_output'))", migration);
         Assert.Contains("ck_pricing_basis_source_kind CHECK (source_kind IN ('automated_seed', 'admin_override', 'provider_docs', 'enterprise_contract'))", migration);
         Assert.Contains("ck_pricing_basis_review_state CHECK (review_state IN ('candidate', 'approved', 'rejected', 'superseded'))", migration);
         Assert.Contains("ck_cost_estimate_status CHECK (cost_status IN ('estimated', 'unavailable', 'not_applicable', 'mixed'))", migration);
         Assert.Contains("ck_cost_estimate_unavailable_null_semantics", migration);
+        Assert.Contains("ck_budget_policy_scope_kind CHECK (scope_kind IN ('customer_organization', 'team', 'repository', 'workflow', 'harness', 'model'))", migration);
+        Assert.Contains("ck_budget_policy_metric_kind CHECK (metric_kind IN ('tokens', 'estimated_cost', 'cache_miss_rate', 'error_rework'))", migration);
+        Assert.Contains("ck_budget_policy_threshold_json CHECK (jsonb_typeof(threshold_json) = 'object')", migration);
+        Assert.Contains("ck_budget_policy_status CHECK (status IN ('active', 'disabled'))", migration);
         Assert.Contains("fk_pricing_basis_audit_event", migration);
         Assert.Contains("fk_cost_estimate_pricing_basis", migration);
+        Assert.Contains("fk_budget_policy_audit_event", migration);
         Assert.Contains("fk_product_api_idempotency_product_user", migration);
         Assert.Contains("ck_product_api_idempotency_request_hash CHECK (request_hash ~ '^[A-F0-9]{64}$')", migration);
         Assert.Contains("ck_product_api_idempotency_expiry CHECK (expires_at_utc > created_at_utc)", migration);
         Assert.Contains("ck_product_api_idempotency_completion CHECK", migration);
         Assert.Contains("ix_pricing_basis_customer_review_model", migration);
         Assert.Contains("ix_cost_estimate_customer_mix", migration);
+        Assert.Contains("ix_budget_policy_customer_scope_metric", migration);
         Assert.Contains("ix_product_api_idempotency_expiry", migration);
     }
 

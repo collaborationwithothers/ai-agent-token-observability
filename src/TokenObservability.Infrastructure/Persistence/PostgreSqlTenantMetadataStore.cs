@@ -614,6 +614,152 @@ public sealed class PostgreSqlTenantMetadataStore(
         return await RecordCostEstimateAsync(PricingCostCalculator.EstimateTokenObservationCost(request, records));
     }
 
+    public async Task<IReadOnlyList<AggregateMetricPointRecord>> ListAggregateMetricPointsAsync(
+        CustomerOrganizationId customerOrganizationId)
+    {
+        await using var command = dataSource.CreateCommand("""
+            SELECT aggregate_metric_point_id, customer_organization_id, agent_session_id, metric_name, metric_value,
+                   unit, labels_json::text, exported_at_utc
+            FROM aggregate_metric_point
+            WHERE customer_organization_id = @customer_organization_id
+            ORDER BY exported_at_utc, aggregate_metric_point_id
+            """);
+        command.Parameters.AddWithValue("customer_organization_id", customerOrganizationId.Value);
+        await using var reader = await command.ExecuteReaderAsync();
+        var points = new List<AggregateMetricPointRecord>();
+        while (await reader.ReadAsync())
+        {
+            points.Add(new AggregateMetricPointRecord(
+                new AggregateMetricPointId(reader.GetGuid(0)),
+                new CustomerOrganizationId(reader.GetGuid(1)),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetDouble(4),
+                reader.GetString(5),
+                new ReadOnlyDictionary<string, string>(
+                    JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(6)) ??
+                    new Dictionary<string, string>(StringComparer.Ordinal)),
+                reader.GetFieldValue<DateTimeOffset>(7)));
+        }
+
+        return points;
+    }
+
+    public async Task<BudgetPolicyRecord> CreateBudgetPolicyAsync(
+        CreateBudgetPolicyRequest request,
+        ProductUserId actorProductUserId,
+        ProductRole actorEffectiveRole)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await RequireCustomerOrganizationAsync(connection, transaction, request.CustomerOrganizationId);
+        await RequireProductUserAsync(connection, transaction, request.CustomerOrganizationId, actorProductUserId);
+
+        var normalized = NormalizeBudgetPolicyRequest(
+            request.ScopeKind,
+            request.ScopeId,
+            request.MetricKind,
+            request.ThresholdJson,
+            request.Status);
+        var now = clock.UtcNow.ToUniversalTime();
+        var record = new BudgetPolicyRecord(
+            $"budget-policy-{Guid.NewGuid():N}",
+            request.CustomerOrganizationId,
+            normalized.ScopeKind,
+            normalized.ScopeId,
+            normalized.MetricKind,
+            normalized.ThresholdJson,
+            normalized.Status,
+            request.AuditEventId.Trim(),
+            now,
+            now);
+        var audit = CreateBudgetAuditEvent(record, actorProductUserId, actorEffectiveRole, "budget_policy_created", "created", request.CorrelationId.Trim(), now);
+        await InsertGovernanceAuditEventAsync(connection, transaction, audit);
+        await InsertBudgetPolicyAsync(connection, transaction, record);
+        await transaction.CommitAsync();
+        return record;
+    }
+
+    public async Task<IReadOnlyList<BudgetPolicyRecord>> ListBudgetPoliciesAsync(
+        CustomerOrganizationId customerOrganizationId)
+    {
+        await using var command = dataSource.CreateCommand("""
+            SELECT budget_policy_id, customer_organization_id, scope_kind, scope_id, metric_kind, threshold_json::text,
+                   status, audit_event_id, created_at_utc, updated_at_utc
+            FROM budget_policy
+            WHERE customer_organization_id = @customer_organization_id
+            ORDER BY scope_kind, scope_id, metric_kind, budget_policy_id
+            """);
+        command.Parameters.AddWithValue("customer_organization_id", customerOrganizationId.Value);
+        await using var reader = await command.ExecuteReaderAsync();
+        var records = new List<BudgetPolicyRecord>();
+        while (await reader.ReadAsync())
+        {
+            records.Add(ReadBudgetPolicyRecord(reader));
+        }
+
+        return records;
+    }
+
+    public async Task<BudgetPolicyRecord> UpdateBudgetPolicyAsync(
+        UpdateBudgetPolicyRequest request,
+        ProductUserId actorProductUserId,
+        ProductRole actorEffectiveRole)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await RequireCustomerOrganizationAsync(connection, transaction, request.CustomerOrganizationId);
+        await RequireProductUserAsync(connection, transaction, request.CustomerOrganizationId, actorProductUserId);
+        var existing = await FindBudgetPolicyAsync(connection, transaction, request.CustomerOrganizationId, request.BudgetPolicyId.Trim()) ??
+            throw new InvalidOperationException("Budget policy does not belong to the customer organization.");
+        var normalized = NormalizeBudgetPolicyRequest(
+            request.ScopeKind ?? existing.ScopeKind,
+            request.ScopeKind is null && request.ScopeId is null ? existing.ScopeId : request.ScopeId,
+            request.MetricKind ?? existing.MetricKind,
+            request.ThresholdJson ?? existing.ThresholdJson,
+            request.Status ?? existing.Status);
+        var now = clock.UtcNow.ToUniversalTime();
+        var updated = existing with
+        {
+            ScopeKind = normalized.ScopeKind,
+            ScopeId = normalized.ScopeId,
+            MetricKind = normalized.MetricKind,
+            ThresholdJson = normalized.ThresholdJson,
+            Status = normalized.Status,
+            AuditEventId = request.AuditEventId.Trim(),
+            UpdatedAtUtc = now
+        };
+        var audit = CreateBudgetAuditEvent(updated, actorProductUserId, actorEffectiveRole, "budget_policy_updated", "updated", request.CorrelationId.Trim(), now);
+        await InsertGovernanceAuditEventAsync(connection, transaction, audit);
+        await using (var command = new NpgsqlCommand("""
+            UPDATE budget_policy
+            SET scope_kind = @scope_kind,
+                scope_id = @scope_id,
+                metric_kind = @metric_kind,
+                threshold_json = @threshold_json,
+                status = @status,
+                audit_event_id = @audit_event_id,
+                updated_at_utc = @updated_at_utc
+            WHERE customer_organization_id = @customer_organization_id
+              AND budget_policy_id = @budget_policy_id
+            """, connection, transaction))
+        {
+            command.Parameters.AddWithValue("scope_kind", ToWireBudgetScopeKind(updated.ScopeKind));
+            command.Parameters.AddWithValue("scope_id", (object?)updated.ScopeId ?? DBNull.Value);
+            command.Parameters.AddWithValue("metric_kind", ToWireBudgetMetricKind(updated.MetricKind));
+            command.Parameters.Add("threshold_json", NpgsqlDbType.Jsonb).Value = updated.ThresholdJson;
+            command.Parameters.AddWithValue("status", ToWireBudgetPolicyStatus(updated.Status));
+            command.Parameters.AddWithValue("audit_event_id", updated.AuditEventId);
+            command.Parameters.AddWithValue("updated_at_utc", updated.UpdatedAtUtc);
+            command.Parameters.AddWithValue("customer_organization_id", updated.CustomerOrganizationId.Value);
+            command.Parameters.AddWithValue("budget_policy_id", updated.BudgetPolicyId);
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await transaction.CommitAsync();
+        return updated;
+    }
+
     public Task<IReadOnlyList<RecommendationRecord>> ListRecommendationsForSessionAsync(
         CustomerOrganizationId customerOrganizationId,
         string agentSessionId)
@@ -834,6 +980,32 @@ public sealed class PostgreSqlTenantMetadataStore(
         await command.ExecuteNonQueryAsync();
     }
 
+    private static async Task InsertBudgetPolicyAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        BudgetPolicyRecord record)
+    {
+        await using var command = new NpgsqlCommand("""
+            INSERT INTO budget_policy (
+                budget_policy_id, customer_organization_id, scope_kind, scope_id, metric_kind,
+                threshold_json, status, audit_event_id, created_at_utc, updated_at_utc)
+            VALUES (
+                @budget_policy_id, @customer_organization_id, @scope_kind, @scope_id, @metric_kind,
+                @threshold_json, @status, @audit_event_id, @created_at_utc, @updated_at_utc)
+            """, connection, transaction);
+        command.Parameters.AddWithValue("budget_policy_id", record.BudgetPolicyId);
+        command.Parameters.AddWithValue("customer_organization_id", record.CustomerOrganizationId.Value);
+        command.Parameters.AddWithValue("scope_kind", ToWireBudgetScopeKind(record.ScopeKind));
+        command.Parameters.AddWithValue("scope_id", (object?)record.ScopeId ?? DBNull.Value);
+        command.Parameters.AddWithValue("metric_kind", ToWireBudgetMetricKind(record.MetricKind));
+        command.Parameters.Add("threshold_json", NpgsqlDbType.Jsonb).Value = record.ThresholdJson;
+        command.Parameters.AddWithValue("status", ToWireBudgetPolicyStatus(record.Status));
+        command.Parameters.AddWithValue("audit_event_id", record.AuditEventId);
+        command.Parameters.AddWithValue("created_at_utc", record.CreatedAtUtc);
+        command.Parameters.AddWithValue("updated_at_utc", record.UpdatedAtUtc);
+        await command.ExecuteNonQueryAsync();
+    }
+
     private async Task<IdentityTenant?> FindIdentityTenantByIdAsync(
         CustomerOrganizationId customerOrganizationId,
         IdentityTenantId identityTenantId)
@@ -1011,6 +1183,25 @@ public sealed class PostgreSqlTenantMetadataStore(
         return await reader.ReadAsync() ? ReadPricingBasisRecord(reader) : null;
     }
 
+    private static async Task<BudgetPolicyRecord?> FindBudgetPolicyAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        CustomerOrganizationId customerOrganizationId,
+        string budgetPolicyId)
+    {
+        await using var command = new NpgsqlCommand("""
+            SELECT budget_policy_id, customer_organization_id, scope_kind, scope_id, metric_kind, threshold_json::text,
+                   status, audit_event_id, created_at_utc, updated_at_utc
+            FROM budget_policy
+            WHERE customer_organization_id = @customer_organization_id
+              AND budget_policy_id = @budget_policy_id
+            """, connection, transaction);
+        command.Parameters.AddWithValue("customer_organization_id", customerOrganizationId.Value);
+        command.Parameters.AddWithValue("budget_policy_id", budgetPolicyId);
+        await using var reader = await command.ExecuteReaderAsync();
+        return await reader.ReadAsync() ? ReadBudgetPolicyRecord(reader) : null;
+    }
+
     private static CustomerOrganization ReadCustomerOrganization(NpgsqlDataReader reader)
     {
         return new CustomerOrganization(
@@ -1143,6 +1334,21 @@ public sealed class PostgreSqlTenantMetadataStore(
             reader.GetFieldValue<DateTimeOffset>(16));
     }
 
+    private static BudgetPolicyRecord ReadBudgetPolicyRecord(NpgsqlDataReader reader)
+    {
+        return new BudgetPolicyRecord(
+            reader.GetString(0),
+            new CustomerOrganizationId(reader.GetGuid(1)),
+            FromWireBudgetScopeKind(reader.GetString(2)),
+            reader.IsDBNull(3) ? null : reader.GetString(3),
+            FromWireBudgetMetricKind(reader.GetString(4)),
+            reader.GetString(5),
+            FromWireBudgetPolicyStatus(reader.GetString(6)),
+            reader.GetString(7),
+            reader.GetFieldValue<DateTimeOffset>(8),
+            reader.GetFieldValue<DateTimeOffset>(9));
+    }
+
     private static GovernanceAuditEvent CreatePricingAuditEvent(
         PricingBasisRecord record,
         ProductUserId? actorProductUserId,
@@ -1180,6 +1386,39 @@ public sealed class PostgreSqlTenantMetadataStore(
                 ["review_state"] = ToWirePricingReviewState(reviewState ?? record.ReviewState)
             },
             createdAtUtc ?? record.CreatedAtUtc);
+    }
+
+    private static GovernanceAuditEvent CreateBudgetAuditEvent(
+        BudgetPolicyRecord record,
+        ProductUserId actorProductUserId,
+        ProductRole actorEffectiveRole,
+        string operation,
+        string result,
+        string correlationId,
+        DateTimeOffset createdAtUtc)
+    {
+        return new GovernanceAuditEvent(
+            record.AuditEventId,
+            record.CustomerOrganizationId,
+            actorProductUserId,
+            actorEffectiveRole,
+            ProductAuthorizationAction.BudgetManage,
+            ToWireBudgetScopeKind(record.ScopeKind),
+            record.BudgetPolicyId,
+            result,
+            DenialReason: null,
+            correlationId,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["evidence_kind"] = "admin_operation",
+                ["operation"] = operation,
+                ["result"] = result,
+                ["budget_policy_id"] = record.BudgetPolicyId,
+                ["budget_scope_kind"] = ToWireBudgetScopeKind(record.ScopeKind),
+                ["budget_metric_kind"] = ToWireBudgetMetricKind(record.MetricKind),
+                ["budget_policy_status"] = ToWireBudgetPolicyStatus(record.Status)
+            },
+            createdAtUtc);
     }
 
     private static DateTimeOffset ClosePricingEffectiveWindow(PricingBasisRecord existing, DateTimeOffset now)
@@ -1231,6 +1470,31 @@ public sealed class PostgreSqlTenantMetadataStore(
             pricingVersion,
             auditEventId,
             sourceMetadata);
+    }
+
+    private static NormalizedBudgetPolicyRequest NormalizeBudgetPolicyRequest(
+        BudgetPolicyScopeKind scopeKind,
+        string? scopeId,
+        BudgetMetricKind metricKind,
+        string thresholdJson,
+        BudgetPolicyStatus status)
+    {
+        var normalizedScopeId = scopeKind == BudgetPolicyScopeKind.CustomerOrganization
+            ? null
+            : NormalizeRequiredText(scopeId ?? string.Empty, nameof(scopeId));
+
+        if (normalizedScopeId is not null &&
+            (!IsSafeBudgetScopeId(normalizedScopeId) || ContainsSensitiveFragment(normalizedScopeId)))
+        {
+            throw new ArgumentException("Budget policy scope identifier is not allowed.", nameof(scopeId));
+        }
+
+        return new NormalizedBudgetPolicyRequest(
+            scopeKind,
+            normalizedScopeId,
+            metricKind,
+            BudgetPolicyValidator.NormalizeThresholdJson(metricKind, thresholdJson),
+            status);
     }
 
     private static IReadOnlyDictionary<string, string> NormalizePricingSourceMetadata(
@@ -1337,6 +1601,14 @@ public sealed class PostgreSqlTenantMetadataStore(
                 value.Contains(fragment, StringComparison.OrdinalIgnoreCase)) ||
             SensitiveEvidenceKeyFragments.Any(fragment =>
                 value.Contains(fragment, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsSafeBudgetScopeId(string value)
+    {
+        return value.Length <= 128 &&
+            value.All(static character =>
+                char.IsAsciiLetterOrDigit(character) ||
+                character is '-' or '_' or ':' or '.' or '/');
     }
 
     private static string GetTargetResourceId(CustomerOrganizationId customerOrganizationId, ProductScope scope)
@@ -1590,6 +1862,78 @@ public sealed class PostgreSqlTenantMetadataStore(
         };
     }
 
+    private static string ToWireBudgetScopeKind(BudgetPolicyScopeKind scopeKind)
+    {
+        return scopeKind switch
+        {
+            BudgetPolicyScopeKind.CustomerOrganization => "customer_organization",
+            BudgetPolicyScopeKind.Team => "team",
+            BudgetPolicyScopeKind.Repository => "repository",
+            BudgetPolicyScopeKind.Workflow => "workflow",
+            BudgetPolicyScopeKind.Harness => "harness",
+            BudgetPolicyScopeKind.Model => "model",
+            _ => throw new ArgumentOutOfRangeException(nameof(scopeKind), scopeKind, null)
+        };
+    }
+
+    private static BudgetPolicyScopeKind FromWireBudgetScopeKind(string value)
+    {
+        return value switch
+        {
+            "customer_organization" => BudgetPolicyScopeKind.CustomerOrganization,
+            "team" => BudgetPolicyScopeKind.Team,
+            "repository" => BudgetPolicyScopeKind.Repository,
+            "workflow" => BudgetPolicyScopeKind.Workflow,
+            "harness" => BudgetPolicyScopeKind.Harness,
+            "model" => BudgetPolicyScopeKind.Model,
+            _ => throw new InvalidOperationException("Budget scope kind is not supported.")
+        };
+    }
+
+    private static string ToWireBudgetMetricKind(BudgetMetricKind metricKind)
+    {
+        return metricKind switch
+        {
+            BudgetMetricKind.Tokens => "tokens",
+            BudgetMetricKind.EstimatedCost => "estimated_cost",
+            BudgetMetricKind.CacheMissRate => "cache_miss_rate",
+            BudgetMetricKind.ErrorRework => "error_rework",
+            _ => throw new ArgumentOutOfRangeException(nameof(metricKind), metricKind, null)
+        };
+    }
+
+    private static BudgetMetricKind FromWireBudgetMetricKind(string value)
+    {
+        return value switch
+        {
+            "tokens" => BudgetMetricKind.Tokens,
+            "estimated_cost" => BudgetMetricKind.EstimatedCost,
+            "cache_miss_rate" => BudgetMetricKind.CacheMissRate,
+            "error_rework" => BudgetMetricKind.ErrorRework,
+            _ => throw new InvalidOperationException("Budget metric kind is not supported.")
+        };
+    }
+
+    private static string ToWireBudgetPolicyStatus(BudgetPolicyStatus status)
+    {
+        return status switch
+        {
+            BudgetPolicyStatus.Active => "active",
+            BudgetPolicyStatus.Disabled => "disabled",
+            _ => throw new ArgumentOutOfRangeException(nameof(status), status, null)
+        };
+    }
+
+    private static BudgetPolicyStatus FromWireBudgetPolicyStatus(string value)
+    {
+        return value switch
+        {
+            "active" => BudgetPolicyStatus.Active,
+            "disabled" => BudgetPolicyStatus.Disabled,
+            _ => throw new InvalidOperationException("Budget policy status is not supported.")
+        };
+    }
+
     private static string ToWireCostStatus(CostEstimateStatus costStatus)
     {
         return costStatus switch
@@ -1701,4 +2045,11 @@ public sealed class PostgreSqlTenantMetadataStore(
         string PricingVersion,
         string AuditEventId,
         IReadOnlyDictionary<string, string> SourceMetadata);
+
+    private sealed record NormalizedBudgetPolicyRequest(
+        BudgetPolicyScopeKind ScopeKind,
+        string? ScopeId,
+        BudgetMetricKind MetricKind,
+        string ThresholdJson,
+        BudgetPolicyStatus Status);
 }

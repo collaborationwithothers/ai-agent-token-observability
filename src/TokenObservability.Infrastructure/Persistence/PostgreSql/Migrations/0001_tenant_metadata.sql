@@ -507,6 +507,31 @@ CREATE TABLE IF NOT EXISTS cost_estimate (
     )
 );
 
+CREATE TABLE IF NOT EXISTS budget_policy (
+    budget_policy_id text PRIMARY KEY,
+    customer_organization_id uuid NOT NULL,
+    scope_kind text NOT NULL,
+    scope_id text NULL,
+    metric_kind text NOT NULL,
+    threshold_json jsonb NOT NULL,
+    status text NOT NULL,
+    audit_event_id text NOT NULL,
+    created_at_utc timestamptz NOT NULL,
+    updated_at_utc timestamptz NOT NULL,
+    CONSTRAINT fk_budget_policy_customer_organization FOREIGN KEY (customer_organization_id) REFERENCES customer_organization (customer_organization_id),
+    CONSTRAINT fk_budget_policy_audit_event FOREIGN KEY (customer_organization_id, audit_event_id) REFERENCES governance_audit_event (customer_organization_id, audit_event_id),
+    CONSTRAINT uq_budget_policy_customer_policy_id UNIQUE (customer_organization_id, budget_policy_id),
+    CONSTRAINT ck_budget_policy_scope_kind CHECK (scope_kind IN ('customer_organization', 'team', 'repository', 'workflow', 'harness', 'model')),
+    CONSTRAINT ck_budget_policy_scope_id CHECK (
+        (scope_kind = 'customer_organization' AND scope_id IS NULL)
+        OR (scope_kind <> 'customer_organization' AND scope_id IS NOT NULL AND length(scope_id) <= 128)
+    ),
+    CONSTRAINT ck_budget_policy_metric_kind CHECK (metric_kind IN ('tokens', 'estimated_cost', 'cache_miss_rate', 'error_rework')),
+    CONSTRAINT ck_budget_policy_threshold_json CHECK (jsonb_typeof(threshold_json) = 'object'),
+    CONSTRAINT ck_budget_policy_status CHECK (status IN ('active', 'disabled')),
+    CONSTRAINT ck_budget_policy_timestamps CHECK (updated_at_utc >= created_at_utc)
+);
+
 CREATE TABLE IF NOT EXISTS product_api_idempotency (
     customer_organization_id uuid NOT NULL,
     product_user_id uuid NOT NULL,
@@ -924,6 +949,9 @@ CREATE INDEX IF NOT EXISTS ix_pricing_basis_customer_review_model
 
 CREATE INDEX IF NOT EXISTS ix_cost_estimate_customer_mix
     ON cost_estimate (customer_organization_id, provider_name, model_name, token_type, billing_route, cost_status);
+
+CREATE INDEX IF NOT EXISTS ix_budget_policy_customer_scope_metric
+    ON budget_policy (customer_organization_id, scope_kind, scope_id, metric_kind, status);
 
 CREATE INDEX IF NOT EXISTS ix_product_api_idempotency_expiry
     ON product_api_idempotency (expires_at_utc);

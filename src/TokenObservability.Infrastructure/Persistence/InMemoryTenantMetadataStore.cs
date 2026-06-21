@@ -101,7 +101,11 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IT
         "redaction_status",
         "retention_class",
         "review_decision",
-        "recommendation_eligible"
+        "recommendation_eligible",
+        "budget_policy_id",
+        "budget_scope_kind",
+        "budget_metric_kind",
+        "budget_policy_status"
     };
 
     private readonly Dictionary<CustomerOrganizationId, CustomerOrganization> customerOrganizations = [];
@@ -124,6 +128,7 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IT
     private readonly Dictionary<TokenObservationId, TokenObservationRecord> tokenObservations = [];
     private readonly Dictionary<string, PricingBasisRecord> pricingBasisRecords = [];
     private readonly Dictionary<string, CostEstimateRecord> costEstimates = [];
+    private readonly Dictionary<string, BudgetPolicyRecord> budgetPolicies = [];
     private readonly Dictionary<ProductApiIdempotencyKey, ProductApiIdempotencyRecord> productApiIdempotencyRecords = [];
     private readonly Dictionary<TokenHotspotId, TokenHotspotRecord> tokenHotspots = [];
     private readonly Dictionary<TokenHotspotDetectionKey, TokenHotspotId> tokenHotspotDetectionKeyIndex = [];
@@ -2612,6 +2617,135 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IT
 
         var estimateRequest = PricingCostCalculator.EstimateTokenObservationCost(request, basisRecords);
         return await RecordCostEstimateAsync(estimateRequest);
+    }
+
+    public Task<BudgetPolicyRecord> CreateBudgetPolicyAsync(
+        CreateBudgetPolicyRequest request,
+        ProductUserId actorProductUserId,
+        ProductRole actorEffectiveRole)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var now = clock.UtcNow.ToUniversalTime();
+        var normalized = NormalizeBudgetPolicyRequest(
+            request.ScopeKind,
+            request.ScopeId,
+            request.MetricKind,
+            request.ThresholdJson,
+            request.Status);
+        var auditEventId = NormalizeRequiredText(request.AuditEventId, nameof(request.AuditEventId));
+        var correlationId = NormalizeRequiredText(request.CorrelationId, nameof(request.CorrelationId));
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+            RequireProductUserForCustomerOrganization(request.CustomerOrganizationId, actorProductUserId);
+
+            var record = new BudgetPolicyRecord(
+                $"budget-policy-{Guid.NewGuid():N}",
+                request.CustomerOrganizationId,
+                normalized.ScopeKind,
+                normalized.ScopeId,
+                normalized.MetricKind,
+                normalized.ThresholdJson,
+                normalized.Status,
+                auditEventId,
+                now,
+                now);
+
+            CreateGovernanceAuditEventUnderLock(
+                auditEventId,
+                request.CustomerOrganizationId,
+                actorProductUserId,
+                actorEffectiveRole,
+                ProductAuthorizationAction.BudgetManage,
+                ToWireBudgetScopeKind(record.ScopeKind),
+                record.BudgetPolicyId,
+                "created",
+                denialReason: null,
+                correlationId,
+                CreateBudgetAuditMetadata("budget_policy_created", record),
+                now);
+
+            budgetPolicies.Add(record.BudgetPolicyId, record);
+            return Task.FromResult(record);
+        }
+    }
+
+    public Task<IReadOnlyList<BudgetPolicyRecord>> ListBudgetPoliciesAsync(
+        CustomerOrganizationId customerOrganizationId)
+    {
+        lock (gate)
+        {
+            return Task.FromResult<IReadOnlyList<BudgetPolicyRecord>>(
+                budgetPolicies.Values
+                    .Where(policy => policy.CustomerOrganizationId == customerOrganizationId)
+                    .OrderBy(policy => policy.ScopeKind)
+                    .ThenBy(policy => policy.ScopeId, StringComparer.Ordinal)
+                    .ThenBy(policy => policy.MetricKind)
+                    .ThenBy(policy => policy.BudgetPolicyId, StringComparer.Ordinal)
+                    .ToArray());
+        }
+    }
+
+    public Task<BudgetPolicyRecord> UpdateBudgetPolicyAsync(
+        UpdateBudgetPolicyRequest request,
+        ProductUserId actorProductUserId,
+        ProductRole actorEffectiveRole)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var budgetPolicyId = NormalizeRequiredText(request.BudgetPolicyId, nameof(request.BudgetPolicyId));
+        var auditEventId = NormalizeRequiredText(request.AuditEventId, nameof(request.AuditEventId));
+        var correlationId = NormalizeRequiredText(request.CorrelationId, nameof(request.CorrelationId));
+        var now = clock.UtcNow.ToUniversalTime();
+
+        lock (gate)
+        {
+            RequireCustomerOrganization(request.CustomerOrganizationId);
+            RequireProductUserForCustomerOrganization(request.CustomerOrganizationId, actorProductUserId);
+
+            if (!budgetPolicies.TryGetValue(budgetPolicyId, out var existing) ||
+                existing.CustomerOrganizationId != request.CustomerOrganizationId)
+            {
+                throw new InvalidOperationException("Budget policy does not belong to the customer organization.");
+            }
+
+            var normalized = NormalizeBudgetPolicyRequest(
+                request.ScopeKind ?? existing.ScopeKind,
+                request.ScopeKind is null && request.ScopeId is null ? existing.ScopeId : request.ScopeId,
+                request.MetricKind ?? existing.MetricKind,
+                request.ThresholdJson ?? existing.ThresholdJson,
+                request.Status ?? existing.Status);
+
+            var updated = existing with
+            {
+                ScopeKind = normalized.ScopeKind,
+                ScopeId = normalized.ScopeId,
+                MetricKind = normalized.MetricKind,
+                ThresholdJson = normalized.ThresholdJson,
+                Status = normalized.Status,
+                AuditEventId = auditEventId,
+                UpdatedAtUtc = now
+            };
+
+            CreateGovernanceAuditEventUnderLock(
+                auditEventId,
+                request.CustomerOrganizationId,
+                actorProductUserId,
+                actorEffectiveRole,
+                ProductAuthorizationAction.BudgetManage,
+                ToWireBudgetScopeKind(updated.ScopeKind),
+                updated.BudgetPolicyId,
+                "updated",
+                denialReason: null,
+                correlationId,
+                CreateBudgetAuditMetadata("budget_policy_updated", updated),
+                now);
+
+            budgetPolicies[budgetPolicyId] = updated;
+            return Task.FromResult(updated);
+        }
     }
 
     public Task<AggregateMetricPointRecord> RecordAggregateMetricPointAsync(
@@ -5450,6 +5584,10 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IT
             "retention_class" => value is "metadata_only" or "short" or "review" or "blocked",
             "review_decision" => value is "retry" or "discard" or "approve_excerpt" or "reject_excerpt" or "mark_recommendation_ineligible",
             "recommendation_eligible" => value is "true" or "false",
+            "budget_policy_id" => IsSafeResourceId(value),
+            "budget_scope_kind" => value is "customer_organization" or "team" or "repository" or "workflow" or "harness" or "model",
+            "budget_metric_kind" => value is "tokens" or "estimated_cost" or "cache_miss_rate" or "error_rework",
+            "budget_policy_status" => value is "active" or "disabled",
             _ => false
         };
 
@@ -5931,6 +6069,118 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IT
         };
     }
 
+    private static NormalizedBudgetPolicyRequest NormalizeBudgetPolicyRequest(
+        BudgetPolicyScopeKind scopeKind,
+        string? scopeId,
+        BudgetMetricKind metricKind,
+        string thresholdJson,
+        BudgetPolicyStatus status)
+    {
+        var normalizedScopeId = scopeKind == BudgetPolicyScopeKind.CustomerOrganization
+            ? null
+            : NormalizeRequiredText(scopeId ?? string.Empty, nameof(scopeId));
+
+        if (normalizedScopeId is not null &&
+            (!IsSafeResourceId(normalizedScopeId) || ContainsSensitiveFragment(normalizedScopeId)))
+        {
+            throw new ArgumentException("Budget policy scope identifier is not allowed.", nameof(scopeId));
+        }
+
+        return new NormalizedBudgetPolicyRequest(
+            scopeKind,
+            normalizedScopeId,
+            metricKind,
+            BudgetPolicyValidator.NormalizeThresholdJson(metricKind, thresholdJson),
+            status);
+    }
+
+    private static IReadOnlyDictionary<string, string> CreateBudgetAuditMetadata(
+        string operation,
+        BudgetPolicyRecord record)
+    {
+        return new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["operation"] = operation,
+            ["budget_policy_id"] = record.BudgetPolicyId,
+            ["budget_scope_kind"] = ToWireBudgetScopeKind(record.ScopeKind),
+            ["budget_metric_kind"] = ToWireBudgetMetricKind(record.MetricKind),
+            ["budget_policy_status"] = ToWireBudgetPolicyStatus(record.Status),
+            ["result"] = operation.EndsWith("created", StringComparison.Ordinal) ? "created" : "updated"
+        };
+    }
+
+    public static string ToWireBudgetScopeKind(BudgetPolicyScopeKind scopeKind)
+    {
+        return scopeKind switch
+        {
+            BudgetPolicyScopeKind.CustomerOrganization => "customer_organization",
+            BudgetPolicyScopeKind.Team => "team",
+            BudgetPolicyScopeKind.Repository => "repository",
+            BudgetPolicyScopeKind.Workflow => "workflow",
+            BudgetPolicyScopeKind.Harness => "harness",
+            BudgetPolicyScopeKind.Model => "model",
+            _ => throw new ArgumentOutOfRangeException(nameof(scopeKind), scopeKind, null)
+        };
+    }
+
+    public static string ToWireBudgetMetricKind(BudgetMetricKind metricKind)
+    {
+        return metricKind switch
+        {
+            BudgetMetricKind.Tokens => "tokens",
+            BudgetMetricKind.EstimatedCost => "estimated_cost",
+            BudgetMetricKind.CacheMissRate => "cache_miss_rate",
+            BudgetMetricKind.ErrorRework => "error_rework",
+            _ => throw new ArgumentOutOfRangeException(nameof(metricKind), metricKind, null)
+        };
+    }
+
+    public static string ToWireBudgetPolicyStatus(BudgetPolicyStatus status)
+    {
+        return status switch
+        {
+            BudgetPolicyStatus.Active => "active",
+            BudgetPolicyStatus.Disabled => "disabled",
+            _ => throw new ArgumentOutOfRangeException(nameof(status), status, null)
+        };
+    }
+
+    public static BudgetPolicyScopeKind ParseBudgetScopeKind(string scopeKind)
+    {
+        return NormalizeRequiredText(scopeKind, nameof(scopeKind)) switch
+        {
+            "customer_organization" => BudgetPolicyScopeKind.CustomerOrganization,
+            "team" => BudgetPolicyScopeKind.Team,
+            "repository" => BudgetPolicyScopeKind.Repository,
+            "workflow" => BudgetPolicyScopeKind.Workflow,
+            "harness" => BudgetPolicyScopeKind.Harness,
+            "model" => BudgetPolicyScopeKind.Model,
+            _ => throw new ArgumentException("Budget policy scope kind is not supported.", nameof(scopeKind))
+        };
+    }
+
+    public static BudgetMetricKind ParseBudgetMetricKind(string metricKind)
+    {
+        return NormalizeRequiredText(metricKind, nameof(metricKind)) switch
+        {
+            "tokens" => BudgetMetricKind.Tokens,
+            "estimated_cost" => BudgetMetricKind.EstimatedCost,
+            "cache_miss_rate" => BudgetMetricKind.CacheMissRate,
+            "error_rework" => BudgetMetricKind.ErrorRework,
+            _ => throw new ArgumentException("Budget metric kind is not supported.", nameof(metricKind))
+        };
+    }
+
+    public static BudgetPolicyStatus ParseBudgetPolicyStatus(string status)
+    {
+        return NormalizeRequiredText(status, nameof(status)) switch
+        {
+            "active" => BudgetPolicyStatus.Active,
+            "disabled" => BudgetPolicyStatus.Disabled,
+            _ => throw new ArgumentException("Budget policy status is not supported.", nameof(status))
+        };
+    }
+
     private readonly record struct ProductUserLookupKey(
         CustomerOrganizationId CustomerOrganizationId,
         IdentityTenantId IdentityTenantId,
@@ -5991,6 +6241,13 @@ public sealed class InMemoryTenantMetadataStore(ITenantMetadataClock clock) : IT
         string ProviderName,
         string ModelName,
         string BillingRoute);
+
+    private sealed record NormalizedBudgetPolicyRequest(
+        BudgetPolicyScopeKind ScopeKind,
+        string? ScopeId,
+        BudgetMetricKind MetricKind,
+        string ThresholdJson,
+        BudgetPolicyStatus Status);
 }
 
 internal sealed record SeedProductRoleMappingRequest(
