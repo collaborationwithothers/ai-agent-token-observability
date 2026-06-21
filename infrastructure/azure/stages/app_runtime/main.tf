@@ -28,6 +28,11 @@ resource "azurerm_resource_group" "app_runtime" {
       condition     = local.primary_database_name != null
       error_message = "data_platform_configuration_contract.postgresql_database_names must include product_metadata."
     }
+
+    precondition {
+      condition     = local.product_api_metadata_store_secret_configured
+      error_message = "container_app_secret_names.product_api must include ConnectionStrings__ProductMetadataStore and container_app_key_vault_secret_ids.product_api must include the referenced Container App secret name."
+    }
   }
 }
 
@@ -186,6 +191,15 @@ resource "azurerm_container_app" "services" {
           name        = env.key
           secret_name = env.value
         }
+      }
+
+      startup_probe {
+        transport               = "HTTP"
+        port                    = each.value.target_port
+        path                    = each.value.startup_path
+        interval_seconds        = 10
+        timeout                 = 5
+        failure_count_threshold = 12
       }
 
       liveness_probe {

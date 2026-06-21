@@ -50,6 +50,9 @@ internal static class TokenObservabilityIngestionEndpointExtensions
 
     public static void MapTokenObservabilityIngestionEndpoints(this WebApplication app)
     {
+        app.MapGet("/health/ready", GetReadiness);
+        app.MapGet("/readyz", GetReadiness);
+
         app.MapGet("/ingestion", () => Results.Ok(new
         {
             service = "token-observability-ingestion",
@@ -119,6 +122,112 @@ internal static class TokenObservabilityIngestionEndpointExtensions
             contentRedactionPipeline,
             options.Value,
             "metrics");
+    }
+
+    private static async Task<IResult> GetReadiness(
+        IConfiguration configuration,
+        ScopedIngestionCredentialLifecycleService credentialLifecycleService,
+        InMemoryTenantMetadataStore tenantMetadataStore,
+        AggregateMetricsExporter aggregateMetricsExporter,
+        IAggregateMetricSink aggregateMetricSink,
+        IContentRedactionPipeline contentRedactionPipeline)
+    {
+        var dependencies = new[]
+        {
+            await CheckScopedCredentialStoreAsync(configuration, tenantMetadataStore),
+            await CheckTenantMetadataStoreAsync(configuration, tenantMetadataStore),
+            CheckTelemetryAcceptance(credentialLifecycleService, aggregateMetricsExporter),
+            CheckAggregateMetricSink(configuration, aggregateMetricSink),
+            CheckResolvedService("content_redaction_pipeline", contentRedactionPipeline)
+        };
+        var ready = dependencies.All(static dependency => dependency.Status == "ready");
+
+        return Results.Json(new
+        {
+            service = "token-observability-ingestion",
+            status = ready ? "ready" : "not_ready",
+            dependencies
+        }, statusCode: ready ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable);
+    }
+
+    private static async Task<ReadinessDependency> CheckScopedCredentialStoreAsync(
+        IConfiguration configuration,
+        InMemoryTenantMetadataStore tenantMetadataStore)
+    {
+        if (string.IsNullOrWhiteSpace(configuration["CUSTOMER_ORGANIZATION_SLUG"]) ||
+            !HasDurableTelemetryConfiguration(configuration))
+        {
+            return new ReadinessDependency("scoped_ingestion_credentials", "not_configured");
+        }
+
+        try
+        {
+            await tenantMetadataStore.ListScopedIngestionCredentialsForValidationAsync();
+            return new ReadinessDependency("scoped_ingestion_credentials", "ready");
+        }
+        catch
+        {
+            return new ReadinessDependency("scoped_ingestion_credentials", "not_ready");
+        }
+    }
+
+    private static async Task<ReadinessDependency> CheckTenantMetadataStoreAsync(
+        IConfiguration configuration,
+        InMemoryTenantMetadataStore tenantMetadataStore)
+    {
+        var customerOrganizationSlug = configuration["CUSTOMER_ORGANIZATION_SLUG"];
+
+        if (string.IsNullOrWhiteSpace(customerOrganizationSlug) ||
+            !HasDurableTelemetryConfiguration(configuration))
+        {
+            return new ReadinessDependency("tenant_metadata_store", "not_configured");
+        }
+
+        try
+        {
+            await tenantMetadataStore.FindCustomerOrganizationBySlugAsync(customerOrganizationSlug);
+            return new ReadinessDependency("tenant_metadata_store", "ready");
+        }
+        catch
+        {
+            return new ReadinessDependency("tenant_metadata_store", "not_ready");
+        }
+    }
+
+    private static ReadinessDependency CheckTelemetryAcceptance(
+        ScopedIngestionCredentialLifecycleService credentialLifecycleService,
+        AggregateMetricsExporter aggregateMetricsExporter)
+    {
+        return credentialLifecycleService is null || aggregateMetricsExporter is null
+            ? new ReadinessDependency("telemetry_acceptance", "not_ready")
+            : new ReadinessDependency("telemetry_acceptance", "ready");
+    }
+
+    private static ReadinessDependency CheckAggregateMetricSink(
+        IConfiguration configuration,
+        IAggregateMetricSink aggregateMetricSink)
+    {
+        if (!HasDurableTelemetryConfiguration(configuration))
+        {
+            return new ReadinessDependency("aggregate_metric_sink", "not_configured");
+        }
+
+        return aggregateMetricSink is NoopAggregateMetricSink
+            ? new ReadinessDependency("aggregate_metric_sink", "not_ready")
+            : new ReadinessDependency("aggregate_metric_sink", "ready");
+    }
+
+    private static bool HasDurableTelemetryConfiguration(IConfiguration configuration)
+    {
+        return !string.IsNullOrWhiteSpace(configuration["TOKENOBSERVABILITY_POSTGRESQL_SERVER_FQDN"]) &&
+            !string.IsNullOrWhiteSpace(configuration["TOKENOBSERVABILITY_POSTGRESQL_DATABASE_NAME"]);
+    }
+
+    private static ReadinessDependency CheckResolvedService(string name, object? service)
+    {
+        return service is null
+            ? new ReadinessDependency(name, "not_ready")
+            : new ReadinessDependency(name, "ready");
     }
 
     private static async Task<IResult> HandleOtlpSignalAsync(
@@ -1675,3 +1784,5 @@ internal sealed class TokenObservabilityIngestionOptions
 
     public string[] ContentCaptureEnabledProfiles { get; set; } = [];
 }
+
+internal sealed record ReadinessDependency(string Name, string Status);

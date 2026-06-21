@@ -2301,11 +2301,11 @@ public sealed class ProductApiAuthorizationContextTests
                     {
                         configuration.AddInMemoryCollection(new Dictionary<string, string?>
                         {
-                            ["ProductApi:Readiness:ProductMetadataStore"] = "true",
-                            ["ProductApi:Readiness:TelemetryBackends"] = "true",
-                            ["ProductApi:Readiness:ContentStore"] = "true",
-                            ["ProductApi:Readiness:RecommendationDependencies"] = "true",
-                            ["ProductApi:Readiness:AuthorizationEnforcement"] = "true"
+                            ["CUSTOMER_ORGANIZATION_SLUG"] = "contoso",
+                            ["ProductMetadataStore:ConnectionString"] = "Host=postgresql.internal;Database=product_metadata;Username=readiness;Password=not-used",
+                            ["APPLICATIONINSIGHTS_CONNECTION_STRING"] = "InstrumentationKey=00000000-0000-0000-0000-000000000000",
+                            ["TOKENOBSERVABILITY_STORAGE_ACCOUNT_NAME"] = "sttokenobservability",
+                            ["TOKENOBSERVABILITY_RECOMMENDATION_DEPLOYMENT_COUNT"] = "1"
                         });
                     });
                 }
@@ -2313,7 +2313,11 @@ public sealed class ProductApiAuthorizationContextTests
                 builder.ConfigureServices(services =>
                 {
                     services.RemoveAll<InMemoryTenantMetadataStore>();
+                    services.RemoveAll<ITenantMetadataStore>();
+                    services.RemoveAll<IProductApiIdempotencyStore>();
                     services.AddSingleton(store);
+                    services.AddSingleton<ITenantMetadataStore>(store);
+                    services.AddSingleton<IProductApiIdempotencyStore>(store);
                 });
             });
     }

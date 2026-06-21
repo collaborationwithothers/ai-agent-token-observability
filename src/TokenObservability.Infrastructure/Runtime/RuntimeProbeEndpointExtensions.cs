@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace TokenObservability.Infrastructure.Runtime;
@@ -12,7 +13,9 @@ public static class RuntimeProbeEndpointExtensions
 
     public static void MapRuntimeProbeEndpoints(this WebApplication app)
     {
-        app.MapHealthChecks("/health/live");
-        app.MapHealthChecks("/health/ready");
+        app.MapHealthChecks("/health/live", new HealthCheckOptions
+        {
+            Predicate = static _ => false
+        });
     }
 }
