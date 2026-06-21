@@ -146,6 +146,56 @@ type PricingBasisResponse = {
   items: PricingBasisItem[];
 };
 
+const contentReviewStates = ["review_required", "redaction_failed", "discarded", "approved_excerpt"] as const;
+const maxApprovedExcerptUtf8Bytes = 2 * 1024;
+
+export type ContentReviewState = (typeof contentReviewStates)[number];
+
+type ContentReviewBlob = {
+  container: string;
+  blobName: string;
+  blobUri?: string | null;
+  blobVersion: string | null;
+};
+
+export type ContentReviewItem = {
+  contentReferenceId: string;
+  customerOrganizationId: string;
+  agentSessionId: string | null;
+  telemetryEnvelopeId: string;
+  contentClass: string;
+  captureState: ContentReviewState | string;
+  redactionStatus: string;
+  contentHash: string | null;
+  blob: ContentReviewBlob | null;
+  policyVersionId: string;
+  redactionPipelineVersion: string | null;
+  productRuleVersion: string | null;
+  retentionClass: string;
+  expiresAtUtc: string | null;
+  recommendationEligible: boolean;
+  auditEventId: string;
+  approvedExcerpt: string | null;
+  createdAtUtc: string;
+  updatedAtUtc: string;
+};
+
+type ContentReviewListResponse = {
+  items: ContentReviewItem[];
+  nextCursor: string | null;
+  totalEstimate: number;
+};
+
+export type ContentReviewDecision = "retry-redaction" | "discard" | "approve-excerpt" | "mark-recommendation-ineligible";
+
+type ContentReviewDecisionResponse = {
+  redactionReviewId: string;
+  contentReference: ContentReviewItem | null;
+  auditEventId: string;
+  decision: string;
+  decidedAtUtc: string;
+};
+
 type DataState<T> =
   | { kind: "loading" }
   | { kind: "ready"; data: T }
@@ -185,7 +235,7 @@ export const dashboardRoutes: DashboardRoute[] = [
     group: "govern",
     purpose: "Metadata-only content review queue entry point.",
     allowedRoles: ["SecurityReviewer", "PlatformAdmin"],
-    requiredScopeKinds: ["Organization", "ContentReviewQueue"],
+    requiredScopeKinds: ["ContentReviewQueue"],
     requiredFeatureFlag: "contentReview",
     requiredPolicySummary: "contentCaptureReview"
   },
@@ -487,6 +537,8 @@ export function App() {
             productApiBaseUrl={productApiBaseUrl}
             setCurrentPath={setCurrentPath}
           />
+        ) : activeRoute.path === "/content-review" ? (
+          <ContentReviewShell currentUser={bootstrapState.currentUser} productApiBaseUrl={productApiBaseUrl} />
         ) : activeRoute.path === "/admin/pricing" ? (
           <PricingShell productApiBaseUrl={productApiBaseUrl} />
         ) : (
@@ -826,6 +878,324 @@ function PricingShell({ productApiBaseUrl }: { productApiBaseUrl: string }) {
   );
 }
 
+function ContentReviewShell({
+  currentUser,
+  productApiBaseUrl
+}: {
+  currentUser: CurrentUser;
+  productApiBaseUrl: string;
+}) {
+  const [selectedState, setSelectedState] = useState<ContentReviewState>("review_required");
+  const [selectedContentReferenceId, setSelectedContentReferenceId] = useState<string | null>(null);
+  const [listState, setListState] = useState<DataState<ContentReviewListResponse>>({ kind: "loading" });
+  const [detailState, setDetailState] = useState<DataState<ContentReviewItem> | { kind: "idle" }>({ kind: "idle" });
+  const [decisionState, setDecisionState] = useState<
+    | { kind: "idle" }
+    | { kind: "submitting"; decision: ContentReviewDecision }
+    | { kind: "success"; data: ContentReviewDecisionResponse }
+    | { kind: "error"; decision: ContentReviewDecision; message: string; problem?: ProblemDetails }
+  >({ kind: "idle" });
+  const [decisionReason, setDecisionReason] = useState("dashboard_review");
+  const [approvedExcerpt, setApprovedExcerpt] = useState("");
+
+  const loadItems = useCallback(async () => {
+    setListState({ kind: "loading" });
+    try {
+      const data = await fetchContentReviewItems(productApiBaseUrl, selectedState);
+      setListState({ kind: "ready", data });
+      setSelectedContentReferenceId((current) => {
+        if (current && data.items.some((item) => item.contentReferenceId === current)) {
+          return current;
+        }
+
+        return data.items[0]?.contentReferenceId ?? null;
+      });
+    } catch (error) {
+      const problem = getProblemDetails(error);
+      setListState({
+        kind: "error",
+        message: problem?.title ?? getErrorMessage(error, "Content review queue request failed."),
+        problem
+      });
+      setSelectedContentReferenceId(null);
+    }
+  }, [productApiBaseUrl, selectedState]);
+
+  useEffect(() => {
+    setDecisionState({ kind: "idle" });
+    loadItems();
+  }, [loadItems]);
+
+  const loadDetail = useCallback(
+    async (contentReferenceId: string) => {
+      setDetailState({ kind: "loading" });
+      try {
+        const item = await fetchContentReviewItem(productApiBaseUrl, contentReferenceId);
+        setDetailState({ kind: "ready", data: item });
+        setApprovedExcerpt(item.approvedExcerpt ?? "");
+      } catch (error) {
+        const problem = getProblemDetails(error);
+        setDetailState({
+          kind: "error",
+          message: problem?.title ?? getErrorMessage(error, "Content review detail request failed."),
+          problem
+        });
+      }
+    },
+    [productApiBaseUrl]
+  );
+
+  useEffect(() => {
+    if (!selectedContentReferenceId) {
+      setDetailState({ kind: "idle" });
+      return;
+    }
+
+    loadDetail(selectedContentReferenceId);
+  }, [loadDetail, selectedContentReferenceId]);
+
+  const detailItem = detailState.kind === "ready" ? detailState.data : null;
+  const excerptBytes = getUtf8ByteCount(approvedExcerpt);
+  const isReviewable = detailItem ? isReviewableContentState(detailItem.captureState) : false;
+  const policyAllowsDecisions = policySummaryAllowsRoute("contentCaptureReview", currentUser.policySummaries);
+  const approveExcerptBlocked = !isReviewable || !policyAllowsDecisions || excerptBytes > maxApprovedExcerptUtf8Bytes || approvedExcerpt.trim().length === 0;
+
+  async function submitDecision(decision: ContentReviewDecision) {
+    if (!detailItem) {
+      return;
+    }
+
+    setDecisionState({ kind: "submitting", decision });
+    try {
+      const data = await submitContentReviewDecision(productApiBaseUrl, detailItem.contentReferenceId, decision, {
+        decisionReason,
+        approvedExcerpt: decision === "approve-excerpt" ? approvedExcerpt : undefined
+      });
+      setDecisionState({ kind: "success", data });
+      if (data.contentReference) {
+        setDetailState({ kind: "ready", data: data.contentReference });
+      } else {
+        await loadDetail(detailItem.contentReferenceId);
+      }
+      await loadItems();
+    } catch (error) {
+      const problem = getProblemDetails(error);
+      setDecisionState({
+        kind: "error",
+        decision,
+        message: problem?.title ?? getErrorMessage(error, "Content review decision failed."),
+        problem
+      });
+    }
+  }
+
+  return (
+    <section className="route-surface" aria-labelledby="content-review-title">
+      <div className="route-heading">
+        <div>
+          <p className="eyebrow">Governance</p>
+          <h3 id="content-review-title">Content Review Queue</h3>
+        </div>
+        <span className="state-chip">{listState.kind === "ready" ? `${listState.data.totalEstimate} items` : "Loading"}</span>
+      </div>
+
+      <div className="segmented-control" aria-label="Content review state filter">
+        {contentReviewStates.map((state) => (
+          <button
+            type="button"
+            key={state}
+            aria-pressed={selectedState === state}
+            onClick={() => {
+              setSelectedState(state);
+              setSelectedContentReferenceId(null);
+            }}
+          >
+            {formatMachineText(state)}
+          </button>
+        ))}
+      </div>
+
+      <div className="content-review-layout">
+        <div className="content-review-list" aria-label="Content review items">
+          {listState.kind === "loading" ? (
+            <div className="empty-state">
+              <h4>Loading review queue</h4>
+              <p>Product API is returning metadata-only content review items.</p>
+            </div>
+          ) : listState.kind === "error" ? (
+            <InlineProblem title="Content review unavailable" message={listState.message} problem={listState.problem} />
+          ) : listState.data.items.length === 0 ? (
+            <div className="empty-state">
+              <h4>No {formatMachineText(selectedState)} items</h4>
+              <p>The selected content review state has no visible metadata records.</p>
+            </div>
+          ) : (
+            <ul>
+              {listState.data.items.map((item) => (
+                <li key={item.contentReferenceId}>
+                  <button
+                    type="button"
+                    aria-current={selectedContentReferenceId === item.contentReferenceId ? "true" : undefined}
+                    onClick={() => {
+                      setDecisionState({ kind: "idle" });
+                      setSelectedContentReferenceId(item.contentReferenceId);
+                    }}
+                  >
+                    <strong>{formatMachineText(item.captureState)}</strong>
+                    <span>{item.contentReferenceId}</span>
+                    <small>{item.telemetryEnvelopeId}</small>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="content-review-detail">
+          {detailState.kind === "idle" ? (
+            <div className="empty-state">
+              <h4>Select a review item</h4>
+              <p>Only metadata and previously approved excerpts are shown.</p>
+            </div>
+          ) : detailState.kind === "loading" ? (
+            <div className="empty-state">
+              <h4>Loading item detail</h4>
+              <p>Product API is returning metadata for the selected content reference.</p>
+            </div>
+          ) : detailState.kind === "error" ? (
+            <InlineProblem title="Content reference unavailable" message={detailState.message} problem={detailState.problem} />
+          ) : (
+            <>
+              <ContentReviewMetadata item={detailState.data} />
+              {decisionState.kind === "success" ? <ContentReviewDecisionStatus response={decisionState.data} /> : null}
+              {decisionState.kind === "error" ? (
+                <InlineProblem title="Content review decision failed" message={decisionState.message} problem={decisionState.problem} />
+              ) : null}
+              <div className="decision-panel" aria-label="Content review decisions">
+                <label>
+                  <span>Decision reason</span>
+                  <input value={decisionReason} onChange={(event) => setDecisionReason(event.target.value)} />
+                </label>
+                <div className="button-row">
+                  <button
+                    type="button"
+                    disabled={!isReviewable || decisionState.kind === "submitting"}
+                    onClick={() => submitDecision("retry-redaction")}
+                  >
+                    Retry redaction
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={!isReviewable || decisionState.kind === "submitting"}
+                    onClick={() => submitDecision("discard")}
+                  >
+                    Discard
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={!isReviewable || decisionState.kind === "submitting"}
+                    onClick={() => submitDecision("mark-recommendation-ineligible")}
+                  >
+                    Mark recommendation ineligible
+                  </button>
+                </div>
+                <label>
+                  <span>Approved excerpt</span>
+                  <textarea
+                    value={approvedExcerpt}
+                    onChange={(event) => setApprovedExcerpt(event.target.value)}
+                    maxLength={maxApprovedExcerptUtf8Bytes}
+                  />
+                </label>
+                <p className={excerptBytes > maxApprovedExcerptUtf8Bytes ? "limit-warning" : "muted-text"}>
+                  {excerptBytes} of {maxApprovedExcerptUtf8Bytes} UTF-8 bytes
+                </p>
+                <button
+                  type="button"
+                  disabled={approveExcerptBlocked || decisionState.kind === "submitting"}
+                  onClick={() => submitDecision("approve-excerpt")}
+                >
+                  Approve excerpt
+                </button>
+                {!policyAllowsDecisions ? (
+                  <p className="limit-warning">Content Capture Policy does not currently allow review decisions.</p>
+                ) : null}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ContentReviewMetadata({ item }: { item: ContentReviewItem }) {
+  return (
+    <div className="metadata-stack">
+      <dl className="detail-grid" aria-label="Content reference metadata">
+        <DetailItem label="Content reference" value={item.contentReferenceId} />
+        <DetailItem label="Session" value={item.agentSessionId ?? "Not linked"} />
+        <DetailItem label="Telemetry envelope" value={item.telemetryEnvelopeId} />
+        <DetailItem label="Content class" value={formatMachineText(item.contentClass)} />
+        <DetailItem label="Capture state" value={formatMachineText(item.captureState)} />
+        <DetailItem label="Redaction status" value={formatMachineText(item.redactionStatus)} />
+        <DetailItem label="Policy version" value={item.policyVersionId} />
+        <DetailItem label="Pipeline version" value={item.redactionPipelineVersion ?? "Unavailable"} />
+        <DetailItem label="Product rule version" value={item.productRuleVersion ?? "Unavailable"} />
+        <DetailItem label="Retention class" value={formatMachineText(item.retentionClass)} />
+        <DetailItem label="Expires" value={item.expiresAtUtc ?? "Not scheduled"} />
+        <DetailItem label="Recommendation eligible" value={item.recommendationEligible ? "Yes" : "No"} />
+        <DetailItem label="Audit event" value={item.auditEventId} />
+        <DetailItem label="Created" value={item.createdAtUtc} />
+        <DetailItem label="Updated" value={item.updatedAtUtc} />
+      </dl>
+      {item.blob ? (
+        <dl className="detail-grid" aria-label="Captured blob metadata">
+          <DetailItem label="Blob container" value={item.blob.container} />
+          <DetailItem label="Blob name" value={item.blob.blobName} />
+          <DetailItem label="Blob version" value={item.blob.blobVersion ?? "Unavailable"} />
+        </dl>
+      ) : null}
+      {item.approvedExcerpt ? (
+        <div className="approved-excerpt">
+          <h4>Approved excerpt</h4>
+          <p>{item.approvedExcerpt}</p>
+        </div>
+      ) : (
+        <div className="empty-state">
+          <h4>No approved excerpt</h4>
+          <p>Raw failed content is not rendered in this workflow.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DetailItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <dt>{label}</dt>
+      <dd>{value}</dd>
+    </div>
+  );
+}
+
+function ContentReviewDecisionStatus({ response }: { response: ContentReviewDecisionResponse }) {
+  return (
+    <dl className="detail-grid decision-status" aria-label="Decision audit status">
+      <DetailItem label="Decision" value={formatMachineText(response.decision)} />
+      <DetailItem label="Audit event" value={response.auditEventId} />
+      <DetailItem label="Reviewed" value={response.decidedAtUtc} />
+      <DetailItem
+        label="Resulting state"
+        value={response.contentReference ? formatMachineText(response.contentReference.captureState) : "Reference unavailable"}
+      />
+    </dl>
+  );
+}
+
 function InlineProblem({
   title,
   message,
@@ -839,6 +1209,8 @@ function InlineProblem({
     <div className="empty-state" role="alert">
       <h4>{title}</h4>
       <p>{message}</p>
+      {problem?.status ? <p>Status: {problem.status}</p> : null}
+      {problem?.code ? <p>Code: {problem.code}</p> : null}
       {problem?.correlationId ? <p>Correlation ID: {problem.correlationId}</p> : null}
     </div>
   );
@@ -896,6 +1268,151 @@ function StatusSurface({ title, detail, problem }: { title: string; detail: stri
       </section>
     </main>
   );
+}
+
+class ProductApiProblemError extends Error {
+  constructor(public readonly problem?: ProblemDetails) {
+    super(problem?.title ?? "Product API request failed.");
+  }
+}
+
+export async function fetchContentReviewItems(
+  productApiBaseUrl: string,
+  state: ContentReviewState,
+  fetchImpl: typeof fetch = fetch
+): Promise<ContentReviewListResponse> {
+  const response = await fetchImpl(`${productApiBaseUrl}/content-review/items?state=${encodeURIComponent(state)}`, {
+    credentials: "include",
+    headers: { Accept: "application/json" }
+  });
+
+  if (!response.ok) {
+    throw new ProductApiProblemError(await readProblemDetails(response));
+  }
+
+  const data = (await response.json()) as ContentReviewListResponse;
+
+  return {
+    ...data,
+    items: data.items.map(sanitizeContentReviewItem)
+  };
+}
+
+export async function fetchContentReviewItem(
+  productApiBaseUrl: string,
+  contentReferenceId: string,
+  fetchImpl: typeof fetch = fetch
+): Promise<ContentReviewItem> {
+  const response = await fetchImpl(
+    `${productApiBaseUrl}/content-review/items/${encodeURIComponent(contentReferenceId)}`,
+    {
+      credentials: "include",
+      headers: { Accept: "application/json" }
+    }
+  );
+
+  if (!response.ok) {
+    throw new ProductApiProblemError(await readProblemDetails(response));
+  }
+
+  return sanitizeContentReviewItem((await response.json()) as ContentReviewItem);
+}
+
+export async function submitContentReviewDecision(
+  productApiBaseUrl: string,
+  contentReferenceId: string,
+  decision: ContentReviewDecision,
+  body: { decisionReason: string; approvedExcerpt?: string },
+  fetchImpl: typeof fetch = fetch
+): Promise<ContentReviewDecisionResponse> {
+  if (decision === "approve-excerpt" && getUtf8ByteCount(body.approvedExcerpt ?? "") > maxApprovedExcerptUtf8Bytes) {
+    throw new ProductApiProblemError({
+      title: "Approved excerpt exceeds the bounded excerpt size limit.",
+      status: 400,
+      code: "validation_failed"
+    });
+  }
+
+  const requestBody =
+    decision === "approve-excerpt"
+      ? { decisionReason: body.decisionReason, approvedExcerpt: body.approvedExcerpt ?? "" }
+      : { decisionReason: body.decisionReason };
+  const response = await fetchImpl(
+    `${productApiBaseUrl}/content-review/items/${encodeURIComponent(contentReferenceId)}/${decision}`,
+    {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Idempotency-Key": createIdempotencyKey(decision, contentReferenceId)
+      },
+      body: JSON.stringify(requestBody)
+    }
+  );
+
+  if (!response.ok) {
+    throw new ProductApiProblemError(await readProblemDetails(response));
+  }
+
+  const data = (await response.json()) as ContentReviewDecisionResponse;
+
+  return {
+    ...data,
+    contentReference: data.contentReference ? sanitizeContentReviewItem(data.contentReference) : null
+  };
+}
+
+export function isReviewableContentState(captureState: string) {
+  return captureState === "review_required" || captureState === "redaction_failed";
+}
+
+export function sanitizeContentReviewItem(item: ContentReviewItem): ContentReviewItem {
+  return {
+    contentReferenceId: item.contentReferenceId,
+    customerOrganizationId: item.customerOrganizationId,
+    agentSessionId: item.agentSessionId,
+    telemetryEnvelopeId: item.telemetryEnvelopeId,
+    contentClass: item.contentClass,
+    captureState: item.captureState,
+    redactionStatus: item.redactionStatus,
+    contentHash: item.contentHash,
+    blob: item.blob
+      ? {
+          container: item.blob.container,
+          blobName: item.blob.blobName,
+          blobVersion: item.blob.blobVersion
+        }
+      : null,
+    policyVersionId: item.policyVersionId,
+    redactionPipelineVersion: item.redactionPipelineVersion,
+    productRuleVersion: item.productRuleVersion,
+    retentionClass: item.retentionClass,
+    expiresAtUtc: item.expiresAtUtc,
+    recommendationEligible: item.recommendationEligible,
+    auditEventId: item.auditEventId,
+    approvedExcerpt: item.approvedExcerpt,
+    createdAtUtc: item.createdAtUtc,
+    updatedAtUtc: item.updatedAtUtc
+  };
+}
+
+export function getUtf8ByteCount(value: string) {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function createIdempotencyKey(decision: ContentReviewDecision, contentReferenceId: string) {
+  const randomSuffix = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+
+  return `${decision}-${contentReferenceId}-${randomSuffix}`;
+}
+
+function getProblemDetails(error: unknown) {
+  return error instanceof ProductApiProblemError ? error.problem : undefined;
+}
+
+function getErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
 }
 
 function useBrowserPath(): [string, (path: string, options?: { replace?: boolean }) => void] {
@@ -1007,7 +1524,11 @@ export function isRouteVisible(route: DashboardRoute, currentUser: CurrentUser) 
 }
 
 export function scopeMatchesRoute(requiredScopeKind: ProductScopeKind, scopes: ProductScope[]) {
-  return scopes.some((scope) => scope.kind === "Organization" || scope.kind === requiredScopeKind);
+  return scopes.some(
+    (scope) =>
+      scope.kind === requiredScopeKind ||
+      (requiredScopeKind !== "ContentReviewQueue" && scope.kind === "Organization")
+  );
 }
 
 function policySummaryAllowsRoute(
@@ -1020,7 +1541,8 @@ function policySummaryAllowsRoute(
 
   if (requiredPolicySummary === "contentCaptureReview") {
     const contentCapture = policySummaries?.contentCapture;
-    return contentCapture?.reviewQueueEnabled !== false && contentCapture?.state !== "disabled";
+    return contentCapture?.reviewQueueEnabled === true &&
+      (contentCapture.state === "review_required" || contentCapture.state === "active");
   }
 
   const recommendations = policySummaries?.recommendations;
