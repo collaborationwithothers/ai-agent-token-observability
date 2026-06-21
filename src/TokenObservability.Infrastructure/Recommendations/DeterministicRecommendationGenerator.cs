@@ -40,7 +40,14 @@ public sealed class DeterministicRecommendationGenerator(InMemoryTenantMetadataS
                 continue;
             }
 
-            var packet = CreateEvidencePacket(request, session, hotspot, observations);
+            var packet = CreateEvidencePacket(
+                request,
+                session,
+                hotspot,
+                observations,
+                recommendationModelPolicyVersion: "deterministic-v1",
+                promptTemplateVersion: null,
+                hiddenEvidenceReasons: []);
             recommendations.Add(await tenantMetadataStore.CreateRecommendationAsync(
                 new CreateRecommendationRecordRequest(
                     request.CustomerOrganizationId,
@@ -122,16 +129,20 @@ public sealed class DeterministicRecommendationGenerator(InMemoryTenantMetadataS
         };
     }
 
-    private static RecommendationEvidencePacket CreateEvidencePacket(
+    internal static RecommendationEvidencePacket CreateEvidencePacket(
         GenerateRecommendationsRequest request,
         AgentSessionRecord session,
         TokenHotspotRecord hotspot,
-        IReadOnlyList<TokenObservationRecord> observations)
+        IReadOnlyList<TokenObservationRecord> observations,
+        string recommendationModelPolicyVersion,
+        string? promptTemplateVersion,
+        IReadOnlyList<string> hiddenEvidenceReasons)
     {
         var evidenceReferenceIds = observations
             .Select(static observation => observation.TokenObservationId.ToString())
             .Append(hotspot.TokenHotspotId.ToString())
             .ToArray();
+        var generatedAtUtc = DateTimeOffset.UtcNow;
         var packet = new
         {
             schemaVersion = "recommendation.evidence.v1",
@@ -139,12 +150,13 @@ public sealed class DeterministicRecommendationGenerator(InMemoryTenantMetadataS
             sessionId = request.AgentSessionId,
             harness = session.Harness,
             codexSurface = "cli",
-            generatedAtUtc = DateTimeOffset.UtcNow,
+            generatedAtUtc,
             policy = new
             {
                 contentCapturePolicyVersion = "metadata_only",
-                recommendationModelPolicyVersion = "deterministic-v1",
-                pricingBasisVersion = "unavailable"
+                recommendationModelPolicyVersion,
+                pricingBasisVersion = "unavailable",
+                promptTemplateVersion
             },
             metrics = observations.Select(static observation => new
             {
@@ -166,7 +178,10 @@ public sealed class DeterministicRecommendationGenerator(InMemoryTenantMetadataS
                     evidenceRefIds = hotspot.EvidenceReferenceIds
                 }
             },
-            hiddenEvidence = Array.Empty<object>()
+            hiddenEvidence = hiddenEvidenceReasons.Select(static reason => new
+            {
+                reason
+            }).ToArray()
         };
         var json = JsonSerializer.Serialize(packet, JsonOptions);
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json)));
@@ -176,9 +191,9 @@ public sealed class DeterministicRecommendationGenerator(InMemoryTenantMetadataS
             request.CustomerOrganizationId,
             request.AgentSessionId,
             session.Harness,
-            DateTimeOffset.UtcNow,
+            generatedAtUtc,
             evidenceReferenceIds,
-            HiddenEvidenceReasons: [],
+            hiddenEvidenceReasons,
             json,
             hash);
     }

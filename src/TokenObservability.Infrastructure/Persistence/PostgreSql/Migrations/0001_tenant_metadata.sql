@@ -620,6 +620,86 @@ CREATE TABLE IF NOT EXISTS token_hotspot (
     )
 );
 
+CREATE TABLE IF NOT EXISTS recommendation_prompt_template (
+    customer_organization_id uuid NOT NULL,
+    prompt_template_version text NOT NULL,
+    purpose text NOT NULL,
+    state text NOT NULL,
+    prompt_template_hash text NOT NULL,
+    structured_output_schema_version text NOT NULL,
+    policy_constraints_json jsonb NOT NULL,
+    audit_event_id text NOT NULL,
+    created_at_utc timestamptz NOT NULL,
+    activated_at_utc timestamptz NULL,
+    PRIMARY KEY (customer_organization_id, prompt_template_version),
+    CONSTRAINT fk_recommendation_prompt_template_customer FOREIGN KEY (customer_organization_id) REFERENCES customer_organization (customer_organization_id),
+    CONSTRAINT fk_recommendation_prompt_template_audit_event FOREIGN KEY (customer_organization_id, audit_event_id) REFERENCES governance_audit_event (customer_organization_id, audit_event_id),
+    CONSTRAINT ck_recommendation_prompt_template_purpose CHECK (purpose IN ('recommendation_drafter', 'candidate_hotspot_generator', 'cache_breakage_reasoner')),
+    CONSTRAINT ck_recommendation_prompt_template_state CHECK (state IN ('draft', 'active', 'superseded', 'disabled')),
+    CONSTRAINT ck_recommendation_prompt_template_hash CHECK (prompt_template_hash ~ '^[a-f0-9]{64}$'),
+    CONSTRAINT ck_recommendation_prompt_template_constraints CHECK (jsonb_typeof(policy_constraints_json) = 'object'),
+    CONSTRAINT ck_recommendation_prompt_template_version CHECK (length(prompt_template_version) BETWEEN 1 AND 128 AND prompt_template_version ~ '^[A-Za-z0-9_:/.-]+$'),
+    CONSTRAINT ck_recommendation_prompt_template_schema CHECK (length(structured_output_schema_version) BETWEEN 1 AND 128 AND structured_output_schema_version ~ '^[A-Za-z0-9_:/.-]+$'),
+    CONSTRAINT ck_recommendation_prompt_template_activation CHECK (
+        (state = 'active' AND activated_at_utc IS NOT NULL)
+        OR (state <> 'active')
+    )
+);
+
+CREATE TABLE IF NOT EXISTS recommendation_model_policy (
+    customer_organization_id uuid NOT NULL,
+    policy_version_id text NOT NULL,
+    state text NOT NULL,
+    provider text NOT NULL,
+    primary_deployment_alias text NOT NULL,
+    fallback_deployment_alias text NULL,
+    region text NOT NULL,
+    model_family_or_sku text NOT NULL,
+    model_version text NULL,
+    prompt_template_version text NOT NULL,
+    structured_output_schema_version text NOT NULL,
+    allowed_evidence_classes_json jsonb NOT NULL,
+    fallback_behavior text NOT NULL,
+    llm_assisted_enabled boolean NOT NULL,
+    audit_event_id text NOT NULL,
+    created_at_utc timestamptz NOT NULL,
+    activated_at_utc timestamptz NULL,
+    PRIMARY KEY (customer_organization_id, policy_version_id),
+    CONSTRAINT fk_recommendation_model_policy_customer FOREIGN KEY (customer_organization_id) REFERENCES customer_organization (customer_organization_id),
+    CONSTRAINT fk_recommendation_model_policy_prompt_template FOREIGN KEY (customer_organization_id, prompt_template_version) REFERENCES recommendation_prompt_template (customer_organization_id, prompt_template_version),
+    CONSTRAINT fk_recommendation_model_policy_audit_event FOREIGN KEY (customer_organization_id, audit_event_id) REFERENCES governance_audit_event (customer_organization_id, audit_event_id),
+    CONSTRAINT ck_recommendation_model_policy_state CHECK (state IN ('draft', 'active', 'superseded', 'disabled')),
+    CONSTRAINT ck_recommendation_model_policy_provider CHECK (provider IN ('azure_openai')),
+    CONSTRAINT ck_recommendation_model_policy_alias CHECK (
+        primary_deployment_alias = 'recommendation-writer-primary'
+        AND (fallback_deployment_alias IS NULL OR fallback_deployment_alias = 'recommendation-writer-fallback')
+    ),
+    CONSTRAINT ck_recommendation_model_policy_fallback CHECK (fallback_behavior IN ('deterministic_only', 'fallback_deployment_then_deterministic')),
+    CONSTRAINT ck_recommendation_model_policy_fallback_alias CHECK (
+        fallback_behavior <> 'fallback_deployment_then_deterministic'
+        OR fallback_deployment_alias IS NOT NULL
+    ),
+    CONSTRAINT ck_recommendation_model_policy_evidence_classes CHECK (
+        jsonb_typeof(allowed_evidence_classes_json) = 'array'
+        AND jsonb_array_length(allowed_evidence_classes_json) BETWEEN 1 AND 32
+    ),
+    CONSTRAINT ck_recommendation_model_policy_safe_ids CHECK (
+        length(policy_version_id) BETWEEN 1 AND 128
+        AND policy_version_id ~ '^[A-Za-z0-9_:/.-]+$'
+        AND length(region) BETWEEN 1 AND 128
+        AND region ~ '^[a-z0-9-]+$'
+        AND length(model_family_or_sku) BETWEEN 1 AND 128
+        AND model_family_or_sku ~ '^[A-Za-z0-9_:/.-]+$'
+        AND length(structured_output_schema_version) BETWEEN 1 AND 128
+        AND structured_output_schema_version ~ '^[A-Za-z0-9_:/.-]+$'
+        AND (model_version IS NULL OR (length(model_version) BETWEEN 1 AND 128 AND model_version ~ '^[A-Za-z0-9_:/.-]+$'))
+    ),
+    CONSTRAINT ck_recommendation_model_policy_activation CHECK (
+        (state = 'active' AND activated_at_utc IS NOT NULL)
+        OR (state <> 'active')
+    )
+);
+
 CREATE TABLE IF NOT EXISTS recommendation (
     recommendation_id uuid PRIMARY KEY,
     customer_organization_id uuid NOT NULL,
@@ -718,11 +798,46 @@ CREATE TABLE IF NOT EXISTS recommendation_regeneration_request (
     CONSTRAINT ck_recommendation_regeneration_reason CHECK (length(reason) BETWEEN 1 AND 512)
 );
 
+CREATE TABLE IF NOT EXISTS recommendation_llm_generation_failure (
+    recommendation_llm_generation_failure_id uuid PRIMARY KEY,
+    customer_organization_id uuid NOT NULL,
+    agent_session_id text NOT NULL,
+    token_hotspot_id uuid NULL,
+    failure_code text NOT NULL,
+    provider text NOT NULL,
+    deployment_alias text NOT NULL,
+    policy_version_id text NOT NULL,
+    prompt_template_version text NOT NULL,
+    evidence_packet_hash text NOT NULL,
+    structured_output_schema_version text NOT NULL,
+    audit_event_id text NOT NULL,
+    created_at_utc timestamptz NOT NULL,
+    CONSTRAINT fk_recommendation_llm_failure_customer FOREIGN KEY (customer_organization_id) REFERENCES customer_organization (customer_organization_id),
+    CONSTRAINT fk_recommendation_llm_failure_agent_session FOREIGN KEY (customer_organization_id, agent_session_id) REFERENCES agent_session (customer_organization_id, agent_session_id),
+    CONSTRAINT fk_recommendation_llm_failure_token_hotspot FOREIGN KEY (customer_organization_id, token_hotspot_id) REFERENCES token_hotspot (customer_organization_id, token_hotspot_id),
+    CONSTRAINT fk_recommendation_llm_failure_model_policy FOREIGN KEY (customer_organization_id, policy_version_id) REFERENCES recommendation_model_policy (customer_organization_id, policy_version_id),
+    CONSTRAINT fk_recommendation_llm_failure_prompt_template FOREIGN KEY (customer_organization_id, prompt_template_version) REFERENCES recommendation_prompt_template (customer_organization_id, prompt_template_version),
+    CONSTRAINT fk_recommendation_llm_failure_audit_event FOREIGN KEY (customer_organization_id, audit_event_id) REFERENCES governance_audit_event (customer_organization_id, audit_event_id),
+    CONSTRAINT ck_recommendation_llm_failure_provider CHECK (provider IN ('azure_openai')),
+    CONSTRAINT ck_recommendation_llm_failure_alias CHECK (deployment_alias IN ('recommendation-writer-primary', 'recommendation-writer-fallback')),
+    CONSTRAINT ck_recommendation_llm_failure_hash CHECK (evidence_packet_hash ~ '^[A-F0-9]{64}$'),
+    CONSTRAINT ck_recommendation_llm_failure_safe_ids CHECK (
+        length(failure_code) BETWEEN 1 AND 128
+        AND failure_code ~ '^[A-Za-z0-9_:/.-]+$'
+        AND length(structured_output_schema_version) BETWEEN 1 AND 128
+        AND structured_output_schema_version ~ '^[A-Za-z0-9_:/.-]+$'
+    )
+);
+
+CREATE INDEX IF NOT EXISTS ix_recommendation_prompt_template_state ON recommendation_prompt_template (customer_organization_id, state, created_at_utc);
+CREATE INDEX IF NOT EXISTS ix_recommendation_model_policy_state ON recommendation_model_policy (customer_organization_id, state, created_at_utc);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_recommendation_model_policy_active ON recommendation_model_policy (customer_organization_id) WHERE state = 'active';
 CREATE INDEX IF NOT EXISTS ix_recommendation_session_state ON recommendation (customer_organization_id, agent_session_id, recommendation_state, created_at_utc);
 CREATE INDEX IF NOT EXISTS ix_recommendation_customer_state ON recommendation (customer_organization_id, recommendation_state);
 CREATE INDEX IF NOT EXISTS ix_recommendation_evidence_recommendation ON recommendation_evidence (customer_organization_id, recommendation_id);
 CREATE INDEX IF NOT EXISTS ix_recommendation_regeneration_customer_state ON recommendation_regeneration_request (customer_organization_id, state, created_at_utc);
 CREATE INDEX IF NOT EXISTS ix_recommendation_regeneration_customer_session ON recommendation_regeneration_request (customer_organization_id, agent_session_id, created_at_utc);
+CREATE INDEX IF NOT EXISTS ix_recommendation_llm_failure_customer_session ON recommendation_llm_generation_failure (customer_organization_id, agent_session_id, created_at_utc);
 
 CREATE TABLE IF NOT EXISTS aggregate_metric_point (
     aggregate_metric_point_id uuid PRIMARY KEY,

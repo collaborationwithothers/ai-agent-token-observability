@@ -10,7 +10,9 @@ public static class RecommendationStructuredOutputValidator
         "rank the developer",
         "leaderboard",
         "user error",
-        "obvious error"
+        "obvious error",
+        "certainly caused",
+        "proved the developer"
     ];
 
     private static readonly string[] RawContentMarkers =
@@ -19,12 +21,25 @@ public static class RecommendationStructuredOutputValidator
         "prompt_text",
         "code_content",
         "command_output",
-        "tool_result"
+        "tool_result",
+        "raw_completion",
+        "completion_text",
+        "model_response",
+        "tool_output",
+        "file_content"
     ];
 
     public static RecommendationStructuredOutputValidationResult Validate(
         StructuredRecommendationOutput output,
         RecommendationEvidencePacket evidencePacket)
+    {
+        return Validate(output, evidencePacket, context: null);
+    }
+
+    public static RecommendationStructuredOutputValidationResult Validate(
+        StructuredRecommendationOutput output,
+        RecommendationEvidencePacket evidencePacket,
+        RecommendationStructuredOutputValidationContext? context)
     {
         ArgumentNullException.ThrowIfNull(output);
         ArgumentNullException.ThrowIfNull(evidencePacket);
@@ -80,9 +95,18 @@ public static class RecommendationStructuredOutputValidator
         {
             errors.Add("Candidate hotspot shape is required.");
         }
-        else if (output.CandidateHotspot.PromotionEligible)
+        else
         {
-            errors.Add("LLM output cannot promote candidate hotspots to confirmed findings.");
+            if (output.CandidateHotspot.PromotionEligible)
+            {
+                errors.Add("LLM output cannot promote candidate hotspots to confirmed findings.");
+            }
+
+            var candidateText = string.Join(' ', output.CandidateHotspot.Type, output.CandidateHotspot.Label);
+            if (candidateText.Contains("confirmed", StringComparison.OrdinalIgnoreCase))
+            {
+                errors.Add("LLM output cannot label candidate hotspots as confirmed findings.");
+            }
         }
 
         if (output.EvidenceReferenceIds is null || output.EvidenceReferenceIds.Count == 0)
@@ -140,6 +164,11 @@ public static class RecommendationStructuredOutputValidator
             errors.Add("Output contains raw or blocked content markers.");
         }
 
+        if (context is not null)
+        {
+            ValidateContext(context, errors);
+        }
+
         return new RecommendationStructuredOutputValidationResult(errors.Count == 0, output, errors);
     }
 
@@ -179,5 +208,35 @@ public static class RecommendationStructuredOutputValidator
     private static bool ContainsAny(string value, IReadOnlyList<string> needles)
     {
         return needles.Any(needle => value.Contains(needle, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static void ValidateContext(
+        RecommendationStructuredOutputValidationContext context,
+        List<string> errors)
+    {
+        if (string.IsNullOrWhiteSpace(context.Provider))
+        {
+            errors.Add("Provider metadata is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(context.DeploymentAlias))
+        {
+            errors.Add("Deployment alias metadata is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(context.ModelFamilyOrSku))
+        {
+            errors.Add("Model family or SKU metadata is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(context.ModelPolicyVersionId))
+        {
+            errors.Add("Recommendation model policy version is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(context.PromptTemplateVersion))
+        {
+            errors.Add("Prompt template version is required.");
+        }
     }
 }

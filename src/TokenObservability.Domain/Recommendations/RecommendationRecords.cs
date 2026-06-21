@@ -128,6 +128,14 @@ public sealed record RecommendationStructuredOutputValidationResult(
     StructuredRecommendationOutput? Output,
     IReadOnlyList<string> Errors);
 
+public sealed record RecommendationStructuredOutputValidationContext(
+    string Provider,
+    string DeploymentAlias,
+    string ModelFamilyOrSku,
+    string? ModelVersion,
+    string ModelPolicyVersionId,
+    string PromptTemplateVersion);
+
 public readonly record struct RecommendationId(Guid Value)
 {
     public static RecommendationId NewId()

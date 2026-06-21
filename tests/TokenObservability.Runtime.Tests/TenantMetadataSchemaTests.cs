@@ -457,6 +457,9 @@ public sealed class TenantMetadataSchemaTests
         Assert.Contains("CREATE TABLE IF NOT EXISTS recommendation", migration);
         Assert.Contains("CREATE TABLE IF NOT EXISTS recommendation_evidence", migration);
         Assert.Contains("CREATE TABLE IF NOT EXISTS recommendation_regeneration_request", migration);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS recommendation_model_policy", migration);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS recommendation_prompt_template", migration);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS recommendation_llm_generation_failure", migration);
         Assert.Contains("recommendation_id uuid PRIMARY KEY", migration);
         Assert.Contains("recommendation_evidence_id uuid PRIMARY KEY", migration);
         Assert.Contains("recommendation_regeneration_request_id uuid PRIMARY KEY", migration);
@@ -477,11 +480,24 @@ public sealed class TenantMetadataSchemaTests
         Assert.Contains("CONSTRAINT fk_recommendation_audit_event", migration);
         Assert.Contains("CONSTRAINT fk_recommendation_evidence_recommendation", migration);
         Assert.Contains("CONSTRAINT fk_recommendation_regeneration_audit_event", migration);
+        Assert.Contains("CONSTRAINT fk_recommendation_model_policy_prompt_template", migration);
+        Assert.Contains("CONSTRAINT fk_recommendation_llm_failure_model_policy", migration);
+        Assert.Contains("CONSTRAINT fk_recommendation_llm_failure_prompt_template", migration);
         Assert.Contains("ck_recommendation_kind CHECK (recommendation_kind IN ('deterministic', 'llm_assisted', 'mixed'))", migration);
         Assert.Contains("ck_recommendation_state CHECK (recommendation_state IN ('candidate', 'accepted', 'rejected', 'expired', 'superseded'))", migration);
         Assert.Contains("ck_recommendation_authority_state CHECK (authority_state IN ('deterministic', 'llm_assisted', 'llm_inferred_candidate', 'rejected'))", migration);
         Assert.Contains("ck_recommendation_confidence CHECK (confidence IN ('low', 'medium', 'high'))", migration);
         Assert.Contains("ck_recommendation_evidence_packet_json", migration);
+        Assert.Contains("ck_recommendation_model_policy_provider CHECK (provider IN ('azure_openai'))", migration);
+        Assert.Contains("primary_deployment_alias = 'recommendation-writer-primary'", migration);
+        Assert.Contains("fallback_deployment_alias = 'recommendation-writer-fallback'", migration);
+        Assert.Contains("ck_recommendation_prompt_template_hash CHECK", migration);
+        Assert.Contains("ck_recommendation_llm_failure_hash CHECK", migration);
+        Assert.Contains("ix_recommendation_model_policy_state", migration);
+        Assert.Contains("CREATE UNIQUE INDEX IF NOT EXISTS ux_recommendation_model_policy_active", migration);
+        Assert.Contains("WHERE state = 'active'", migration);
+        Assert.Contains("ix_recommendation_prompt_template_state", migration);
+        Assert.Contains("ix_recommendation_llm_failure_customer_session", migration);
         Assert.Contains("ix_recommendation_session_state", migration);
         Assert.Contains("ix_recommendation_regeneration_customer_state", migration);
 
@@ -490,6 +506,8 @@ public sealed class TenantMetadataSchemaTests
             StringComparison.Ordinal)..];
         Assert.DoesNotContain("raw_prompt", recommendationSection, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("prompt_text", recommendationSection, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("raw_completion", recommendationSection, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("completion_text", recommendationSection, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("code_content", recommendationSection, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("command_output", recommendationSection, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("tool_result", recommendationSection, StringComparison.OrdinalIgnoreCase);

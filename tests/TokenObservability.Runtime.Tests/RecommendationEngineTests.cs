@@ -248,6 +248,305 @@ public sealed class RecommendationEngineTests
     }
 
     [Fact]
+    public async Task RecommendationModelPolicyAndPromptTemplateAreImmutableTenantScopedAndAudited()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store);
+        var admin = await CreateProductUserAsync(store, seed, "policy-admin");
+
+        var template = await CreateActivePromptTemplateAsync(store, seed, admin);
+        var policy = await CreateActiveModelPolicyAsync(store, seed, admin, template.PromptTemplateVersion);
+
+        Assert.Equal("recommendation-drafter.v1", template.PromptTemplateVersion);
+        Assert.Equal(RecommendationPromptTemplateState.Active, template.State);
+        Assert.Equal("rmp-azure-openai-v1", policy.PolicyVersionId);
+        Assert.Equal(RecommendationModelProvider.AzureOpenAi, policy.Provider);
+        Assert.Equal("recommendation-writer-primary", policy.PrimaryDeploymentAlias);
+        Assert.Equal("recommendation-writer-fallback", policy.FallbackDeploymentAlias);
+        Assert.Equal(RecommendationModelFallbackBehavior.FallbackDeploymentThenDeterministic, policy.FallbackBehavior);
+        Assert.Same(policy, await store.GetActiveRecommendationModelPolicyAsync(seed.Organization.CustomerOrganizationId));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => CreateActivePromptTemplateAsync(store, seed, admin));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => CreateActiveModelPolicyAsync(store, seed, admin, template.PromptTemplateVersion));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => CreateActiveModelPolicyAsync(
+            store,
+            seed,
+            admin,
+            template.PromptTemplateVersion,
+            policyVersionId: "rmp-azure-openai-v2"));
+
+        var auditEvents = await store.ListGovernanceAuditEventsAsync(seed.Organization.CustomerOrganizationId);
+        Assert.Contains(auditEvents, audit => audit.EvidenceMetadata["operation"] == "recommendation_prompt_template_change");
+        Assert.Contains(auditEvents, audit => audit.EvidenceMetadata["operation"] == "recommendation_model_policy_change");
+    }
+
+    [Fact]
+    public async Task LlmGeneratorStoresValidOutputAsCandidateWithPolicyAndPromptMetadata()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store);
+        var admin = await CreateProductUserAsync(store, seed, "llm-policy-admin");
+        var template = await CreateActivePromptTemplateAsync(store, seed, admin);
+        await CreateActiveModelPolicyAsync(store, seed, admin, template.PromptTemplateVersion);
+        var credential = await IssueCredentialAsync(store, seed);
+        var session = await SeedTokenSessionAsync(
+            store,
+            credential.Credential,
+            "llm-recommendation-session",
+            [(TokenMetricName.InputTokens, 120_000, TokenMetricStatus.Observed, TokenMetricConfidence.Observed)]);
+        await store.RecordTokenHotspotAsync(new CreateTokenHotspotRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            TokenHotspotType.LargeContext,
+            TokenHotspotFindingState.Confirmed,
+            TokenHotspotAttributionType.Direct,
+            TokenHotspotConfidence.High,
+            TokenMetricStatus.Observed,
+            TokenMetricConfidence.Observed,
+            PromptCacheEvidenceState.NotApplicable,
+            ModelName: "gpt-5",
+            EvidenceSummary: "Input tokens exceeded configured threshold using accepted token evidence.",
+            EvidenceReferenceIds: [session.AgentSessionId],
+            TokenBurnScore: 0.91,
+            EstimatedCostImpact: null,
+            DetectionKey: "llm-large-context:test"));
+        var generator = new LlmAssistedRecommendationGenerator(
+            store,
+            new StubRecommendationLlmClient(input => ValidStructuredOutput(input, "llm_assisted")));
+
+        var generated = await generator.GenerateForSessionAsync(new GenerateRecommendationsRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            CorrelationId: "llm-recommendation-test"));
+
+        var recommendation = Assert.Single(generated);
+        Assert.Equal(RecommendationKind.LlmAssisted, recommendation.Kind);
+        Assert.Equal(RecommendationState.Candidate, recommendation.State);
+        Assert.Equal(RecommendationAuthorityState.LlmAssisted, recommendation.AuthorityState);
+        Assert.Equal(RecommendationValidationState.Pending, recommendation.ValidationState);
+        Assert.Equal("rmp-azure-openai-v1", recommendation.ModelPolicyVersionId);
+        Assert.Equal("recommendation-drafter.v1", recommendation.PromptTemplateVersion);
+        Assert.Equal("recommendation.evidence.v1", recommendation.EvidencePacketVersion);
+        Assert.Contains("content_policy_limited", recommendation.EvidencePacketJson, StringComparison.Ordinal);
+        Assert.Equal("recommendation-writer-primary", recommendation.PolicyMetadata["deployment_alias"]);
+        Assert.DoesNotContain("raw_prompt", recommendation.EvidencePacketJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("command_output", recommendation.EvidencePacketJson, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task LlmGeneratorStoresRejectedGenerationMetadataOnlyAndFallsBackToDeterministic()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store);
+        var admin = await CreateProductUserAsync(store, seed, "llm-reject-admin");
+        var template = await CreateActivePromptTemplateAsync(store, seed, admin);
+        await CreateActiveModelPolicyAsync(store, seed, admin, template.PromptTemplateVersion);
+        var credential = await IssueCredentialAsync(store, seed);
+        var session = await SeedTokenSessionAsync(
+            store,
+            credential.Credential,
+            "llm-rejection-session",
+            [(TokenMetricName.InputTokens, 120_000, TokenMetricStatus.Observed, TokenMetricConfidence.Observed)]);
+        await store.RecordTokenHotspotAsync(new CreateTokenHotspotRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            TokenHotspotType.LargeContext,
+            TokenHotspotFindingState.Confirmed,
+            TokenHotspotAttributionType.Direct,
+            TokenHotspotConfidence.High,
+            TokenMetricStatus.Observed,
+            TokenMetricConfidence.Observed,
+            PromptCacheEvidenceState.NotApplicable,
+            ModelName: "gpt-5",
+            EvidenceSummary: "Input tokens exceeded configured threshold using accepted token evidence.",
+            EvidenceReferenceIds: [session.AgentSessionId],
+            TokenBurnScore: null,
+            EstimatedCostImpact: null,
+            DetectionKey: "llm-reject-large-context:test"));
+        var generator = new LlmAssistedRecommendationGenerator(
+            store,
+            new StubRecommendationLlmClient(input => ValidStructuredOutput(input, "llm_assisted") with
+            {
+                RecommendedAction = "Inspect raw_prompt and command_output."
+            }));
+
+        var generated = await generator.GenerateForSessionAsync(new GenerateRecommendationsRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            CorrelationId: "llm-rejection-test"));
+
+        var recommendation = Assert.Single(generated);
+        Assert.Equal(RecommendationKind.Deterministic, recommendation.Kind);
+        var failures = await store.ListRecommendationLlmGenerationFailuresAsync(seed.Organization.CustomerOrganizationId);
+        var failure = Assert.Single(failures);
+        Assert.Equal("validation_failed", failure.FailureCode);
+        Assert.Equal("azure_openai", failure.Provider);
+        Assert.Equal("recommendation-writer-primary", failure.DeploymentAlias);
+        Assert.DoesNotContain("raw_prompt", failure.FailureCode, StringComparison.OrdinalIgnoreCase);
+        var auditEvents = await store.ListGovernanceAuditEventsAsync(seed.Organization.CustomerOrganizationId);
+        Assert.Contains(auditEvents, audit => audit.EvidenceMetadata["operation"] == "recommendation_generation_rejection");
+    }
+
+    [Fact]
+    public async Task LlmGeneratorTreatsRejectedStructuredOutputAsMetadataOnlyFailure()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store);
+        var admin = await CreateProductUserAsync(store, seed, "llm-output-reject-admin");
+        var template = await CreateActivePromptTemplateAsync(store, seed, admin);
+        await CreateActiveModelPolicyAsync(store, seed, admin, template.PromptTemplateVersion);
+        var credential = await IssueCredentialAsync(store, seed);
+        var session = await SeedTokenSessionAsync(
+            store,
+            credential.Credential,
+            "llm-output-rejected-session",
+            [(TokenMetricName.InputTokens, 120_000, TokenMetricStatus.Observed, TokenMetricConfidence.Observed)]);
+        await store.RecordTokenHotspotAsync(new CreateTokenHotspotRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            TokenHotspotType.LargeContext,
+            TokenHotspotFindingState.Confirmed,
+            TokenHotspotAttributionType.Direct,
+            TokenHotspotConfidence.High,
+            TokenMetricStatus.Observed,
+            TokenMetricConfidence.Observed,
+            PromptCacheEvidenceState.NotApplicable,
+            ModelName: "gpt-5",
+            EvidenceSummary: "Input tokens exceeded configured threshold using accepted token evidence.",
+            EvidenceReferenceIds: [session.AgentSessionId],
+            TokenBurnScore: null,
+            EstimatedCostImpact: null,
+            DetectionKey: "llm-output-rejected-large-context:test"));
+        var generator = new LlmAssistedRecommendationGenerator(
+            store,
+            new StubRecommendationLlmClient(input => ValidStructuredOutput(input, "rejected")));
+
+        var generated = await generator.GenerateForSessionAsync(new GenerateRecommendationsRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            CorrelationId: "llm-output-rejected-test"));
+
+        var recommendation = Assert.Single(generated);
+        Assert.Equal(RecommendationKind.Deterministic, recommendation.Kind);
+        var failure = Assert.Single(await store.ListRecommendationLlmGenerationFailuresAsync(seed.Organization.CustomerOrganizationId));
+        Assert.Equal("llm_output_rejected", failure.FailureCode);
+    }
+
+    [Fact]
+    public async Task LlmGeneratorEnforcesPolicyAllowedEvidenceClassesBeforeCallingModel()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store);
+        var admin = await CreateProductUserAsync(store, seed, "llm-evidence-admin");
+        var template = await CreateActivePromptTemplateAsync(store, seed, admin);
+        await CreateActiveModelPolicyAsync(
+            store,
+            seed,
+            admin,
+            template.PromptTemplateVersion,
+            allowedEvidenceClasses:
+            [
+                RecommendationEvidenceClass.CustomerOrganization,
+                RecommendationEvidenceClass.SessionMetadata,
+                RecommendationEvidenceClass.TokenHotspot,
+                RecommendationEvidenceClass.PolicyMetadata
+            ]);
+        var credential = await IssueCredentialAsync(store, seed);
+        var session = await SeedTokenSessionAsync(
+            store,
+            credential.Credential,
+            "llm-evidence-policy-session",
+            [(TokenMetricName.InputTokens, 120_000, TokenMetricStatus.Observed, TokenMetricConfidence.Observed)]);
+        await store.RecordTokenHotspotAsync(new CreateTokenHotspotRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            TokenHotspotType.LargeContext,
+            TokenHotspotFindingState.Confirmed,
+            TokenHotspotAttributionType.Direct,
+            TokenHotspotConfidence.High,
+            TokenMetricStatus.Observed,
+            TokenMetricConfidence.Observed,
+            PromptCacheEvidenceState.NotApplicable,
+            ModelName: "gpt-5",
+            EvidenceSummary: "Input tokens exceeded configured threshold using accepted token evidence.",
+            EvidenceReferenceIds: [session.AgentSessionId],
+            TokenBurnScore: null,
+            EstimatedCostImpact: null,
+            DetectionKey: "llm-evidence-policy-large-context:test"));
+        var client = new StubRecommendationLlmClient(input => ValidStructuredOutput(input, "llm_assisted"));
+        var generator = new LlmAssistedRecommendationGenerator(store, client);
+
+        var generated = await generator.GenerateForSessionAsync(new GenerateRecommendationsRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            CorrelationId: "llm-evidence-policy-test"));
+
+        var recommendation = Assert.Single(generated);
+        Assert.Equal(RecommendationKind.Deterministic, recommendation.Kind);
+        Assert.Equal(0, client.CallCount);
+        var failure = Assert.Single(await store.ListRecommendationLlmGenerationFailuresAsync(seed.Organization.CustomerOrganizationId));
+        Assert.Equal("evidence_class_not_allowed", failure.FailureCode);
+    }
+
+    [Fact]
+    public async Task LlmInferredCandidateHotspotsRemainCandidateRecommendations()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store);
+        var admin = await CreateProductUserAsync(store, seed, "llm-candidate-admin");
+        var template = await CreateActivePromptTemplateAsync(store, seed, admin);
+        await CreateActiveModelPolicyAsync(store, seed, admin, template.PromptTemplateVersion);
+        var credential = await IssueCredentialAsync(store, seed);
+        var session = await SeedTokenSessionAsync(
+            store,
+            credential.Credential,
+            "llm-candidate-session",
+            [(TokenMetricName.CachedInputTokens, null, TokenMetricStatus.Unavailable, TokenMetricConfidence.Unavailable)]);
+        await store.RecordTokenHotspotAsync(new CreateTokenHotspotRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            TokenHotspotType.PromptCacheBreakage,
+            TokenHotspotFindingState.CandidateCorrelated,
+            TokenHotspotAttributionType.Correlated,
+            TokenHotspotConfidence.Medium,
+            TokenMetricStatus.Unavailable,
+            TokenMetricConfidence.Unavailable,
+            PromptCacheEvidenceState.Unavailable,
+            ModelName: "gpt-5",
+            EvidenceSummary: "Cache evidence was unavailable.",
+            EvidenceReferenceIds: [session.AgentSessionId],
+            TokenBurnScore: null,
+            EstimatedCostImpact: null,
+            DetectionKey: "llm-candidate-cache:test"));
+        var generator = new LlmAssistedRecommendationGenerator(
+            store,
+            new StubRecommendationLlmClient(input => ValidStructuredOutput(input, "llm_inferred_candidate") with
+            {
+                CandidateHotspot = new StructuredCandidateHotspot(
+                    Proposed: true,
+                    Type: "prompt_cache_breakage",
+                    Label: "possible cache breakage",
+                    PromotionEligible: false)
+            }));
+
+        var generated = await generator.GenerateForSessionAsync(new GenerateRecommendationsRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            CorrelationId: "llm-candidate-test"));
+
+        var recommendation = Assert.Single(generated);
+        Assert.Equal(RecommendationState.Candidate, recommendation.State);
+        Assert.Equal(RecommendationAuthorityState.LlmInferredCandidate, recommendation.AuthorityState);
+        Assert.NotEqual(RecommendationState.Accepted, recommendation.State);
+        var hotspots = await store.ListTokenHotspotsAsync(seed.Organization.CustomerOrganizationId, session.AgentSessionId);
+        var candidateHotspot = Assert.Single(hotspots, candidate =>
+            candidate.FindingState == TokenHotspotFindingState.CandidateLlmInferred);
+        Assert.Equal(TokenHotspotAttributionType.LlmInferred, candidateHotspot.AttributionType);
+        Assert.Equal(PromptCacheEvidenceState.InferredCandidate, candidateHotspot.PromptCacheEvidenceState);
+        Assert.Equal(candidateHotspot.TokenHotspotId, recommendation.TokenHotspotId);
+    }
+
+    [Fact]
     public void StructuredOutputValidatorRejectsUnsupportedLlmOutput()
     {
         var packet = new RecommendationEvidencePacket(
@@ -306,6 +605,9 @@ public sealed class RecommendationEngineTests
             valid.Output! with { RecommendedAction = "Inspect raw_prompt and command_output." },
             packet).IsValid);
         Assert.False(RecommendationStructuredOutputValidator.Validate(
+            valid.Output! with { RecommendedAction = "Inspect raw_completion and completion_text." },
+            packet).IsValid);
+        Assert.False(RecommendationStructuredOutputValidator.Validate(
             valid.Output! with
             {
                 CandidateHotspot = new StructuredCandidateHotspot(
@@ -315,6 +617,16 @@ public sealed class RecommendationEngineTests
                     PromotionEligible: true)
             },
             packet).IsValid);
+        Assert.False(RecommendationStructuredOutputValidator.Validate(
+            valid.Output!,
+            packet,
+            new RecommendationStructuredOutputValidationContext(
+                Provider: "",
+                DeploymentAlias: "recommendation-writer-primary",
+                ModelFamilyOrSku: "gpt-5",
+                ModelVersion: null,
+                ModelPolicyVersionId: "rmp-1",
+                PromptTemplateVersion: "recommendation-drafter.v1")).IsValid);
     }
 
     private static async Task<TenantSeed> CreateTenantAsync(
@@ -373,6 +685,113 @@ public sealed class RecommendationEngineTests
                 ActorEffectiveRole: ProductRole.PlatformAdmin,
                 CorrelationId: $"credential-create-{Guid.NewGuid():N}",
                 AuditEventId: $"audit-credential-create-{Guid.NewGuid():N}"));
+    }
+
+    private static Task<ProductUser> CreateProductUserAsync(
+        InMemoryTenantMetadataStore store,
+        TenantSeed seed,
+        string label)
+    {
+        return store.CreateProductUserAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            new CreateProductUserRequest(
+                ExternalSubjectId: $"{label}-{Guid.NewGuid():N}",
+                DisplayLabel: label,
+                Email: $"{label}@example.test"));
+    }
+
+    private static Task<RecommendationPromptTemplateRecord> CreateActivePromptTemplateAsync(
+        InMemoryTenantMetadataStore store,
+        TenantSeed seed,
+        ProductUser actor)
+    {
+        return store.CreateRecommendationPromptTemplateAsync(new CreateRecommendationPromptTemplateRequest(
+            seed.Organization.CustomerOrganizationId,
+            "recommendation-drafter.v1",
+            RecommendationPromptTemplatePurpose.RecommendationDrafter,
+            RecommendationPromptTemplateState.Active,
+            new string('a', 64),
+            "recommendation.llm_output.v1",
+            "{\"nonPunitive\":true,\"evidenceOnly\":true}",
+            actor.ProductUserId,
+            ProductRole.PlatformAdmin,
+            $"audit-prompt-template-{Guid.NewGuid():N}",
+            $"prompt-template-{Guid.NewGuid():N}"));
+    }
+
+    private static Task<RecommendationModelPolicyRecord> CreateActiveModelPolicyAsync(
+        InMemoryTenantMetadataStore store,
+        TenantSeed seed,
+        ProductUser actor,
+        string promptTemplateVersion,
+        string policyVersionId = "rmp-azure-openai-v1",
+        IReadOnlyList<RecommendationEvidenceClass>? allowedEvidenceClasses = null)
+    {
+        return store.CreateRecommendationModelPolicyAsync(new CreateRecommendationModelPolicyRequest(
+            seed.Organization.CustomerOrganizationId,
+            policyVersionId,
+            RecommendationModelPolicyState.Active,
+            RecommendationModelProvider.AzureOpenAi,
+            "recommendation-writer-primary",
+            "recommendation-writer-fallback",
+            "eastus2",
+            "gpt-5",
+            "2025-08-07",
+            promptTemplateVersion,
+            "recommendation.llm_output.v1",
+            allowedEvidenceClasses ??
+            [
+                RecommendationEvidenceClass.CustomerOrganization,
+                RecommendationEvidenceClass.SessionMetadata,
+                RecommendationEvidenceClass.HarnessMetadata,
+                RecommendationEvidenceClass.TokenObservation,
+                RecommendationEvidenceClass.TokenHotspot,
+                RecommendationEvidenceClass.HiddenEvidenceMarker,
+                RecommendationEvidenceClass.PolicyMetadata
+            ],
+            RecommendationModelFallbackBehavior.FallbackDeploymentThenDeterministic,
+            LlmAssistedEnabled: true,
+            actor.ProductUserId,
+            ProductRole.PlatformAdmin,
+            $"audit-model-policy-{Guid.NewGuid():N}",
+            $"model-policy-{Guid.NewGuid():N}"));
+    }
+
+    private static StructuredRecommendationOutput ValidStructuredOutput(
+        RecommendationLlmGenerationInput input,
+        string authorityState)
+    {
+        return new StructuredRecommendationOutput(
+            "recommendation.llm_output.v1",
+            "recommendation_explanation",
+            "reduce_context",
+            new StructuredCandidateHotspot(Proposed: false, Type: null, Label: null, PromotionEligible: false),
+            "Large context appears to be increasing input token use.",
+            "Use targeted files and summaries.",
+            "Lower input tokens.",
+            EvidenceReferenceIds: [input.EvidencePacket.EvidenceReferenceIds[0]],
+            UnsupportedEvidenceGaps: ["cache evidence unavailable"],
+            "medium",
+            authorityState,
+            SafetyFlags: [],
+            PolicyLimitations: ["content_policy_limited"],
+            "This is workflow coaching, not a person failure.",
+            "No raw content was used.");
+    }
+
+    private sealed class StubRecommendationLlmClient(
+        Func<RecommendationLlmGenerationInput, StructuredRecommendationOutput> outputFactory) : IRecommendationLlmClient
+    {
+        public int CallCount { get; private set; }
+
+        public Task<StructuredRecommendationOutput> GenerateAsync(
+            RecommendationLlmGenerationInput input,
+            CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            return Task.FromResult(outputFactory(input));
+        }
     }
 
     private static async Task<AgentSessionRecord> SeedTokenSessionAsync(
