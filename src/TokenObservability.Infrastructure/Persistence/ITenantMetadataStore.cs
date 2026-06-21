@@ -117,6 +117,22 @@ public interface ITenantMetadataStore : IProductApiIdempotencyStore
     Task<CostEstimateRecord> EstimateAndRecordTokenObservationCostAsync(
         EstimateTokenObservationCostRequest request);
 
+    Task<IReadOnlyList<AggregateMetricPointRecord>> ListAggregateMetricPointsAsync(
+        CustomerOrganizationId customerOrganizationId);
+
+    Task<BudgetPolicyRecord> CreateBudgetPolicyAsync(
+        CreateBudgetPolicyRequest request,
+        ProductUserId actorProductUserId,
+        ProductRole actorEffectiveRole);
+
+    Task<IReadOnlyList<BudgetPolicyRecord>> ListBudgetPoliciesAsync(
+        CustomerOrganizationId customerOrganizationId);
+
+    Task<BudgetPolicyRecord> UpdateBudgetPolicyAsync(
+        UpdateBudgetPolicyRequest request,
+        ProductUserId actorProductUserId,
+        ProductRole actorEffectiveRole);
+
     Task<IReadOnlyList<RecommendationRecord>> ListRecommendationsForSessionAsync(
         CustomerOrganizationId customerOrganizationId,
         string agentSessionId);

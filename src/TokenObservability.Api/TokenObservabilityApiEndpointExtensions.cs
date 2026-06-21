@@ -73,6 +73,10 @@ internal static class TokenObservabilityApiEndpointExtensions
         api.MapPost("/pricing/basis/{pricingBasisId}/approve", ApprovePricingBasis);
         api.MapPost("/pricing/basis/{pricingBasisId}/reject", RejectPricingBasis);
         api.MapPost("/pricing/basis/{pricingBasisId}/supersede", SupersedePricingBasis);
+        api.MapGet("/budgets/policies", GetBudgetPolicies);
+        api.MapGet("/budgets/evaluations", GetBudgetEvaluations);
+        api.MapPost("/budgets/policies", CreateBudgetPolicy);
+        api.MapPatch("/budgets/policies/{budgetPolicyId}", UpdateBudgetPolicy);
         api.MapGet("/grafana/drilldown", GetGrafanaDrilldown);
         api.MapGet("/sessions", GetSessions);
         api.MapGet("/sessions/{sessionId}/content-references", GetSessionContentReferences);
@@ -1099,6 +1103,221 @@ internal static class TokenObservabilityApiEndpointExtensions
         }
     }
 
+    private static async Task<IResult> GetBudgetPolicies(
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        ITenantMetadataStore tenantMetadataStore)
+    {
+        var resolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            ProductAuthorizationAction.BudgetManage,
+            new ProductScope(ProductScopeKind.Pricing, ScopeId: "pricing"));
+
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
+        }
+
+        var records = await tenantMetadataStore.ListBudgetPoliciesAsync(
+            resolution.Context.CustomerOrganization.CustomerOrganizationId);
+
+        return Results.Ok(new
+        {
+            items = records.Select(ToBudgetPolicyResponse).ToArray(),
+            nextCursor = (string?)null,
+            totalEstimate = records.Count
+        });
+    }
+
+    private static async Task<IResult> GetBudgetEvaluations(
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        ITenantMetadataStore tenantMetadataStore)
+    {
+        var resolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            ProductAuthorizationAction.BudgetManage,
+            new ProductScope(ProductScopeKind.Pricing, ScopeId: "pricing"));
+
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
+        }
+
+        var customerOrganizationId = resolution.Context.CustomerOrganization.CustomerOrganizationId;
+        var policies = await tenantMetadataStore.ListBudgetPoliciesAsync(customerOrganizationId);
+        var aggregatePoints = await tenantMetadataStore.ListAggregateMetricPointsAsync(customerOrganizationId);
+        var pricingBasis = await tenantMetadataStore.ListPricingBasisRecordsAsync(customerOrganizationId);
+        var costEstimates = await tenantMetadataStore.ListCostEstimatesAsync(customerOrganizationId);
+        var approvedPricingBasisIds = pricingBasis
+            .Where(static basis => basis.ReviewState == PricingReviewState.Approved)
+            .Select(static basis => basis.PricingBasisId)
+            .ToHashSet(StringComparer.Ordinal);
+
+        var evaluations = policies
+            .Select(policy => ToBudgetEvaluationResponse(policy, aggregatePoints, costEstimates, approvedPricingBasisIds))
+            .ToArray();
+
+        return Results.Ok(new
+        {
+            items = evaluations,
+            nextCursor = (string?)null,
+            totalEstimate = evaluations.Length,
+            attribution = "aggregate_only"
+        });
+    }
+
+    private static async Task<IResult> CreateBudgetPolicy(
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        ITenantMetadataStore tenantMetadataStore,
+        IProductApiIdempotencyStore idempotencyStore)
+    {
+        if (!HasIdempotencyKey(httpContext))
+        {
+            return CreateProblem(httpContext, "Idempotency key required.", StatusCodes.Status400BadRequest, "idempotency_key_required");
+        }
+
+        var resolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            ProductAuthorizationAction.BudgetManage,
+            new ProductScope(ProductScopeKind.Pricing, ScopeId: "pricing"));
+
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
+        }
+
+        var rawBody = await ReadRequestBodyAsync(httpContext);
+        var idempotency = await ResolvePricingMutationIdempotencyAsync(
+            httpContext,
+            resolution.Context,
+            idempotencyStore,
+            rawBody);
+        if (idempotency.Result is not null)
+        {
+            return idempotency.Result;
+        }
+
+        var body = DeserializePricingMutationBody<BudgetPolicyCreateBody>(rawBody);
+        if (body is null)
+        {
+            return CreateProblem(httpContext, "Budget policy request body required.", StatusCodes.Status400BadRequest, "budget_policy_body_required");
+        }
+
+        try
+        {
+            if (body.ThresholdJson.ValueKind is JsonValueKind.Undefined)
+            {
+                return CreateProblem(httpContext, "Budget threshold JSON is required.", StatusCodes.Status400BadRequest, "invalid_budget_policy");
+            }
+
+            var record = await tenantMetadataStore.CreateBudgetPolicyAsync(
+                new CreateBudgetPolicyRequest(
+                    resolution.Context.CustomerOrganization.CustomerOrganizationId,
+                    InMemoryTenantMetadataStore.ParseBudgetScopeKind(body.ScopeKind),
+                    body.ScopeId,
+                    InMemoryTenantMetadataStore.ParseBudgetMetricKind(body.MetricKind),
+                    body.ThresholdJson.GetRawText(),
+                    InMemoryTenantMetadataStore.ParseBudgetPolicyStatus(body.Status),
+                    $"audit-budget-policy-{Guid.NewGuid():N}",
+                    resolution.Context.CorrelationId),
+                resolution.Context.ProductUser.ProductUserId,
+                resolution.Context.EffectiveRoles.First());
+
+            var location = $"/api/v1/budgets/policies/{record.BudgetPolicyId}";
+            return await StorePricingMutationIdempotencyResultAsync(
+                idempotencyStore,
+                resolution.Context,
+                idempotency,
+                operationId: record.BudgetPolicyId,
+                StatusCodes.Status201Created,
+                location,
+                ToBudgetPolicyResponse(record));
+        }
+        catch (ArgumentException ex)
+        {
+            return CreateProblem(httpContext, ex.Message, StatusCodes.Status400BadRequest, "invalid_budget_policy");
+        }
+        catch (InvalidOperationException ex)
+        {
+            return CreateProblem(httpContext, ex.Message, StatusCodes.Status409Conflict, "budget_policy_conflict");
+        }
+    }
+
+    private static async Task<IResult> UpdateBudgetPolicy(
+        string budgetPolicyId,
+        HttpContext httpContext,
+        TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
+        ITenantMetadataStore tenantMetadataStore,
+        IProductApiIdempotencyStore idempotencyStore)
+    {
+        if (!HasIdempotencyKey(httpContext))
+        {
+            return CreateProblem(httpContext, "Idempotency key required.", StatusCodes.Status400BadRequest, "idempotency_key_required");
+        }
+
+        var resolution = await authorizationContextResolver.ResolveAsync(
+            httpContext,
+            ProductAuthorizationAction.BudgetManage,
+            new ProductScope(ProductScopeKind.Pricing, ScopeId: "pricing"));
+
+        if (!resolution.IsAllowed || resolution.Context is null)
+        {
+            return CreateProblem(httpContext, resolution.Title, resolution.StatusCode, resolution.Code);
+        }
+
+        var rawBody = await ReadRequestBodyAsync(httpContext);
+        var idempotency = await ResolvePricingMutationIdempotencyAsync(
+            httpContext,
+            resolution.Context,
+            idempotencyStore,
+            rawBody);
+        if (idempotency.Result is not null)
+        {
+            return idempotency.Result;
+        }
+
+        var body = DeserializePricingMutationBody<BudgetPolicyUpdateBody>(rawBody) ?? new BudgetPolicyUpdateBody();
+
+        try
+        {
+            var thresholdJson = body.ThresholdJson?.ValueKind is null or JsonValueKind.Undefined
+                ? null
+                : body.ThresholdJson.Value.GetRawText();
+            var record = await tenantMetadataStore.UpdateBudgetPolicyAsync(
+                new UpdateBudgetPolicyRequest(
+                    resolution.Context.CustomerOrganization.CustomerOrganizationId,
+                    budgetPolicyId,
+                    body.ScopeKind is null ? null : InMemoryTenantMetadataStore.ParseBudgetScopeKind(body.ScopeKind),
+                    body.ScopeId,
+                    body.MetricKind is null ? null : InMemoryTenantMetadataStore.ParseBudgetMetricKind(body.MetricKind),
+                    thresholdJson,
+                    body.Status is null ? null : InMemoryTenantMetadataStore.ParseBudgetPolicyStatus(body.Status),
+                    $"audit-budget-policy-{Guid.NewGuid():N}",
+                    resolution.Context.CorrelationId),
+                resolution.Context.ProductUser.ProductUserId,
+                resolution.Context.EffectiveRoles.First());
+
+            return await StorePricingMutationIdempotencyResultAsync(
+                idempotencyStore,
+                resolution.Context,
+                idempotency,
+                operationId: record.BudgetPolicyId,
+                StatusCodes.Status200OK,
+                Location: null,
+                ToBudgetPolicyResponse(record));
+        }
+        catch (ArgumentException ex)
+        {
+            return CreateProblem(httpContext, ex.Message, StatusCodes.Status400BadRequest, "invalid_budget_policy");
+        }
+        catch (InvalidOperationException ex)
+        {
+            return CreateProblem(httpContext, ex.Message, StatusCodes.Status409Conflict, "budget_policy_conflict");
+        }
+    }
+
     private static async Task<IResult> GetOverviewTokenTimeline(
         HttpContext httpContext,
         TokenObservabilityAuthorizationContextResolver authorizationContextResolver,
@@ -1704,6 +1923,189 @@ internal static class TokenObservabilityApiEndpointExtensions
         };
     }
 
+    private static object ToBudgetPolicyResponse(BudgetPolicyRecord record)
+    {
+        return new
+        {
+            budgetPolicyId = record.BudgetPolicyId,
+            customerOrganizationId = record.CustomerOrganizationId.ToString(),
+            scopeKind = InMemoryTenantMetadataStore.ToWireBudgetScopeKind(record.ScopeKind),
+            scopeId = record.ScopeId,
+            metricKind = InMemoryTenantMetadataStore.ToWireBudgetMetricKind(record.MetricKind),
+            threshold = JsonSerializer.Deserialize<JsonElement>(record.ThresholdJson, JsonOptions),
+            status = InMemoryTenantMetadataStore.ToWireBudgetPolicyStatus(record.Status),
+            auditEventId = record.AuditEventId,
+            createdAtUtc = record.CreatedAtUtc,
+            updatedAtUtc = record.UpdatedAtUtc
+        };
+    }
+
+    private static object ToBudgetEvaluationResponse(
+        BudgetPolicyRecord policy,
+        IReadOnlyList<AggregateMetricPointRecord> aggregatePoints,
+        IReadOnlyList<CostEstimateRecord> costEstimates,
+        IReadOnlySet<string> approvedPricingBasisIds)
+    {
+        var threshold = ReadBudgetThreshold(policy);
+        var actualValue = policy.Status == BudgetPolicyStatus.Disabled
+            ? null
+            : EvaluateBudgetMetric(policy, aggregatePoints, costEstimates, approvedPricingBasisIds);
+        var evaluationStatus = policy.Status == BudgetPolicyStatus.Disabled
+            ? "disabled"
+            : actualValue is null
+                ? "unavailable"
+                : actualValue > threshold.Value
+                    ? "threshold_exceeded"
+                    : "within_threshold";
+
+        return new
+        {
+            budgetPolicyId = policy.BudgetPolicyId,
+            scopeKind = InMemoryTenantMetadataStore.ToWireBudgetScopeKind(policy.ScopeKind),
+            scopeId = policy.ScopeId,
+            metricKind = InMemoryTenantMetadataStore.ToWireBudgetMetricKind(policy.MetricKind),
+            period = threshold.Period,
+            thresholdValue = threshold.Value,
+            actualValue,
+            unit = threshold.Unit,
+            status = evaluationStatus,
+            attribution = "aggregate_only",
+            pricingBasisState = policy.MetricKind == BudgetMetricKind.EstimatedCost ? "approved_only" : "not_applicable"
+        };
+    }
+
+    private static decimal? EvaluateBudgetMetric(
+        BudgetPolicyRecord policy,
+        IReadOnlyList<AggregateMetricPointRecord> aggregatePoints,
+        IReadOnlyList<CostEstimateRecord> costEstimates,
+        IReadOnlySet<string> approvedPricingBasisIds)
+    {
+        return policy.MetricKind switch
+        {
+            BudgetMetricKind.Tokens => SumAggregateMetricValue(policy, aggregatePoints, "tokenobs_tokens_total"),
+            BudgetMetricKind.EstimatedCost => SumApprovedEstimatedCost(policy, costEstimates, approvedPricingBasisIds),
+            BudgetMetricKind.CacheMissRate => CalculateCacheMissRate(policy, aggregatePoints),
+            BudgetMetricKind.ErrorRework => CalculateErrorReworkRate(policy, aggregatePoints),
+            _ => null
+        };
+    }
+
+    private static decimal? SumAggregateMetricValue(
+        BudgetPolicyRecord policy,
+        IReadOnlyList<AggregateMetricPointRecord> aggregatePoints,
+        string metricName)
+    {
+        var points = aggregatePoints
+            .Where(point => point.Name == metricName && AggregatePointMatchesBudgetScope(policy, point))
+            .ToArray();
+
+        return points.Length == 0 ? null : (decimal)points.Sum(static point => point.Value);
+    }
+
+    private static decimal? SumApprovedEstimatedCost(
+        BudgetPolicyRecord policy,
+        IReadOnlyList<CostEstimateRecord> costEstimates,
+        IReadOnlySet<string> approvedPricingBasisIds)
+    {
+        var estimates = costEstimates
+            .Where(estimate => estimate.EstimatedCost is not null &&
+                estimate.Currency == "USD" &&
+                estimate.PricingBasisId is not null &&
+                approvedPricingBasisIds.Contains(estimate.PricingBasisId) &&
+                CostEstimateMatchesBudgetScope(policy, estimate))
+            .ToArray();
+
+        return estimates.Length == 0 ? null : estimates.Sum(static estimate => estimate.EstimatedCost!.Value);
+    }
+
+    private static decimal? CalculateCacheMissRate(
+        BudgetPolicyRecord policy,
+        IReadOnlyList<AggregateMetricPointRecord> aggregatePoints)
+    {
+        var tokenPoints = aggregatePoints
+            .Where(point => point.Name == "tokenobs_tokens_total" && AggregatePointMatchesBudgetScope(policy, point))
+            .ToArray();
+        var total = tokenPoints.Sum(static point => point.Value);
+        if (total <= 0)
+        {
+            return null;
+        }
+
+        var cached = tokenPoints
+            .Where(static point => point.Labels.TryGetValue("token_type", out var tokenType) && tokenType == "cached_input")
+            .Sum(static point => point.Value);
+
+        return (decimal)Math.Clamp(1 - cached / total, 0, 1);
+    }
+
+    private static decimal? CalculateErrorReworkRate(
+        BudgetPolicyRecord policy,
+        IReadOnlyList<AggregateMetricPointRecord> aggregatePoints)
+    {
+        var turnPoints = aggregatePoints
+            .Where(point => point.Name == "tokenobs_turns_total" && AggregatePointMatchesBudgetScope(policy, point))
+            .ToArray();
+        var total = turnPoints.Sum(static point => point.Value);
+        if (total <= 0)
+        {
+            return null;
+        }
+
+        var errorRework = turnPoints
+            .Where(static point => point.Labels.TryGetValue("result", out var result) &&
+                result is "error" or "rework")
+            .Sum(static point => point.Value);
+
+        return (decimal)Math.Clamp(errorRework / total, 0, 1);
+    }
+
+    private static bool AggregatePointMatchesBudgetScope(BudgetPolicyRecord policy, AggregateMetricPointRecord point)
+    {
+        return policy.ScopeKind switch
+        {
+            BudgetPolicyScopeKind.CustomerOrganization => true,
+            BudgetPolicyScopeKind.Harness => point.Labels.TryGetValue("harness", out var harness) &&
+                StringComparer.Ordinal.Equals(harness, policy.ScopeId),
+            BudgetPolicyScopeKind.Model => point.Labels.TryGetValue("model", out var model) &&
+                StringComparer.Ordinal.Equals(model, policy.ScopeId),
+            _ => false
+        };
+    }
+
+    private static bool CostEstimateMatchesBudgetScope(BudgetPolicyRecord policy, CostEstimateRecord estimate)
+    {
+        return policy.ScopeKind switch
+        {
+            BudgetPolicyScopeKind.CustomerOrganization => true,
+            BudgetPolicyScopeKind.Model => StringComparer.Ordinal.Equals(estimate.ModelName, policy.ScopeId),
+            _ => false
+        };
+    }
+
+    private static BudgetThreshold ReadBudgetThreshold(BudgetPolicyRecord policy)
+    {
+        using var document = JsonDocument.Parse(policy.ThresholdJson);
+        var root = document.RootElement;
+        var period = root.GetProperty("period").GetString()!;
+
+        return policy.MetricKind switch
+        {
+            BudgetMetricKind.EstimatedCost => new BudgetThreshold(
+                root.GetProperty("amount").GetDecimal(),
+                "USD",
+                period),
+            BudgetMetricKind.Tokens => new BudgetThreshold(
+                root.GetProperty("amount").GetDecimal(),
+                "tokens",
+                period),
+            BudgetMetricKind.CacheMissRate or BudgetMetricKind.ErrorRework => new BudgetThreshold(
+                root.GetProperty("rate").GetDecimal(),
+                "ratio",
+                period),
+            _ => throw new ArgumentOutOfRangeException(nameof(policy), policy.MetricKind, null)
+        };
+    }
+
     private static object ToContentReferenceResponse(ContentReferenceRecord record, bool includeApprovedExcerpt)
     {
         return new
@@ -1979,6 +2381,22 @@ internal static class TokenObservabilityApiEndpointExtensions
         IReadOnlyDictionary<string, string> SourceMetadata);
 
     private sealed record PricingBasisReviewBody(string? DecisionReason);
+
+    private sealed record BudgetPolicyCreateBody(
+        string ScopeKind,
+        string? ScopeId,
+        string MetricKind,
+        JsonElement ThresholdJson,
+        string Status);
+
+    private sealed record BudgetPolicyUpdateBody(
+        string? ScopeKind = null,
+        string? ScopeId = null,
+        string? MetricKind = null,
+        JsonElement? ThresholdJson = null,
+        string? Status = null);
+
+    private sealed record BudgetThreshold(decimal Value, string Unit, string Period);
 
     private sealed record RecommendationRegenerationBody(
         string? AgentSessionId,

@@ -1239,6 +1239,239 @@ public sealed class ProductApiAuthorizationContextTests
     }
 
     [Fact]
+    public async Task BudgetPolicyRoutesRequireBudgetManageIdempotencyAndAuditChanges()
+    {
+        var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
+        var seed = await CreateTenantAsync(store, "contoso", "contoso-tenant");
+        var leadClaims = CreateClaims(subject: "lead-subject", groupObjectIds: ["lead-group"]);
+        var developerClaims = CreateClaims(subject: "developer-subject", groupObjectIds: ["developer-group"]);
+        var lead = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            leadClaims);
+        var developer = await store.ResolveProductUserFromAuthenticatedClaimsAsync(
+            seed.Organization.CustomerOrganizationId,
+            seed.IdentityTenant.IdentityTenantId,
+            developerClaims);
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            lead.ProductUserId,
+            "lead-group",
+            ProductRole.EngineeringLead,
+            ProductScopeKind.Pricing,
+            "pricing");
+        await SeedRoleMappingAsync(
+            store,
+            seed,
+            developer.ProductUserId,
+            "developer-group",
+            ProductRole.Developer,
+            ProductScopeKind.Pricing,
+            "pricing");
+        using var factory = CreateFactory(store);
+        using var client = factory.CreateClient();
+
+        using var deniedRequest = CreateAuthorizedRequest(HttpMethod.Get, "/api/v1/budgets/policies", "contoso", developerClaims);
+        using var deniedResponse = await client.SendAsync(deniedRequest);
+        Assert.Equal(HttpStatusCode.Forbidden, deniedResponse.StatusCode);
+
+        using var missingIdempotencyRequest = CreateAuthorizedRequest(HttpMethod.Post, "/api/v1/budgets/policies", "contoso", leadClaims);
+        missingIdempotencyRequest.Content = new StringContent(CreateBudgetPolicyJson(), Encoding.UTF8, "application/json");
+        using var missingIdempotencyResponse = await client.SendAsync(missingIdempotencyRequest);
+        Assert.Equal(HttpStatusCode.BadRequest, missingIdempotencyResponse.StatusCode);
+        await AssertProblemCodeAsync(missingIdempotencyResponse, "idempotency_key_required");
+
+        using var createRequest = CreateAuthorizedRequest(HttpMethod.Post, "/api/v1/budgets/policies", "contoso", leadClaims);
+        createRequest.Headers.Add("Idempotency-Key", "budget-policy-create-1");
+        createRequest.Content = new StringContent(CreateBudgetPolicyJson(), Encoding.UTF8, "application/json");
+        using var createResponse = await client.SendAsync(createRequest);
+
+        var createText = await createResponse.Content.ReadAsStringAsync();
+        Assert.True(createResponse.StatusCode == HttpStatusCode.Created, createText);
+        await using var createStream = new MemoryStream(Encoding.UTF8.GetBytes(createText));
+        using var createBody = await JsonDocument.ParseAsync(createStream);
+        var budgetPolicyId = createBody.RootElement.GetProperty("budgetPolicyId").GetString();
+        Assert.Equal("team", createBody.RootElement.GetProperty("scopeKind").GetString());
+        Assert.Equal("estimated_cost", createBody.RootElement.GetProperty("metricKind").GetString());
+        Assert.Equal("active", createBody.RootElement.GetProperty("status").GetString());
+        Assert.Equal(2500, createBody.RootElement.GetProperty("threshold").GetProperty("amount").GetInt32());
+
+        using var replayRequest = CreateAuthorizedRequest(HttpMethod.Post, "/api/v1/budgets/policies", "contoso", leadClaims);
+        replayRequest.Headers.Add("Idempotency-Key", "budget-policy-create-1");
+        replayRequest.Content = new StringContent(CreateBudgetPolicyJson(), Encoding.UTF8, "application/json");
+        using var replayResponse = await client.SendAsync(replayRequest);
+        Assert.Equal(HttpStatusCode.Created, replayResponse.StatusCode);
+        using var replayBody = await JsonDocument.ParseAsync(await replayResponse.Content.ReadAsStreamAsync());
+        Assert.Equal(budgetPolicyId, replayBody.RootElement.GetProperty("budgetPolicyId").GetString());
+
+        using var updateRequest = CreateAuthorizedRequest(HttpMethod.Patch, $"/api/v1/budgets/policies/{budgetPolicyId}", "contoso", leadClaims);
+        updateRequest.Headers.Add("Idempotency-Key", "budget-policy-update-1");
+        updateRequest.Content = new StringContent("""{"status":"disabled","thresholdJson":{"amount":2000,"currency":"USD","period":"monthly"}}""", Encoding.UTF8, "application/json");
+        using var updateResponse = await client.SendAsync(updateRequest);
+        updateResponse.EnsureSuccessStatusCode();
+        using var updateBody = await JsonDocument.ParseAsync(await updateResponse.Content.ReadAsStreamAsync());
+        Assert.Equal("disabled", updateBody.RootElement.GetProperty("status").GetString());
+        Assert.Equal(2000, updateBody.RootElement.GetProperty("threshold").GetProperty("amount").GetInt32());
+
+        using var invalidRankingRequest = CreateAuthorizedRequest(HttpMethod.Post, "/api/v1/budgets/policies", "contoso", leadClaims);
+        invalidRankingRequest.Headers.Add("Idempotency-Key", "budget-policy-invalid-1");
+        invalidRankingRequest.Content = new StringContent(CreateBudgetPolicyJson(thresholdJson: """{"developerRanking":true,"amount":100}"""), Encoding.UTF8, "application/json");
+        using var invalidRankingResponse = await client.SendAsync(invalidRankingRequest);
+        Assert.Equal(HttpStatusCode.BadRequest, invalidRankingResponse.StatusCode);
+        await AssertProblemCodeAsync(invalidRankingResponse, "invalid_budget_policy");
+
+        using var invalidThresholdRequest = CreateAuthorizedRequest(HttpMethod.Post, "/api/v1/budgets/policies", "contoso", leadClaims);
+        invalidThresholdRequest.Headers.Add("Idempotency-Key", "budget-policy-invalid-threshold-1");
+        invalidThresholdRequest.Content = new StringContent(CreateBudgetPolicyJson(thresholdJson: """{"amount":-1,"currency":"USD","period":"monthly"}"""), Encoding.UTF8, "application/json");
+        using var invalidThresholdResponse = await client.SendAsync(invalidThresholdRequest);
+        Assert.Equal(HttpStatusCode.BadRequest, invalidThresholdResponse.StatusCode);
+        await AssertProblemCodeAsync(invalidThresholdResponse, "invalid_budget_policy");
+
+        using var listRequest = CreateAuthorizedRequest(HttpMethod.Get, "/api/v1/budgets/policies", "contoso", leadClaims);
+        using var listResponse = await client.SendAsync(listRequest);
+        listResponse.EnsureSuccessStatusCode();
+        using var listBody = await JsonDocument.ParseAsync(await listResponse.Content.ReadAsStreamAsync());
+        var listed = Assert.Single(listBody.RootElement.GetProperty("items").EnumerateArray());
+        Assert.Equal(budgetPolicyId, listed.GetProperty("budgetPolicyId").GetString());
+        var listJson = listBody.RootElement.ToString();
+        Assert.DoesNotContain("developer", listJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("leaderboard", listJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("wrongness", listJson, StringComparison.OrdinalIgnoreCase);
+
+        var credential = await IssueCredentialAsync(store, seed, "profile-contoso-codex");
+        var session = await SeedTokenSessionAsync(
+            store,
+            credential.Credential,
+            "budget-evaluation-session-001",
+            Now,
+            [(TokenMetricName.InputTokens, 120, TokenMetricStatus.Observed, TokenMetricConfidence.Observed, "budget-invocation-1")]);
+        await store.RecordAggregateMetricPointAsync(new CreateAggregateMetricPointRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            "tokenobs_tokens_total",
+            120,
+            "tokens",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["customer_organization_slug"] = "contoso",
+                ["environment"] = "dv",
+                ["region"] = "eastus2",
+                ["harness"] = "codex-cli",
+                ["model_provider"] = "openai",
+                ["model"] = "gpt-5",
+                ["token_type"] = "input",
+                ["metric_status"] = "observed",
+                ["metric_confidence"] = "observed"
+            }));
+        var tokenPolicy = await store.CreateBudgetPolicyAsync(
+            new CreateBudgetPolicyRequest(
+                seed.Organization.CustomerOrganizationId,
+                BudgetPolicyScopeKind.CustomerOrganization,
+                ScopeId: null,
+                BudgetMetricKind.Tokens,
+                """{"amount":100,"period":"monthly"}""",
+                BudgetPolicyStatus.Active,
+                $"audit-budget-policy-{Guid.NewGuid():N}",
+                "budget-evaluation-token"),
+            lead.ProductUserId,
+            ProductRole.EngineeringLead);
+        var approvedPricing = await SeedPricingCandidateAsync(store, seed, "gpt-5", $"audit-pricing-{Guid.NewGuid():N}");
+        await store.ApprovePricingBasisAsync(
+            new PricingBasisReviewRequest(
+                seed.Organization.CustomerOrganizationId,
+                approvedPricing.PricingBasisId,
+                $"audit-pricing-approve-{Guid.NewGuid():N}",
+                "budget-approved-pricing",
+                "approved_for_budget_evaluation"),
+            lead.ProductUserId,
+            ProductRole.EngineeringLead);
+        var candidatePricing = await SeedPricingCandidateAsync(store, seed, "gpt-5", $"audit-pricing-{Guid.NewGuid():N}");
+        await store.RecordCostEstimateAsync(new CreateCostEstimateRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            "budget-invocation-approved",
+            approvedPricing.PricingBasisId,
+            approvedPricing.PricingVersion,
+            "USD",
+            3000m,
+            CostEstimateStatus.Estimated,
+            CostEstimateSourceKind.DerivedFromObservedTokens,
+            TokenMetricStatus.Observed,
+            TokenMetricConfidence.Observed,
+            "openai",
+            "gpt-5",
+            "standard",
+            PricingTokenType.Input));
+        await store.RecordCostEstimateAsync(new CreateCostEstimateRecordRequest(
+            seed.Organization.CustomerOrganizationId,
+            session.AgentSessionId,
+            "budget-invocation-candidate",
+            candidatePricing.PricingBasisId,
+            candidatePricing.PricingVersion,
+            "USD",
+            9000m,
+            CostEstimateStatus.Estimated,
+            CostEstimateSourceKind.DerivedFromObservedTokens,
+            TokenMetricStatus.Observed,
+            TokenMetricConfidence.Observed,
+            "openai",
+            "gpt-5",
+            "standard",
+            PricingTokenType.Input));
+        var costPolicy = await store.CreateBudgetPolicyAsync(
+            new CreateBudgetPolicyRequest(
+                seed.Organization.CustomerOrganizationId,
+                BudgetPolicyScopeKind.CustomerOrganization,
+                ScopeId: null,
+                BudgetMetricKind.EstimatedCost,
+                """{"amount":2500,"currency":"USD","period":"monthly"}""",
+                BudgetPolicyStatus.Active,
+                $"audit-budget-policy-{Guid.NewGuid():N}",
+                "budget-evaluation-cost"),
+            lead.ProductUserId,
+            ProductRole.EngineeringLead);
+        var teamCostPolicy = await store.CreateBudgetPolicyAsync(
+            new CreateBudgetPolicyRequest(
+                seed.Organization.CustomerOrganizationId,
+                BudgetPolicyScopeKind.Team,
+                "team-platform",
+                BudgetMetricKind.EstimatedCost,
+                """{"amount":100,"currency":"USD","period":"monthly"}""",
+                BudgetPolicyStatus.Active,
+                $"audit-budget-policy-{Guid.NewGuid():N}",
+                "budget-evaluation-team-cost"),
+            lead.ProductUserId,
+            ProductRole.EngineeringLead);
+        using var evaluationRequest = CreateAuthorizedRequest(HttpMethod.Get, "/api/v1/budgets/evaluations", "contoso", leadClaims);
+        using var evaluationResponse = await client.SendAsync(evaluationRequest);
+        evaluationResponse.EnsureSuccessStatusCode();
+        using var evaluationBody = await JsonDocument.ParseAsync(await evaluationResponse.Content.ReadAsStreamAsync());
+        var evaluationItems = evaluationBody.RootElement.GetProperty("items").EnumerateArray().ToArray();
+        var tokenEvaluation = evaluationItems.Single(item => item.GetProperty("budgetPolicyId").GetString() == tokenPolicy.BudgetPolicyId);
+        var costEvaluation = evaluationItems.Single(item => item.GetProperty("budgetPolicyId").GetString() == costPolicy.BudgetPolicyId);
+        var teamCostEvaluation = evaluationItems.Single(item => item.GetProperty("budgetPolicyId").GetString() == teamCostPolicy.BudgetPolicyId);
+        Assert.Equal("threshold_exceeded", tokenEvaluation.GetProperty("status").GetString());
+        Assert.Equal(120m, tokenEvaluation.GetProperty("actualValue").GetDecimal());
+        Assert.Equal("aggregate_only", tokenEvaluation.GetProperty("attribution").GetString());
+        Assert.Equal("threshold_exceeded", costEvaluation.GetProperty("status").GetString());
+        Assert.Equal(3000m, costEvaluation.GetProperty("actualValue").GetDecimal());
+        Assert.Equal("approved_only", costEvaluation.GetProperty("pricingBasisState").GetString());
+        Assert.Equal("unavailable", teamCostEvaluation.GetProperty("status").GetString());
+        Assert.Equal(JsonValueKind.Null, teamCostEvaluation.GetProperty("actualValue").ValueKind);
+        var evaluationJson = evaluationBody.RootElement.ToString();
+        Assert.DoesNotContain("developer", evaluationJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("productUser", evaluationJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("9000", evaluationJson, StringComparison.OrdinalIgnoreCase);
+
+        var budgetAuditEvents = (await store.ListGovernanceAuditEventsAsync(seed.Organization.CustomerOrganizationId))
+            .Where(audit => audit.Action == ProductAuthorizationAction.BudgetManage)
+            .ToArray();
+        Assert.Contains(budgetAuditEvents, audit => audit.EvidenceMetadata.GetValueOrDefault("operation") == "budget_policy_created");
+        Assert.Contains(budgetAuditEvents, audit => audit.EvidenceMetadata.GetValueOrDefault("operation") == "budget_policy_updated");
+    }
+
+    [Fact]
     public async Task PricingReviewRoutesReplayIdempotentApproveAndRejectMutations()
     {
         var store = new InMemoryTenantMetadataStore(new StaticTenantMetadataClock(Now));
@@ -2541,6 +2774,19 @@ public sealed class ProductApiAuthorizationContextTests
                 "provider_sku_name": "gpt-5",
                 "billing_route": "enterprise_contract"
               }
+            }
+            """;
+    }
+
+    private static string CreateBudgetPolicyJson(string thresholdJson = """{"amount":2500,"currency":"USD","period":"monthly"}""")
+    {
+        return $$"""
+            {
+              "scopeKind": "team",
+              "scopeId": "platform-team",
+              "metricKind": "estimated_cost",
+              "thresholdJson": {{thresholdJson}},
+              "status": "active"
             }
             """;
     }
